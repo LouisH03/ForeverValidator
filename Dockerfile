@@ -29,4 +29,4 @@ COPY --from=build /src/build/native/forevervalidator /usr/local/bin/forevervalid
 USER forevervalidator
 
 ENTRYPOINT ["/usr/local/bin/forevervalidator"]
-CMD ["--help"]
+CMD []
