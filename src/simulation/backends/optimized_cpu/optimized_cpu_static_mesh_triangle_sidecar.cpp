@@ -244,11 +244,23 @@ bool OptimizedCpuStaticMeshTriangleSidecar::TryBuild(
                 });
             }
         }
+        bool gridAvailable = false;
         if (HasGridCompatibleHierarchy(cells)) {
-            rebuilt.triangleGrid_.TryBuild(
+            gridAvailable = rebuilt.triangleGrid_.TryBuild(
                     gridEntries,
                     rebuilt.directTrianglePostings_.size(),
                     65536u);
+        }
+        if (!gridAvailable) {
+            std::vector<OptimizedCpuStaticBvh::Entry> bvhEntries;
+            bvhEntries.reserve(gridEntries.size());
+            for (const OptimizedCpuStaticUniformGrid::Entry &entry :
+                 gridEntries) {
+                bvhEntries.push_back({entry.sourceIndex, entry.bounds});
+            }
+            rebuilt.triangleBvh_.TryBuild(
+                    bvhEntries,
+                    rebuilt.directTrianglePostings_.size());
         }
 
         for (std::size_t triangleIndex = 0u;
@@ -314,6 +326,7 @@ void OptimizedCpuStaticMeshTriangleSidecar::Clear(void) noexcept {
     triangles_.clear();
     directTrianglePostings_.clear();
     triangleGrid_.Clear();
+    triangleBvh_.Clear();
 }
 
 bool OptimizedCpuStaticMeshTriangleSidecar::IsFor(

@@ -136,6 +136,8 @@ if(FOREVERVALIDATOR_BUILD_CLI)
 endif()
 
 if(FOREVERVALIDATOR_BUILD_BENCHMARKS)
+    enable_testing()
+
     add_executable(optimized_cpu_benchmark
         tools/optimized_cpu_benchmark.cpp)
     target_include_directories(optimized_cpu_benchmark PRIVATE
@@ -239,4 +241,30 @@ if(FOREVERVALIDATOR_BUILD_BENCHMARKS)
         forevervalidator_core)
     forevervalidator_configure_target(
         optimized_cpu_static_bounds_overlap_differential)
+
+    add_executable(optimized_cpu_static_bvh_differential
+        tools/optimized_cpu_static_bvh_differential.cpp)
+    target_include_directories(
+        optimized_cpu_static_bvh_differential PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(
+        optimized_cpu_static_bvh_differential PRIVATE
+        forevervalidator_core)
+    forevervalidator_configure_target(
+        optimized_cpu_static_bvh_differential)
+
+    add_test(NAME optimized_cpu_sphere_mesh
+        COMMAND optimized_cpu_sphere_mesh_differential)
+    add_test(NAME optimized_cpu_ellipsoid_mesh
+        COMMAND optimized_cpu_ellipsoid_mesh_differential)
+    add_test(NAME optimized_cpu_static_transform_cache
+        COMMAND optimized_cpu_static_transform_cache_differential)
+    add_test(NAME optimized_cpu_static_triangle_sidecar
+        COMMAND optimized_cpu_static_triangle_sidecar_differential)
+    add_test(NAME optimized_cpu_model3_vehicle
+        COMMAND optimized_cpu_model3_vehicle_differential)
+    add_test(NAME optimized_cpu_static_bounds_overlap
+        COMMAND optimized_cpu_static_bounds_overlap_differential)
+    add_test(NAME optimized_cpu_static_bvh
+        COMMAND optimized_cpu_static_bvh_differential)
 endif()

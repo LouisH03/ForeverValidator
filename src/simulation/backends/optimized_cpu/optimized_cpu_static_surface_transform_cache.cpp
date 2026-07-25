@@ -1,7 +1,5 @@
 #include "simulation/backends/optimized_cpu/optimized_cpu_static_surface_transform_cache.h"
 
-#include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <new>
 #include <typeinfo>
@@ -78,19 +76,19 @@ bool IsBoundedMovingTree(const CPlugTree &tree) noexcept {
 
 bool OptimizedCpuStaticSurfaceTransformGroup::
 WholeTreeBoundsOverlapAnySurface(
-        const GmBoxAligned &movingBounds,
-        std::uint64_t *recordTests) const noexcept {
+        const GmBoxAligned &movingBounds) const noexcept {
     if (sourceRecords_ == nullptr || sourceRecordCount_ == 0u) {
         return true;
+    }
+
+    if (surfaceBvh_.IsAvailable()) {
+        return surfaceBvh_.OverlapsAny(movingBounds);
     }
 
     u32 sourceIndex = 0u;
     while (sourceIndex < sourceRecordCount_) {
         const CHmsCollisionManagerSColOctreeCell &record =
                 sourceRecords_[sourceIndex];
-        if (recordTests != nullptr) {
-            ++*recordTests;
-        }
         if (!forevervalidator::simulation::OptimizedCpuStaticBoundsOverlap(
                     movingBounds, record.Bounds())) {
             sourceIndex += record.SubtreeEntryCount();
@@ -127,15 +125,16 @@ BroadPhaseArithmeticIsBoundedFor(
     return true;
 }
 
-bool OptimizedCpuStaticSurfaceTransformGroup::ShouldProbeWholePass(
+bool OptimizedCpuStaticSurfaceTransformGroup::
+ShouldRefreshWholePassPrediction(
         const CPlugTree &movingTree) const noexcept {
-    WholePassPredictorEntry *freeEntry = nullptr;
-    for (WholePassPredictorEntry &entry : wholePassPredictors_) {
+    WholePassPredictionEntry *freeEntry = nullptr;
+    for (WholePassPredictionEntry &entry : wholePassPredictions_) {
         if (entry.movingTree == &movingTree) {
-            if (entry.predictedEmpty || entry.probesUntilReacquire == 0u) {
+            if (entry.predictedEmpty || entry.passesUntilRefresh == 0u) {
                 return true;
             }
-            --entry.probesUntilReacquire;
+            --entry.passesUntilRefresh;
             return false;
         }
         if (entry.movingTree == nullptr && freeEntry == nullptr) {
@@ -149,15 +148,15 @@ bool OptimizedCpuStaticSurfaceTransformGroup::ShouldProbeWholePass(
     return true;
 }
 
-void OptimizedCpuStaticSurfaceTransformGroup::ObserveWholePassProbe(
+void OptimizedCpuStaticSurfaceTransformGroup::ObserveWholePassResult(
         const CPlugTree &movingTree,
         bool empty) const noexcept {
-    for (WholePassPredictorEntry &entry : wholePassPredictors_) {
+    for (WholePassPredictionEntry &entry : wholePassPredictions_) {
         if (entry.movingTree != &movingTree) {
             continue;
         }
         entry.predictedEmpty = empty;
-        entry.probesUntilReacquire = empty ? 0u : 7u;
+        entry.passesUntilRefresh = empty ? 0u : 7u;
         return;
     }
 }
@@ -188,25 +187,6 @@ bool OptimizedCpuStaticSurfaceTransformGroup::TemporalCandidateSpanFor(
                        outer.center.z + outer.halfExtents.z;
     };
 
-    static const bool Instrument =
-            std::getenv("FOREVERVALIDATOR_OPTIMIZED_CPU_TEMPORAL_STATS") !=
-            nullptr;
-    if (Instrument) {
-        ++temporalQueryCount_;
-        u32 sourceIndex = 0u;
-        while (sourceIndex < sourceRecordCount_) {
-            const CHmsCollisionManagerSColOctreeCell &record =
-                    sourceRecords_[sourceIndex];
-            ++temporalAuthoritativeRecordTests_;
-            if (!forevervalidator::simulation::
-                        OptimizedCpuStaticBoundsOverlap(
-                                movingBounds, record.Bounds())) {
-                sourceIndex += record.SubtreeEntryCount();
-                continue;
-            }
-            ++sourceIndex;
-        }
-    }
     TemporalCandidateEntry *entry = nullptr;
     bool entryTagMatches = false;
     if (temporalSlotOrdinal < ordinalTemporalCandidates_.size()) {
@@ -228,11 +208,6 @@ bool OptimizedCpuStaticSurfaceTransformGroup::TemporalCandidateSpanFor(
     }
     if (entryTagMatches &&
         contains(entry->validityBounds, movingBounds)) {
-        if (Instrument) {
-            ++temporalHitCount_;
-            temporalCandidateRecordTests_ +=
-                    entry->candidateRecordIndices.size();
-        }
         result->size = entry->candidateRecordIndices.size();
         result->data = result->size == 0u
                 ? nullptr
@@ -248,30 +223,31 @@ bool OptimizedCpuStaticSurfaceTransformGroup::TemporalCandidateSpanFor(
         entry->validityBounds.halfExtents.z += FatMargin;
         entry->candidateRecordIndices.clear();
 
-        u32 sourceIndex = 0u;
-        while (sourceIndex < sourceRecordCount_) {
-            const CHmsCollisionManagerSColOctreeCell &record =
-                    sourceRecords_[sourceIndex];
-            if (Instrument) {
-                ++temporalBaselineRecordTests_;
+        OptimizedCpuStaticUniformGrid::CandidateSpan acceleratedSpan;
+        if (surfaceBvh_.CandidateSpanFor(
+                    entry->validityBounds, &acceleratedSpan)) {
+            if (acceleratedSpan.size != 0u) {
+                entry->candidateRecordIndices.assign(
+                        acceleratedSpan.data,
+                        acceleratedSpan.data + acceleratedSpan.size);
             }
-            if (!forevervalidator::simulation::
-                        OptimizedCpuStaticBoundsOverlap(
-                                entry->validityBounds,
-                                record.Bounds())) {
-                sourceIndex += record.SubtreeEntryCount();
-                continue;
+        } else {
+            u32 sourceIndex = 0u;
+            while (sourceIndex < sourceRecordCount_) {
+                const CHmsCollisionManagerSColOctreeCell &record =
+                        sourceRecords_[sourceIndex];
+                if (!forevervalidator::simulation::
+                            OptimizedCpuStaticBoundsOverlap(
+                                    entry->validityBounds,
+                                    record.Bounds())) {
+                    sourceIndex += record.SubtreeEntryCount();
+                    continue;
+                }
+                if (record.ContainsSurface()) {
+                    entry->candidateRecordIndices.push_back(sourceIndex);
+                }
+                ++sourceIndex;
             }
-            if (record.ContainsSurface()) {
-                entry->candidateRecordIndices.push_back(sourceIndex);
-            }
-            ++sourceIndex;
-        }
-
-        if (Instrument) {
-            ++temporalRebuildCount_;
-            temporalCandidateRecordTests_ +=
-                    entry->candidateRecordIndices.size();
         }
         result->size = entry->candidateRecordIndices.size();
         result->data = result->size == 0u
@@ -321,33 +297,10 @@ OptimizedCpuStaticSurfaceTransformGroup::TemporalCandidateFallbackFor(
 
 void OptimizedCpuStaticSurfaceTransformGroup::ClearTemporalCandidates(
         void) const noexcept {
-    if (std::getenv("FOREVERVALIDATOR_OPTIMIZED_CPU_TEMPORAL_STATS") !=
-        nullptr) {
-        std::fprintf(
-                stderr,
-                "optimized_cpu_temporal queries=%llu hits=%llu rebuilds=%llu "
-                "authoritative_record_tests=%llu rebuild_record_tests=%llu "
-                "candidate_record_tests=%llu\n",
-                static_cast<unsigned long long>(temporalQueryCount_),
-                static_cast<unsigned long long>(temporalHitCount_),
-                static_cast<unsigned long long>(temporalRebuildCount_),
-                static_cast<unsigned long long>(
-                        temporalAuthoritativeRecordTests_),
-                static_cast<unsigned long long>(
-                        temporalBaselineRecordTests_),
-                static_cast<unsigned long long>(
-                        temporalCandidateRecordTests_));
-    }
     for (TemporalCandidateEntry &entry : ordinalTemporalCandidates_) {
         entry = TemporalCandidateEntry{};
     }
     temporalCandidates_.clear();
-    temporalQueryCount_ = 0u;
-    temporalHitCount_ = 0u;
-    temporalRebuildCount_ = 0u;
-    temporalAuthoritativeRecordTests_ = 0u;
-    temporalBaselineRecordTests_ = 0u;
-    temporalCandidateRecordTests_ = 0u;
 }
 
 OptimizedCpuStaticSurfaceTransformCache::
@@ -385,12 +338,18 @@ bool OptimizedCpuStaticSurfaceTransformCache::TryRebuild(
             }
             cachedGroup.inverses_.resize(records.size());
             cachedGroup.triangleSidecars_.resize(records.size(), nullptr);
+            std::vector<OptimizedCpuStaticBvh::Entry> surfaceEntries;
+            surfaceEntries.reserve(records.size());
             for (std::size_t recordIndex = 0u;
                  recordIndex < records.size();
                  ++recordIndex) {
                 if (!records[recordIndex].ContainsSurface()) {
                     continue;
                 }
+                surfaceEntries.push_back({
+                    static_cast<u32>(recordIndex),
+                    records[recordIndex].Bounds(),
+                });
                 const CHmsCollisionManagerSColOctreeCell::StaticSurface
                         &surface = records[recordIndex].SurfaceData();
                 cachedGroup.inverses_[recordIndex].SetInverse(
@@ -427,6 +386,8 @@ bool OptimizedCpuStaticSurfaceTransformCache::TryRebuild(
                 }
                 cachedGroup.triangleSidecars_[recordIndex] = sidecar;
             }
+            cachedGroup.surfaceBvh_.TryBuild(
+                    surfaceEntries, records.size());
         }
         *this = std::move(rebuilt);
         return true;
@@ -447,9 +408,10 @@ void OptimizedCpuStaticSurfaceTransformCache::Clear(void) noexcept {
         group.staticBroadPhaseArithmeticIsBounded_ = false;
         group.boundedMovingTrees_.fill(nullptr);
         group.boundedMovingTreeCount_ = 0u;
-        group.wholePassPredictors_.fill({});
+        group.wholePassPredictions_.fill({});
         group.inverses_.clear();
         group.triangleSidecars_.clear();
+        group.surfaceBvh_.Clear();
     }
     triangleSidecars_.clear();
     unavailableTriangleSidecarMeshes_.clear();

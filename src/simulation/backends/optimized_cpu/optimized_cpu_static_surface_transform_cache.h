@@ -1,13 +1,14 @@
 #pragma once
 
 #include <array>
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <vector>
 
 #include "engine/physics/collision/hms_collision_manager.h"
+#include "simulation/backends/optimized_cpu/optimized_cpu_static_bvh.h"
 #include "simulation/backends/optimized_cpu/optimized_cpu_static_mesh_triangle_sidecar.h"
 #include "simulation/backends/optimized_cpu/optimized_cpu_static_scene_fingerprint.h"
 
@@ -46,13 +47,13 @@ public:
             const GmBoxAligned &movingBounds,
             TemporalCandidateSpan *result) const noexcept;
     bool WholeTreeBoundsOverlapAnySurface(
-            const GmBoxAligned &movingBounds,
-            std::uint64_t *recordTests = nullptr) const noexcept;
+            const GmBoxAligned &movingBounds) const noexcept;
     bool BroadPhaseArithmeticIsBoundedFor(
             const CPlugTree &movingTree,
             const GmIso4 &movingIso) const noexcept;
-    bool ShouldProbeWholePass(const CPlugTree &movingTree) const noexcept;
-    void ObserveWholePassProbe(
+    bool ShouldRefreshWholePassPrediction(
+            const CPlugTree &movingTree) const noexcept;
+    void ObserveWholePassResult(
             const CPlugTree &movingTree,
             bool empty) const noexcept;
     void ClearTemporalCandidates(void) const noexcept;
@@ -76,24 +77,20 @@ private:
     std::vector<GmIso4> inverses_;
     std::vector<const OptimizedCpuStaticMeshTriangleSidecar *>
             triangleSidecars_;
+    OptimizedCpuStaticBvh surfaceBvh_;
     bool staticBroadPhaseArithmeticIsBounded_ = false;
     mutable std::array<const CPlugTree *, 8u> boundedMovingTrees_{};
     mutable std::size_t boundedMovingTreeCount_ = 0u;
-    struct WholePassPredictorEntry {
+    struct WholePassPredictionEntry {
         const CPlugTree *movingTree = nullptr;
-        std::uint8_t probesUntilReacquire = 0u;
+        std::uint8_t passesUntilRefresh = 0u;
         bool predictedEmpty = true;
     };
-    mutable std::array<WholePassPredictorEntry, 8u> wholePassPredictors_{};
+    mutable std::array<WholePassPredictionEntry, 8u>
+            wholePassPredictions_{};
     mutable std::array<TemporalCandidateEntry, 64u>
             ordinalTemporalCandidates_{};
     mutable std::vector<TemporalCandidateEntry> temporalCandidates_;
-    mutable std::uint64_t temporalQueryCount_ = 0u;
-    mutable std::uint64_t temporalHitCount_ = 0u;
-    mutable std::uint64_t temporalRebuildCount_ = 0u;
-    mutable std::uint64_t temporalAuthoritativeRecordTests_ = 0u;
-    mutable std::uint64_t temporalBaselineRecordTests_ = 0u;
-    mutable std::uint64_t temporalCandidateRecordTests_ = 0u;
 };
 
 class OptimizedCpuStaticSurfaceTransformCache {

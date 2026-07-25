@@ -215,10 +215,11 @@ so it can be reused for replays from different United environments. Every
 public operation returns a typed `Result<T>`.
 
 `ValidationOptions::backend` selects the backend for one library call. The
-optimized CPU backend currently forwards to the reference implementation while
-remaining behind an independent implementation boundary. `ValidateReplayBatch`
-executes an ordered list of independent replay requests and preserves an
-individual report or error for every item.
+optimized CPU backend uses a dedicated deterministic execution path with cached
+static-scene transforms, precomputed mesh data, hierarchical broad-phase
+queries, native binary32 arithmetic, and specialized vehicle physics.
+`ValidateReplayBatch` executes an ordered list of independent replay requests
+and preserves an individual report or error for every item.
 
 ## Experimental physics sandbox
 
@@ -251,12 +252,11 @@ include/forevervalidator  public API
 src/app/cli               command-line frontend
 src/validation            validation and JSON output
 src/simulation            controls and deterministic simulation runtime
-src/engine                reconstructed game physics and scene code
+src/engine                game physics and scene runtime
 src/format                replay, GBX, pack, tuning, and solid decoding
 src/platform/native       native filesystem and pack-directory integration
 ```
 
 ## Acknowledgements
 
-Reverse engineering, implementation, and repetitive structure mapping were
-accelerated with LLM assistance.
+Development was accelerated with LLM assistance.

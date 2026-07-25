@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "engine/physics/geometry/gm_surface.h"
+#include "simulation/backends/optimized_cpu/optimized_cpu_static_bvh.h"
 #include "simulation/backends/optimized_cpu/optimized_cpu_static_uniform_grid.h"
 
 struct OptimizedCpuStaticMeshTriangleSidecarTestAccess;
@@ -48,7 +49,8 @@ public:
             const GmBoxAligned &query,
             OptimizedCpuStaticUniformGrid::CandidateSpan *result) const
             noexcept {
-        return triangleGrid_.DirectCandidateSpan(query, result);
+        return triangleGrid_.DirectCandidateSpan(query, result) ||
+               triangleBvh_.CandidateSpanFor(query, result);
     }
 
     const OptimizedCpuStaticMeshDirectTrianglePosting &DirectTriangleAt(
@@ -74,4 +76,5 @@ private:
     std::vector<OptimizedCpuStaticMeshDirectTrianglePosting>
             directTrianglePostings_;
     OptimizedCpuStaticUniformGrid triangleGrid_;
+    OptimizedCpuStaticBvh triangleBvh_;
 };

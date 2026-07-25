@@ -1,4 +1,6 @@
 #include "simulation/runtime/replay_simulation_session.h"
+
+#include <algorithm>
 #include <new>
 #include <utility>
 
@@ -114,6 +116,22 @@ ReplaySimulationTimelineResult ReplaySimulationSession::SimulateTimeline(
         result.result =
                 ReplaySimulationRunResult::DeterministicExecutionUnavailable;
         return result;
+    }
+    const std::size_t observationCount = static_cast<std::size_t>(
+            std::count_if(
+                    controlTicks.begin(),
+                    controlTicks.end(),
+                    [](const ReplayControlTick &tick) {
+                        return tick.observe;
+                    }));
+    if (observationCount != 0u) {
+        try {
+            result.observations.reserve(observationCount);
+        } catch (const std::bad_alloc &) {
+            result.result =
+                    ReplaySimulationRunResult::ObservationAllocationFailed;
+            return result;
+        }
     }
     impl->ResetRuntime();
 

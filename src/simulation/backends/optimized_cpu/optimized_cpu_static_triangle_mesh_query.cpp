@@ -218,12 +218,12 @@ void TransformStaticTriangleMeshCollisionsToWorldOptimizedCpu(
         u32 firstNew,
         const GmIso4 &meshIso) {
     const u32 count = collisionBuffer.GetCurrentCount();
+    const GmMat3 meshRotation = meshIso.RotationMatrix();
     for (u32 collisionIndex = firstNew;
          collisionIndex < count;
          ++collisionIndex) {
         GmCollision *collision =
                 &collisionBuffer.GetCollision(collisionIndex);
-        const GmMat3 meshRotation = meshIso.RotationMatrix();
         collision->impulseNormal.Mult(meshRotation);
         collision->separation.Mult(meshRotation);
         collision->contactPoint.Mult(meshIso);
@@ -285,35 +285,51 @@ int RunStaticTriangleSphereMeshQuery(
 
     const GmVec3 sphereCenterMesh = sphereToMesh.TranslationForGmSurf();
     int hit = 0;
-    const std::vector<GmMeshOctreeCell> &cells =
-            GmSurfMeshStaticInverseOptimizedCpuAccess::OctreeCells(*mesh);
-    const u32 cellCount = static_cast<u32>(cells.size());
-
-    for (u32 cellIndex = 0u; cellIndex < cellCount;) {
-        const GmMeshOctreeCell *cell = &cells[cellIndex];
-        if (!StaticTriangleOptimizedCpuBoundsIntersect(
-                    sphereBox, cell->Bounds())) {
-            cellIndex += cell->SubtreeEntryCount();
-            continue;
+    auto collideTriangle = [&](u32 triangleIndex) {
+        const OptimizedCpuStaticMeshTriangleData &triangle =
+                triangles.TriangleAt(triangleIndex);
+        SStaticTriangleSphereMeshCollideOptimizedCpu triangleCollide = {
+            collisionBuffer,
+            sphereCenterMesh,
+            radius,
+            sphere->LocalMaterial(),
+            triangle.normal,
+            triangle.material,
+        };
+        if (triangleCollide.CollideTriangle(triangle)) {
+            hit = 1;
         }
+    };
 
-        if (cell->ContainsTriangle()) {
-            const OptimizedCpuStaticMeshTriangleData &triangle =
-                    triangles.TriangleAt(cell->TriangleIndex());
-            SStaticTriangleSphereMeshCollideOptimizedCpu triangleCollide = {
-                collisionBuffer,
-                sphereCenterMesh,
-                radius,
-                sphere->LocalMaterial(),
-                triangle.normal,
-                triangle.material,
-            };
-            if (triangleCollide.CollideTriangle(triangle)) {
-                hit = 1;
+    OptimizedCpuStaticUniformGrid::CandidateSpan candidateSpan;
+    if (triangles.DirectCandidateTriangleSpan(sphereBox, &candidateSpan)) {
+        for (std::size_t candidateIndex = 0u;
+             candidateIndex < candidateSpan.size;
+             ++candidateIndex) {
+            const auto &posting = triangles.DirectTriangleAt(
+                    candidateSpan.data[candidateIndex]);
+            if (!StaticTriangleOptimizedCpuBoundsIntersect(
+                        sphereBox, posting.bounds)) {
+                continue;
             }
+            collideTriangle(posting.triangleIndex);
         }
-
-        ++cellIndex;
+    } else {
+        const std::vector<GmMeshOctreeCell> &cells =
+                GmSurfMeshStaticInverseOptimizedCpuAccess::OctreeCells(*mesh);
+        const u32 cellCount = static_cast<u32>(cells.size());
+        for (u32 cellIndex = 0u; cellIndex < cellCount;) {
+            const GmMeshOctreeCell *cell = &cells[cellIndex];
+            if (!StaticTriangleOptimizedCpuBoundsIntersect(
+                        sphereBox, cell->Bounds())) {
+                cellIndex += cell->SubtreeEntryCount();
+                continue;
+            }
+            if (cell->ContainsTriangle()) {
+                collideTriangle(cell->TriangleIndex());
+            }
+            ++cellIndex;
+        }
     }
 
     if (hit) {

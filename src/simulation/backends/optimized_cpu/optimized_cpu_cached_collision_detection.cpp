@@ -11,9 +11,6 @@
 #include "simulation/backends/optimized_cpu/optimized_cpu_native_binary32_collision.h"
 #include "simulation/backends/optimized_cpu/optimized_cpu_static_bounds_overlap.h"
 
-#include <cstdio>
-#include <cstdlib>
-
 #if defined(__i386__) || defined(__x86_64__)
 #include <xmmintrin.h>
 #endif
@@ -22,36 +19,10 @@ using forevervalidator::simulation::OptimizedCpuStaticBoundsOverlap;
 
 namespace {
 
-struct WholePassProbeStats {
-    std::uint64_t passes = 0u;
-    std::uint64_t probes = 0u;
-    std::uint64_t empty = 0u;
-    std::uint64_t recordTests = 0u;
-
-    ~WholePassProbeStats() {
-        if (std::getenv("FOREVERVALIDATOR_OPTIMIZED_CPU_WHOLE_PASS_STATS") !=
-            nullptr) {
-            std::fprintf(stderr,
-                         "optimized_cpu_whole_pass passes=%llu probes=%llu empty=%llu "
-                         "record_tests=%llu\n",
-                         static_cast<unsigned long long>(passes),
-                         static_cast<unsigned long long>(probes),
-                         static_cast<unsigned long long>(empty),
-                         static_cast<unsigned long long>(recordTests));
-        }
-    }
-};
-
-WholePassProbeStats &WholePassStats() {
-    static WholePassProbeStats stats;
-    return stats;
-}
-
 bool TrySkipWholeTreeBoundsEmpty(
         const GmIso4 &movingIso,
         const CPlugTree &movingTree,
-        const OptimizedCpuStaticSurfaceTransformGroup &transforms,
-        std::uint64_t *recordTests) {
+        const OptimizedCpuStaticSurfaceTransformGroup &transforms) {
 #if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
     const unsigned int savedMxcsr = _mm_getcsr();
     constexpr unsigned int MxcsrControlMask = 0xffc0u;
@@ -66,13 +37,12 @@ bool TrySkipWholeTreeBoundsEmpty(
     GmBoxAligned movingBounds;
     movingTree.GetTransformedCollisionBox(movingIso, movingBounds);
     const bool empty = !transforms.WholeTreeBoundsOverlapAnySurface(
-            movingBounds, recordTests);
+            movingBounds);
     return empty;
 #else
     (void)movingIso;
     (void)movingTree;
     (void)transforms;
-    (void)recordTests;
     return false;
 #endif
 }
@@ -384,32 +354,15 @@ DetectCollisionsCorpusOptimizedCpuNativeBinary32Cached(
                         *corpus->LocationIso(),
                         *corpus->CollisionTree());
             } else {
-                static const bool InstrumentWholePass =
-                        std::getenv(
-                                "FOREVERVALIDATOR_OPTIMIZED_CPU_WHOLE_PASS_STATS") !=
-                        nullptr;
-                WholePassProbeStats *stats = InstrumentWholePass
-                        ? &WholePassStats()
-                        : nullptr;
-                if (stats != nullptr) {
-                    ++stats->passes;
-                }
                 bool empty = false;
-                if (groupTransforms->ShouldProbeWholePass(
+                if (groupTransforms->ShouldRefreshWholePassPrediction(
                             *corpus->CollisionTree())) {
-                    if (stats != nullptr) {
-                        ++stats->probes;
-                    }
                     empty = TrySkipWholeTreeBoundsEmpty(
                             *corpus->LocationIso(),
                             *corpus->CollisionTree(),
-                            *groupTransforms,
-                            stats == nullptr ? nullptr : &stats->recordTests);
-                    groupTransforms->ObserveWholePassProbe(
+                            *groupTransforms);
+                    groupTransforms->ObserveWholePassResult(
                             *corpus->CollisionTree(), empty);
-                }
-                if (stats != nullptr) {
-                    stats->empty += empty;
                 }
                 if (empty) {
                     continue;
