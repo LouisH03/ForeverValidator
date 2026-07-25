@@ -10,6 +10,7 @@ namespace forevervalidator::simulation {
 
 bool IsSimulationBackendSupported(SimulationBackend backend) noexcept;
 SimulationBackend ResolveLeafBackend(SimulationBackend backend) noexcept;
+bool UsesOptimizedCpuFoundation(SimulationBackend backend) noexcept;
 void ExecuteBatched(std::size_t count,
                     const std::function<void(std::size_t)> &operation);
 

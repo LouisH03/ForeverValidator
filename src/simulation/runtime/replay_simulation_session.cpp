@@ -20,6 +20,7 @@
 #include "format/archive/archive_class_ids.h"
 #include "simulation/replay/replay_map_scene.h"
 #include "simulation/backends/optimized_cpu/optimized_cpu_binary32_math.h"
+#include "simulation/backends/speculative_ticking/speculative_ticking_backend.h"
 #include "simulation/runtime/replay_environment.h"
 #include "simulation/runtime/replay_physics_world.h"
 #include "simulation/runtime/replay_simulation_runtime.h"
@@ -975,6 +976,33 @@ ReplaySimulationTimelineResult ReplaySimulationSession::SimulateTimeline(
                 }
             }
         }
+    } else if (impl->backend ==
+               forevervalidator::SimulationBackend::SpeculativeTicking) {
+        forevervalidator::simulation::PrepareSpeculativeTicking(
+                *impl->instance.runtime);
+        forevervalidator::simulation::CertifySpeculativeTickingForAdvance(
+                *impl->instance.runtime);
+        for (const ReplayControlTick &tick : controlTicks) {
+            const ReplaySimulationStepExecution execution =
+                    forevervalidator::simulation::StepSpeculativeTicking(
+                            *impl->instance.runtime, tick);
+            if (execution.result != ReplaySimulationRunResult::Success) {
+                result.result = execution.result;
+                return result;
+            }
+            result.executedRespawnCount += execution.respawnExecutedCount;
+
+            if (tick.observe) {
+                try {
+                    result.observations.push_back(
+                            ObserveReplayTrajectory(execution, tick));
+                } catch (const std::bad_alloc &) {
+                    result.result =
+                            ReplaySimulationRunResult::ObservationAllocationFailed;
+                    return result;
+                }
+            }
+        }
     } else {
         for (const ReplayControlTick &tick : controlTicks) {
             const ReplaySimulationStepExecution execution =
@@ -1030,9 +1058,15 @@ ReplaySimulationRunResult ReplaySimulationSession::StartIncremental(
             startLocation,
             firstTick,
             validationSeed);
-    if (result == ReplaySimulationRunResult::Success &&
-        impl->backend == forevervalidator::SimulationBackend::OptimizedCpu) {
-        impl->instance.runtime->PrepareOptimizedCpuStaticTransforms();
+    if (result == ReplaySimulationRunResult::Success) {
+        if (impl->backend ==
+            forevervalidator::SimulationBackend::SpeculativeTicking) {
+            forevervalidator::simulation::PrepareSpeculativeTicking(
+                    *impl->instance.runtime);
+        } else if (impl->backend ==
+                   forevervalidator::SimulationBackend::OptimizedCpu) {
+            impl->instance.runtime->PrepareOptimizedCpuStaticTransforms();
+        }
     }
     return result;
 }
@@ -1078,6 +1112,22 @@ ReplaySimulationTimelineResult ReplaySimulationSession::AdvanceIncremental(
                 impl->instance.incrementalRespawnCount +=
                         execution.respawnExecutedCount;
             }
+        }
+    } else if (impl->backend ==
+               forevervalidator::SimulationBackend::SpeculativeTicking) {
+        forevervalidator::simulation::CertifySpeculativeTickingForAdvance(
+                *impl->instance.runtime);
+        for (std::size_t index = begin; index < begin + count; ++index) {
+            const ReplayControlTick &tick = controlTicks[index];
+            const ReplaySimulationStepExecution execution =
+                    forevervalidator::simulation::StepSpeculativeTicking(
+                            *impl->instance.runtime, tick);
+            if (execution.result != ReplaySimulationRunResult::Success) {
+                result.result = execution.result;
+                return result;
+            }
+            impl->instance.incrementalRespawnCount +=
+                    execution.respawnExecutedCount;
         }
     } else {
         for (std::size_t index = begin; index < begin + count; ++index) {

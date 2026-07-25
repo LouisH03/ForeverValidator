@@ -12,6 +12,8 @@
 
 #include <forevervalidator/result.h>
 
+#define FOREVERVALIDATOR_HAS_SPECULATIVE_TICKING 1
+
 namespace forevervalidator {
 
 namespace detail {
@@ -32,6 +34,7 @@ enum class SimulationBackend : std::uint8_t {
     Reference,
     OptimizedCpu,
     Batched,
+    SpeculativeTicking,
 };
 
 struct ValidationOptions {

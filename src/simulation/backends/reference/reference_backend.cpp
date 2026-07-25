@@ -6,6 +6,7 @@ bool IsSimulationBackendSupported(SimulationBackend backend) noexcept {
     switch (backend) {
     case SimulationBackend::Reference:
     case SimulationBackend::OptimizedCpu:
+    case SimulationBackend::SpeculativeTicking:
     case SimulationBackend::Batched:
         return true;
     }

@@ -142,7 +142,8 @@ void ReplaySimulationRuntime::PrepareOptimizedCpuStaticTransforms(
         void) noexcept {
     State &state = *state_;
     state.optimizedCpuStaticTransforms.reset();
-    if (state.backend != forevervalidator::SimulationBackend::OptimizedCpu ||
+    if (!forevervalidator::simulation::UsesOptimizedCpuFoundation(
+                state.backend) ||
         state.definition == nullptr || state.phase != Phase::Idle) {
         return;
     }
@@ -424,7 +425,8 @@ ReplaySimulationRuntime::
                 const CHmsCollisionManagerSZone &expectedPersistentZone)
                 const noexcept {
     State &state = *state_;
-    if (state.backend != forevervalidator::SimulationBackend::OptimizedCpu ||
+    if (!forevervalidator::simulation::UsesOptimizedCpuFoundation(
+                state.backend) ||
         state.phase != Phase::Idle ||
         state.optimizedCpuStaticTransforms == nullptr ||
         &state.world.CollisionZone() != &expectedPersistentZone ||

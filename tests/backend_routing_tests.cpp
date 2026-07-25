@@ -6,7 +6,18 @@
 
 int main() {
     using forevervalidator::SimulationBackend;
+    using forevervalidator::simulation::IsSimulationBackendSupported;
     using forevervalidator::simulation::ResolveLeafBackend;
+    using forevervalidator::simulation::UsesOptimizedCpuFoundation;
+
+    static_assert(static_cast<std::uint8_t>(SimulationBackend::Reference) ==
+                  0u);
+    static_assert(static_cast<std::uint8_t>(SimulationBackend::OptimizedCpu) ==
+                  1u);
+    static_assert(static_cast<std::uint8_t>(SimulationBackend::Batched) ==
+                  2u);
+    static_assert(static_cast<std::uint8_t>(
+                          SimulationBackend::SpeculativeTicking) == 3u);
 
     if (ResolveLeafBackend(SimulationBackend::Reference) !=
         SimulationBackend::Reference) {
@@ -16,6 +27,24 @@ int main() {
     if (ResolveLeafBackend(SimulationBackend::OptimizedCpu) !=
         SimulationBackend::OptimizedCpu) {
         std::cerr << "OptimizedCpu silently resolved to Reference\n";
+        return 1;
+    }
+    if (ResolveLeafBackend(SimulationBackend::SpeculativeTicking) !=
+        SimulationBackend::SpeculativeTicking) {
+        std::cerr << "SpeculativeTicking silently resolved to another backend\n";
+        return 1;
+    }
+    if (!IsSimulationBackendSupported(
+                SimulationBackend::SpeculativeTicking)) {
+        std::cerr << "SpeculativeTicking was not registered as supported\n";
+        return 1;
+    }
+    if (!UsesOptimizedCpuFoundation(SimulationBackend::OptimizedCpu) ||
+        !UsesOptimizedCpuFoundation(
+                SimulationBackend::SpeculativeTicking) ||
+        UsesOptimizedCpuFoundation(SimulationBackend::Reference) ||
+        UsesOptimizedCpuFoundation(SimulationBackend::Batched)) {
+        std::cerr << "optimized CPU foundation routing is incorrect\n";
         return 1;
     }
     return 0;

@@ -114,7 +114,7 @@ void PrintUsage(const char *program) {
                  "usage:\n"
                  "  %s --pak-dir DIR [--backend BACKEND] [--batch-size N] REPLAY [--out PATH]\n"
                  "  %s --pak-dir DIR [--backend BACKEND] [--batch-size N] --out-dir DIR REPLAY_OR_DIRECTORY [REPLAY_OR_DIRECTORY ...]\n"
-                 "  BACKEND: reference, optimized-cpu, batched; N defaults to 10\n",
+                 "  BACKEND: reference, optimized-cpu, speculative-ticking, batched; N defaults to 10\n",
                  program,
                  program);
 }
@@ -224,6 +224,9 @@ std::optional<forevervalidator::SimulationBackend> ParseBackend(
     }
     if (std::strcmp(value, "optimized-cpu") == 0) {
         return forevervalidator::SimulationBackend::OptimizedCpu;
+    }
+    if (std::strcmp(value, "speculative-ticking") == 0) {
+        return forevervalidator::SimulationBackend::SpeculativeTicking;
     }
     if (std::strcmp(value, "batched") == 0) {
         return forevervalidator::SimulationBackend::Batched;
