@@ -1,10 +1,11 @@
 #pragma once
 
+#include <cstdint>
 #include <vector>
 
 #include "engine/core/cmw_nod.h"
 #include "engine/core/mw_id.h"
-struct OptimizedCpuModel3VehicleForceAccess;
+struct OptimizedCpuVehicleForceAccess;
 
 class CFunc : public CMwNod {
 public:
@@ -33,12 +34,16 @@ public:
     virtual const CMwId *MwGetId(void) const;
     unsigned long KeyCount(void) const;
     float XAt(unsigned long index) const;
+    std::uint64_t StorageRevision(void) const noexcept;
 
 protected:
-    friend struct OptimizedCpuModel3VehicleForceAccess;
+    friend struct OptimizedCpuVehicleForceAccess;
+
+    void MarkStorageChanged(void) noexcept;
 
     std::vector<float> keyPositions;
     CMwId id;
+    std::uint64_t storageRevision_ = 0u;
 };
 
 class CFuncKeysReal : public CFuncKeys {
@@ -75,7 +80,7 @@ public:
     void SetKeys(std::vector<Key> keys, ERealInterp interpolation);
 
 private:
-    friend struct OptimizedCpuModel3VehicleForceAccess;
+    friend struct OptimizedCpuVehicleForceAccess;
 
     std::vector<float> values;
     ERealInterp interpolationMode = Linear;

@@ -6,7 +6,7 @@
 #include "engine/physics/dynamics/hms_corpus.h"
 #include "engine/physics/dynamics/hms_dyna.h"
 #include "engine/physics/world/hms_zone.h"
-#include "simulation/backends/optimized_cpu/optimized_cpu_model3_vehicle_forces.h"
+#include "simulation/backends/optimized_cpu/optimized_cpu_vehicle_forces.h"
 
 namespace {
 
@@ -32,15 +32,15 @@ u32 ComputeNativeBinary32StepSubstepCount(
 
 void CHmsZoneDynamic::PhysicsStep2OptimizedCpuNativeBinary32(
         forevervalidator::simulation::
-                OptimizedCpuModel3VehicleForceContext &model3Context) {
+                OptimizedCpuVehicleForceContext &vehicleForceContext) {
     float dt = SecondsFromMwTime(
             CMwCmdBufferCore::Current()->Timer().GetSchemePeriod());
     u32 corpusCount = static_cast<u32>(dynamicCorpuses_.size());
     for (u32 corpusIndex = 0; corpusIndex < corpusCount; corpusIndex++) {
         CHmsCorpus *corpus = dynamicCorpuses_[corpusIndex];
         if (!corpus->IsExcludedFromInitialForcePass()) {
-            ComputeCorpusForcesOptimizedCpuModel3(
-                    corpus, dt, model3Context);
+            ComputeCorpusForcesOptimizedCpuVehicle(
+                    corpus, dt, vehicleForceContext);
             corpus->Dynamics()->DoPreCollisionDynamic(dt);
         }
     }
@@ -102,8 +102,8 @@ void CHmsZoneDynamic::PhysicsStep2OptimizedCpuNativeBinary32(
                 for (u32 remainingSplitCount = substeps - 1;
                      remainingSplitCount != 0;
                      remainingSplitCount--) {
-                    ComputeCorpusForcesOptimizedCpuModel3(
-                            corpus, splitDt, model3Context);
+                    ComputeCorpusForcesOptimizedCpuVehicle(
+                            corpus, splitDt, vehicleForceContext);
                     dyna->DoPreCollisionDynamic(splitDt);
                     collisionBuffer_.Clear();
                     collisionManagerZone->
@@ -115,8 +115,8 @@ void CHmsZoneDynamic::PhysicsStep2OptimizedCpuNativeBinary32(
                 }
             }
 
-            ComputeCorpusForcesOptimizedCpuModel3(
-                    corpus, remainingDt, model3Context);
+            ComputeCorpusForcesOptimizedCpuVehicle(
+                    corpus, remainingDt, vehicleForceContext);
             dyna->DoPreCollisionDynamic(remainingDt);
             collisionBuffer_.Clear();
             collisionManagerZone->

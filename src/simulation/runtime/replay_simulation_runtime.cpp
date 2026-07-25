@@ -1,6 +1,6 @@
 #include "simulation/runtime/replay_simulation_runtime.h"
 
-#include "simulation/backends/optimized_cpu/optimized_cpu_model3_vehicle_forces.h"
+#include "simulation/backends/optimized_cpu/optimized_cpu_vehicle_forces.h"
 #include <new>
 #include <utility>
 
@@ -75,8 +75,8 @@ struct ReplaySimulationRuntime::State {
     bool firstStep = true;
     bool stuntsEnabled = false;
     Phase phase = Phase::Detached;
-    forevervalidator::simulation::OptimizedCpuModel3VehicleForceContext
-            optimizedCpuModel3Forces;
+    forevervalidator::simulation::OptimizedCpuVehicleForceContext
+            optimizedCpuVehicleForces;
     std::unique_ptr<OptimizedCpuStaticSurfaceTransformCache>
             optimizedCpuStaticTransforms;
 };
@@ -95,7 +95,7 @@ ReplaySimulationRunResult ReplaySimulationRuntime::Start(
         const ReplayControlTick &firstTick,
         std::uint32_t validationSeed) {
     State &state = *state_;
-    state.optimizedCpuModel3Forces.Reset();
+    state.optimizedCpuVehicleForces.Reset();
     state.definition = &definition;
     const ReplayMapSceneResult sceneResult = state.world.ConnectMapScene(
             mapScene, &state.vehicle.Car(), state.race);
@@ -311,7 +311,7 @@ ReplaySimulationRuntime::StepOptimizedCpuNativeBinary32(
         }
     }
 
-    state.optimizedCpuModel3Forces.BeginTick(
+    state.optimizedCpuVehicleForces.BeginTick(
             car,
             forevervalidator::simulation::
                     OptimizedCpuBinary32MathPath::X86Sse2,
@@ -321,10 +321,10 @@ ReplaySimulationRuntime::StepOptimizedCpuNativeBinary32(
                 state.world.CollisionZone())) {
         state.world.StepOptimizedCpuNativeBinary32Cached(
                 *state.optimizedCpuStaticTransforms,
-                state.optimizedCpuModel3Forces);
+                state.optimizedCpuVehicleForces);
     } else {
         state.world.StepOptimizedCpuNativeBinary32(
-                state.optimizedCpuModel3Forces);
+                state.optimizedCpuVehicleForces);
     }
     execution.simulatedFrame = state.body.CaptureCurrentFrame();
     execution.writeFrame = state.body.CaptureWriteState();
@@ -405,7 +405,6 @@ void ReplaySimulationRuntime::RestoreRuntimeClone(
     state_->world.RestoreRuntimeClone(clone.world);
     state_->body.RestoreRuntimeClone(std::move(clone.body));
     state_->vehicle.RestoreRuntimeClone(clone.vehicle);
-    state_->optimizedCpuModel3Forces.Reset();
     if (state_->optimizedCpuStaticTransforms != nullptr) {
         state_->optimizedCpuStaticTransforms->ClearTemporalCandidates();
     }

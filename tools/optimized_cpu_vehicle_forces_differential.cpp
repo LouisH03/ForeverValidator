@@ -15,17 +15,21 @@
 #include "engine/core/binary32_math.h"
 #include "engine/core/func_keys_real.h"
 #include "engine/scene/scene_vehicle_car.h"
-#include "simulation/backends/optimized_cpu/optimized_cpu_model3_vehicle_forces.h"
+#include "simulation/backends/optimized_cpu/optimized_cpu_compiled_tuning_curve.h"
+#include "simulation/backends/optimized_cpu/optimized_cpu_vehicle_forces.h"
 #include "simulation/runtime/replay_deterministic_execution.h"
 
 namespace {
 
 using forevervalidator::simulation::OptimizedCpuBinary32MathPath;
-using forevervalidator::simulation::OptimizedCpuEvaluateModel3CurveForDifferential;
-using forevervalidator::simulation::OptimizedCpuModel3VehicleForceContext;
+using forevervalidator::simulation::OptimizedCpuEvaluateVehicleCurveForDifferential;
+using forevervalidator::simulation::OptimizedCpuVehicleForceContext;
 using forevervalidator::simulation::SelectOptimizedCpuBinary32MathPathForActiveExecution;
 
 std::size_t completedCurveCases = 0u;
+std::size_t completedCompiledCurveCases = 0u;
+std::size_t completedCompiledFallbackCases = 0u;
+std::size_t completedInvalidationCases = 0u;
 std::size_t completedRoutingCases = 0u;
 std::size_t completedFenvCases = 0u;
 
@@ -42,7 +46,7 @@ float FloatFromBits(std::uint32_t bits) noexcept {
 }
 
 bool Fail(const std::string &message) {
-    std::fprintf(stderr, "model3_vehicle_differential: %s\n", message.c_str());
+    std::fprintf(stderr, "vehicle_forces_differential: %s\n", message.c_str());
     return false;
 }
 
@@ -74,8 +78,10 @@ bool RunOneCurveCase(
         OptimizedCpuBinary32MathPath mathPath) {
     CFuncKeysReal reference;
     CFuncKeysReal optimized;
+    CFuncKeysReal compiled;
     reference.SetKeys(keys, interpolation);
     optimized.SetKeys(keys, interpolation);
+    compiled.SetKeys(keys, interpolation);
 
     const int roundingBefore = std::fegetround();
 #if defined(__i386__) || defined(__x86_64__)
@@ -86,13 +92,60 @@ bool RunOneCurveCase(
             input,
             convertSpeedToKmh,
             forceConstantInterpolation);
-    const float optimizedValue = OptimizedCpuEvaluateModel3CurveForDifferential(
+    const float optimizedValue = OptimizedCpuEvaluateVehicleCurveForDifferential(
             optimized,
             input,
             convertSpeedToKmh,
             forceConstantInterpolation,
             mathPath);
+    if (forceConstantInterpolation) {
+        compiled.SetInterpolation(CFuncKeysReal::Constant);
+    }
+    forevervalidator::simulation::OptimizedCpuCompiledTuningCurve
+            compiledSidecar;
+    const bool compiledAvailable = compiledSidecar.TryBuild(compiled);
+#if defined(__i386__) || defined(__x86_64__)
+    const unsigned int statusControl = _mm_getcsr() & 0xffc0u;
+    _mm_setcsr(statusControl);
+    const float statusReferenceValue = EvaluateReference(
+            reference,
+            input,
+            convertSpeedToKmh,
+            forceConstantInterpolation);
+    const unsigned int referenceStatus = _mm_getcsr() & 0x3fu;
+    _mm_setcsr(statusControl);
+#endif
+    const float compiledValue = !compiledAvailable
+            ? referenceValue
+            : (convertSpeedToKmh
+                       ? compiledSidecar.EvaluateSpeed(input)
+                       : compiledSidecar.Evaluate(input));
+#if defined(__i386__) || defined(__x86_64__)
+    const unsigned int compiledStatus = _mm_getcsr() & 0x3fu;
+    _mm_setcsr(statusControl | referenceStatus);
+    if (compiledAvailable &&
+        (FloatBits(statusReferenceValue) != FloatBits(referenceValue) ||
+         compiledStatus != referenceStatus)) {
+        char diagnostic[256];
+        std::snprintf(
+                diagnostic,
+                sizeof(diagnostic),
+                "%s status input=%08x speed=%d constant=%d ref=%02x opt=%02x",
+                name,
+                FloatBits(input),
+                convertSpeedToKmh ? 1 : 0,
+                forceConstantInterpolation ? 1 : 0,
+                referenceStatus,
+                compiledStatus);
+        return Fail(diagnostic);
+    }
+#endif
     ++completedCurveCases;
+    if (compiledAvailable) {
+        ++completedCompiledCurveCases;
+    } else {
+        ++completedCompiledFallbackCases;
+    }
 
     if (FloatBits(referenceValue) != FloatBits(optimizedValue)) {
         char diagnostic[256];
@@ -107,6 +160,21 @@ bool RunOneCurveCase(
                 static_cast<unsigned>(mathPath),
                 FloatBits(referenceValue),
                 FloatBits(optimizedValue));
+        return Fail(diagnostic);
+    }
+    if (compiledAvailable &&
+        FloatBits(referenceValue) != FloatBits(compiledValue)) {
+        char diagnostic[256];
+        std::snprintf(
+                diagnostic,
+                sizeof(diagnostic),
+                "%s compiled input=%08x speed=%d constant=%d ref=%08x opt=%08x",
+                name,
+                FloatBits(input),
+                convertSpeedToKmh ? 1 : 0,
+                forceConstantInterpolation ? 1 : 0,
+                FloatBits(referenceValue),
+                FloatBits(compiledValue));
         return Fail(diagnostic);
     }
     if (reference.Interpolation() != optimized.Interpolation()) {
@@ -139,6 +207,11 @@ bool RunCurveCases(OptimizedCpuBinary32MathPath selectedPath) {
                     {-std::numeric_limits<float>::infinity(), -1.0f},
                     {0.0f, 2.0f},
                     {std::numeric_limits<float>::infinity(), 3.0f},
+            },
+            {
+                    {-std::numeric_limits<float>::max(), -1.0f},
+                    {0.0f, 2.0f},
+                    {std::numeric_limits<float>::max(), 3.0f},
             },
     };
 
@@ -216,6 +289,68 @@ bool RunCurveCases(OptimizedCpuBinary32MathPath selectedPath) {
     return true;
 }
 
+bool RunCompiledCurveInvalidationCases() {
+    CFuncKeysReal curve;
+    curve.SetKeys(
+            {{0.0f, 1.0f}, {100.0f, 2.0f}},
+            CFuncKeysReal::Linear);
+    forevervalidator::simulation::OptimizedCpuCompiledTuningCurve compiled;
+    const int roundingBeforeBuild = std::fegetround();
+#if defined(__i386__) || defined(__x86_64__)
+    const unsigned int mxcsrBeforeBuild = _mm_getcsr();
+    const unsigned int expectedMxcsr =
+            (mxcsrBeforeBuild & 0xffc0u) | 0x01u;
+    _mm_setcsr(expectedMxcsr);
+#endif
+    const bool initialBuildSucceeded = compiled.TryBuild(curve);
+#if defined(__i386__) || defined(__x86_64__)
+    const unsigned int mxcsrAfterBuild = _mm_getcsr();
+    _mm_setcsr(mxcsrBeforeBuild);
+    if (mxcsrAfterBuild != expectedMxcsr) {
+        return Fail("compiled curve build changed MXCSR state");
+    }
+#endif
+    if (std::fegetround() != roundingBeforeBuild) {
+        return Fail("compiled curve build changed the rounding mode");
+    }
+    if (!initialBuildSucceeded || !compiled.IsFor(curve)) {
+        return Fail("compiled curve did not certify its source storage");
+    }
+    ++completedInvalidationCases;
+
+    const std::uint64_t storageRevision = curve.StorageRevision();
+    curve.SetInterpolation(CFuncKeysReal::Constant);
+    if (curve.StorageRevision() != storageRevision ||
+        !compiled.IsStorageFor(curve) || compiled.IsFor(curve)) {
+        return Fail("interpolation change invalidated compiled storage");
+    }
+    ++completedInvalidationCases;
+
+    curve.SetInterpolation(CFuncKeysReal::Linear);
+    if (!compiled.IsFor(curve)) {
+        return Fail("restored interpolation did not recertify curve");
+    }
+    ++completedInvalidationCases;
+
+    curve.SetKeys(
+            {{0.0f, 3.0f}, {100.0f, 4.0f}},
+            CFuncKeysReal::Linear);
+    if (compiled.IsStorageFor(curve) || compiled.IsFor(curve)) {
+        return Fail("same-sized curve mutation retained stale sidecar");
+    }
+    ++completedInvalidationCases;
+
+    if (!compiled.TryBuild(curve) || !compiled.IsFor(curve)) {
+        return Fail("compiled curve did not rebuild after mutation");
+    }
+    curve.RemoveKey(1u);
+    if (compiled.IsStorageFor(curve)) {
+        return Fail("key removal retained stale sidecar");
+    }
+    ++completedInvalidationCases;
+    return true;
+}
+
 class CustomComputeForcesCallback final
         : public CHmsItem::CCallbackComputeForces {
 public:
@@ -259,7 +394,7 @@ bool ExpectInactive(
     CHmsItem *item = car.HmsItem();
     CHmsItem::CCallback *before =
             item->CallbackGet(CHmsItem::ECallback_ComputeForces);
-    OptimizedCpuModel3VehicleForceContext context;
+    OptimizedCpuVehicleForceContext context;
     context.BeginTick(car, path, enabledCallback);
     ++completedRoutingCases;
     if (context.IsTickEligible() ||
@@ -286,7 +421,7 @@ bool RunRoutingCases(OptimizedCpuBinary32MathPath selectedPath) {
     }
 
     if (selectedPath == OptimizedCpuBinary32MathPath::X86Sse2) {
-        OptimizedCpuModel3VehicleForceContext context;
+        OptimizedCpuVehicleForceContext context;
         context.BeginTick(exact.car, selectedPath, canonical);
         ++completedRoutingCases;
         if (!context.IsTickEligible() ||
@@ -392,7 +527,7 @@ bool RunFenvCases(OptimizedCpuBinary32MathPath selectedPath) {
     if (SelectOptimizedCpuBinary32MathPathForActiveExecution() !=
         OptimizedCpuBinary32MathPath::Reference) {
         std::fesetround(FE_TONEAREST);
-        return Fail("non-RNE environment selected native Model3 math");
+        return Fail("non-RNE environment selected native vehicle math");
     }
     if (std::fesetround(FE_TONEAREST) != 0) {
         return Fail("could not restore FE_TONEAREST");
@@ -406,7 +541,7 @@ bool RunFenvCases(OptimizedCpuBinary32MathPath selectedPath) {
         if (SelectOptimizedCpuBinary32MathPathForActiveExecution() !=
             selectedPath) {
             _mm_setcsr(base);
-            return Fail("sticky MXCSR flags disabled native Model3 math");
+            return Fail("sticky MXCSR flags disabled native vehicle math");
         }
         _mm_setcsr(base);
 
@@ -424,7 +559,7 @@ bool RunFenvCases(OptimizedCpuBinary32MathPath selectedPath) {
             if (SelectOptimizedCpuBinary32MathPathForActiveExecution() !=
                 OptimizedCpuBinary32MathPath::Reference) {
                 _mm_setcsr(base);
-                return Fail("incompatible MXCSR selected native Model3 math");
+                return Fail("incompatible MXCSR selected native vehicle math");
             }
             _mm_setcsr(base);
         }
@@ -438,7 +573,7 @@ bool RunFenvCases(OptimizedCpuBinary32MathPath selectedPath) {
 int main(void) {
     if (SelectOptimizedCpuBinary32MathPathForActiveExecution() !=
         OptimizedCpuBinary32MathPath::Reference) {
-        std::fprintf(stderr, "native Model3 math selected outside scope\n");
+        std::fprintf(stderr, "native vehicle math selected outside scope\n");
         return 1;
     }
 
@@ -451,14 +586,20 @@ int main(void) {
             SelectOptimizedCpuBinary32MathPathForActiveExecution();
 
     if (!RunFenvCases(selectedPath) || !RunCurveCases(selectedPath) ||
+        !RunCompiledCurveInvalidationCases() ||
         !RunRoutingCases(selectedPath)) {
         return 1;
     }
 
     std::printf(
-            "model3_curve_cases=%zu routing_cases=%zu fenv_cases=%zu "
+            "vehicle_curve_cases=%zu compiled_curve_cases=%zu "
+            "compiled_fallback_cases=%zu "
+            "invalidation_cases=%zu routing_cases=%zu fenv_cases=%zu "
             "binary32_path=%s result=identical\n",
             completedCurveCases,
+            completedCompiledCurveCases,
+            completedCompiledFallbackCases,
+            completedInvalidationCases,
             completedRoutingCases,
             completedFenvCases,
             selectedPath == OptimizedCpuBinary32MathPath::X86Sse2

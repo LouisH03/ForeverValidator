@@ -1,5 +1,7 @@
 #pragma once
 
+#include <memory>
+
 #include "engine/physics/dynamics/hms_item.h"
 #include "simulation/backends/optimized_cpu/optimized_cpu_binary32_math.h"
 
@@ -10,11 +12,21 @@ struct CHmsCorpus;
 
 namespace forevervalidator::simulation {
 
-// Per-runtime routing state for the exact native Model3 force specialization.
+struct OptimizedCpuCompiledModel6Tuning;
+
+// Per-runtime routing state for exact native vehicle-force specializations.
 // It never replaces the item's callback: a mismatch therefore falls through to
 // the authoritative callback before any vehicle-owned state is changed.
-class OptimizedCpuModel3VehicleForceContext final {
+class OptimizedCpuVehicleForceContext final {
 public:
+    OptimizedCpuVehicleForceContext(void);
+    ~OptimizedCpuVehicleForceContext(void);
+
+    OptimizedCpuVehicleForceContext(
+            const OptimizedCpuVehicleForceContext &) = delete;
+    OptimizedCpuVehicleForceContext &operator=(
+            const OptimizedCpuVehicleForceContext &) = delete;
+
     void BeginTick(
             CSceneVehicleCar &car,
             OptimizedCpuBinary32MathPath mathPath,
@@ -31,13 +43,14 @@ private:
     CHmsItem *item_ = nullptr;
     CSceneVehicleCarTuning *tuning_ = nullptr;
     CHmsItem::CCallback *canonicalCallback_ = nullptr;
+    std::unique_ptr<OptimizedCpuCompiledModel6Tuning> compiledModel6_;
     bool stableEligible_ = false;
     bool tickEligible_ = false;
 };
 
-// Focused differential entry point. Production force evaluation uses this same
-// evaluator after the context has established the exact Model3 route.
-float OptimizedCpuEvaluateModel3CurveForDifferential(
+// Focused differential entry point for the exact native vehicle-curve
+// evaluator used by the specialized force paths.
+float OptimizedCpuEvaluateVehicleCurveForDifferential(
         CFuncKeysReal &curve,
         float input,
         bool convertSpeedToKmh,

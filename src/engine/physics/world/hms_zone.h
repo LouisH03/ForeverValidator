@@ -11,7 +11,7 @@
 struct CHmsCorpus;
 class OptimizedCpuStaticSurfaceTransformCache;
 namespace forevervalidator::simulation {
-class OptimizedCpuModel3VehicleForceContext;
+class OptimizedCpuVehicleForceContext;
 }
 
 struct CHmsZone {
@@ -73,11 +73,11 @@ struct CHmsZoneDynamic : CHmsZone {
     void ComputeCorpusForces(
             CHmsCorpus *corpus,
             float dt);
-    void ComputeCorpusForcesOptimizedCpuModel3(
+    void ComputeCorpusForcesOptimizedCpuVehicle(
             CHmsCorpus *corpus,
             float dt,
             forevervalidator::simulation::
-                    OptimizedCpuModel3VehicleForceContext &context);
+                    OptimizedCpuVehicleForceContext &context);
     void AddCorpus(CHmsCorpus *corpus) override;
     void RemoveCorpus(CHmsCorpus *corpus) override;
     void SolveImpulse(
@@ -92,20 +92,20 @@ struct CHmsZoneDynamic : CHmsZone {
             void);
     void PhysicsStep2OptimizedCpuNativeBinary32(
             forevervalidator::simulation::
-                    OptimizedCpuModel3VehicleForceContext &context);
+                    OptimizedCpuVehicleForceContext &context);
     void PhysicsStep2OptimizedCpuCached(
             const OptimizedCpuStaticSurfaceTransformCache &transforms);
     void PhysicsStep2OptimizedCpuNativeBinary32Cached(
             const OptimizedCpuStaticSurfaceTransformCache &transforms,
             forevervalidator::simulation::
-                    OptimizedCpuModel3VehicleForceContext &context);
+                    OptimizedCpuVehicleForceContext &context);
 
 private:
     void PhysicsStep2OptimizedCpuCachedImpl(
             const OptimizedCpuStaticSurfaceTransformCache &transforms,
             bool nativeBinary32,
             forevervalidator::simulation::
-                    OptimizedCpuModel3VehicleForceContext *model3Context);
+                    OptimizedCpuVehicleForceContext *vehicleForceContext);
 
     float linearDampingCoef_ = 1.0f;
     float angularDampingCoef_ = 1.0f;

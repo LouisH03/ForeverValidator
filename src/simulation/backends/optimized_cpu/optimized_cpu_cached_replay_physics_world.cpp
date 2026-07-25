@@ -10,7 +10,7 @@ void ReplayPhysicsWorld::StepOptimizedCpuCached(
 void ReplayPhysicsWorld::StepOptimizedCpuNativeBinary32Cached(
         const OptimizedCpuStaticSurfaceTransformCache &transforms,
         forevervalidator::simulation::
-                OptimizedCpuModel3VehicleForceContext &model3Context) {
+                OptimizedCpuVehicleForceContext &vehicleForceContext) {
     zone_.PhysicsStep2OptimizedCpuNativeBinary32Cached(
-            transforms, model3Context);
+            transforms, vehicleForceContext);
 }

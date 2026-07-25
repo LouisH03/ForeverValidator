@@ -146,15 +146,20 @@ int CFuncKeys::ComputeBlendCoef(
 void CFuncKeys::RemoveKey(unsigned long index) {
     if (index < keyPositions.size()) {
         keyPositions.erase(keyPositions.begin() + index);
+        MarkStorageChanged();
     }
 }
 
 void CFuncKeys::Reset() {
-    keyPositions.clear();
+    if (!keyPositions.empty()) {
+        keyPositions.clear();
+        MarkStorageChanged();
+    }
 }
 
 void CFuncKeys::AddKey(float x) {
     keyPositions.push_back(x);
+    MarkStorageChanged();
 }
 
 unsigned long CFuncKeys::InsertKeyX(float x) {
@@ -175,6 +180,7 @@ unsigned long CFuncKeys::InsertKeyX(float x) {
     }
 
     keyPositions.insert(keyPositions.begin() + index, x);
+    MarkStorageChanged();
     return index;
 }
 
@@ -188,6 +194,14 @@ unsigned long CFuncKeys::KeyCount() const {
 
 float CFuncKeys::XAt(unsigned long index) const {
     return keyPositions[index];
+}
+
+std::uint64_t CFuncKeys::StorageRevision() const noexcept {
+    return storageRevision_;
+}
+
+void CFuncKeys::MarkStorageChanged() noexcept {
+    ++storageRevision_;
 }
 
 CFuncKeysReal::CFuncKeysReal() = default;
@@ -276,8 +290,12 @@ unsigned long CFuncKeysReal::InsertKeyReal(float x, float value) {
 }
 
 void CFuncKeysReal::Reset() {
+    const bool valuesOnly = keyPositions.empty() && !values.empty();
     CFuncKeys::Reset();
     values.clear();
+    if (valuesOnly) {
+        MarkStorageChanged();
+    }
 }
 
 void CFuncKeysReal::AddKey(float x) {
@@ -306,6 +324,9 @@ void CFuncKeysReal::SetKeys(
     for (const Key &key : keys) {
         keyPositions.push_back(key.x);
         values.push_back(key.value);
+    }
+    if (!keys.empty()) {
+        MarkStorageChanged();
     }
     interpolationMode = interpolation;
 }

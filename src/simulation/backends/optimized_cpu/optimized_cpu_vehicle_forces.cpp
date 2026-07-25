@@ -1,7 +1,9 @@
-#include "simulation/backends/optimized_cpu/optimized_cpu_model3_vehicle_forces.h"
+#include "simulation/backends/optimized_cpu/optimized_cpu_vehicle_forces.h"
 
 #include <cmath>
 #include <cstdint>
+#include <limits>
+#include <new>
 #include <type_traits>
 #include <typeinfo>
 
@@ -13,24 +15,28 @@
 #include "engine/physics/geometry/physics_tolerances.h"
 #include "engine/physics/world/hms_zone.h"
 #include "engine/scene/scene_vehicle_car_internal.h"
+#include "simulation/backends/optimized_cpu/optimized_cpu_compiled_tuning_curve.h"
 
 #if defined(__GNUC__) || defined(__clang__)
 #define FV_E019_ALWAYS_INLINE inline __attribute__((always_inline))
+#define FV_E019_HOT_NOINLINE __attribute__((hot, noinline))
 #else
 #define FV_E019_ALWAYS_INLINE inline
+#define FV_E019_HOT_NOINLINE
 #endif
 
 using forevervalidator::simulation::OptimizedCpuBinary32FromDoubleX86Sse2;
 using forevervalidator::simulation::OptimizedCpuBinary32MathPath;
 using forevervalidator::simulation::OptimizedCpuBinary32SqrtX86Sse2;
+using forevervalidator::simulation::OptimizedCpuCompiledTuningCurve;
 using namespace SceneVehicleCarDynamics;
 
 namespace {
 
-constexpr float Model3CurveKeyEpsilon = 1.0e-5f;
+constexpr float VehicleCurveKeyEpsilon = 1.0e-5f;
 
 template<bool NativeBinary32>
-FV_E019_ALWAYS_INLINE float Model3FromDouble(double value) noexcept {
+FV_E019_ALWAYS_INLINE float VehicleFromDouble(double value) noexcept {
     if constexpr (NativeBinary32) {
         return OptimizedCpuBinary32FromDoubleX86Sse2(value);
     }
@@ -38,19 +44,19 @@ FV_E019_ALWAYS_INLINE float Model3FromDouble(double value) noexcept {
 }
 
 template<bool NativeBinary32>
-FV_E019_ALWAYS_INLINE float Model3Sqrt(float value) noexcept {
+FV_E019_ALWAYS_INLINE float VehicleSqrt(float value) noexcept {
     if constexpr (NativeBinary32) {
         return OptimizedCpuBinary32SqrtX86Sse2(value);
     }
     return CIsqrt(value);
 }
 
-struct Model3ReducedAngle {
+struct VehicleReducedAngle {
     double value;
     unsigned quadrant;
 };
 
-FV_E019_ALWAYS_INLINE Model3ReducedAngle Model3ReduceSmallAngle(
+FV_E019_ALWAYS_INLINE VehicleReducedAngle VehicleReduceSmallAngle(
         float input) noexcept {
     constexpr double TwoOverPi =
             0.636619772367581343075535053490057448;
@@ -68,7 +74,7 @@ FV_E019_ALWAYS_INLINE Model3ReducedAngle Model3ReduceSmallAngle(
     };
 }
 
-FV_E019_ALWAYS_INLINE double Model3SinPolynomial(double value) noexcept {
+FV_E019_ALWAYS_INLINE double VehicleSinPolynomial(double value) noexcept {
     const double square = value * value;
     double coefficient = -1.0 / 121645100408832000.0;
     coefficient = 1.0 / 355687428096000.0 + square * coefficient;
@@ -82,7 +88,7 @@ FV_E019_ALWAYS_INLINE double Model3SinPolynomial(double value) noexcept {
     return value + value * square * coefficient;
 }
 
-FV_E019_ALWAYS_INLINE double Model3CosPolynomial(double value) noexcept {
+FV_E019_ALWAYS_INLINE double VehicleCosPolynomial(double value) noexcept {
     const double square = value * value;
     double coefficient = -1.0 / 6402373705728000.0;
     coefficient = 1.0 / 20922789888000.0 + square * coefficient;
@@ -97,60 +103,60 @@ FV_E019_ALWAYS_INLINE double Model3CosPolynomial(double value) noexcept {
 }
 
 template<bool NativeBinary32>
-FV_E019_ALWAYS_INLINE float Model3Sin(float input) noexcept {
+FV_E019_ALWAYS_INLINE float VehicleSin(float input) noexcept {
     if constexpr (!NativeBinary32) {
         return CIsin(input);
     }
     if (!std::isfinite(input) || std::fabs(input) > 1000000.0f) {
         return CIsin(input);
     }
-    const Model3ReducedAngle reduced = Model3ReduceSmallAngle(input);
+    const VehicleReducedAngle reduced = VehicleReduceSmallAngle(input);
     double result;
     switch (reduced.quadrant) {
     case 0u:
-        result = Model3SinPolynomial(reduced.value);
+        result = VehicleSinPolynomial(reduced.value);
         break;
     case 1u:
-        result = Model3CosPolynomial(reduced.value);
+        result = VehicleCosPolynomial(reduced.value);
         break;
     case 2u:
-        result = -Model3SinPolynomial(reduced.value);
+        result = -VehicleSinPolynomial(reduced.value);
         break;
     default:
-        result = -Model3CosPolynomial(reduced.value);
+        result = -VehicleCosPolynomial(reduced.value);
         break;
     }
-    return Model3FromDouble<true>(result);
+    return VehicleFromDouble<true>(result);
 }
 
 template<bool NativeBinary32>
-FV_E019_ALWAYS_INLINE float Model3Cos(float input) noexcept {
+FV_E019_ALWAYS_INLINE float VehicleCos(float input) noexcept {
     if constexpr (!NativeBinary32) {
         return CIcos(input);
     }
     if (!std::isfinite(input) || std::fabs(input) > 1000000.0f) {
         return CIcos(input);
     }
-    const Model3ReducedAngle reduced = Model3ReduceSmallAngle(input);
+    const VehicleReducedAngle reduced = VehicleReduceSmallAngle(input);
     double result;
     switch (reduced.quadrant) {
     case 0u:
-        result = Model3CosPolynomial(reduced.value);
+        result = VehicleCosPolynomial(reduced.value);
         break;
     case 1u:
-        result = -Model3SinPolynomial(reduced.value);
+        result = -VehicleSinPolynomial(reduced.value);
         break;
     case 2u:
-        result = -Model3CosPolynomial(reduced.value);
+        result = -VehicleCosPolynomial(reduced.value);
         break;
     default:
-        result = Model3SinPolynomial(reduced.value);
+        result = VehicleSinPolynomial(reduced.value);
         break;
     }
-    return Model3FromDouble<true>(result);
+    return VehicleFromDouble<true>(result);
 }
 
-FV_E019_ALWAYS_INLINE double Model3AtanUnit(double value) noexcept {
+FV_E019_ALWAYS_INLINE double VehicleAtanUnit(double value) noexcept {
     constexpr double QuarterPi =
             0.785398163397448309615660845819875721;
     const bool aroundOne = value > 0.4142135623730950488;
@@ -167,7 +173,7 @@ FV_E019_ALWAYS_INLINE double Model3AtanUnit(double value) noexcept {
     return aroundOne ? QuarterPi + result : result;
 }
 
-FV_E019_ALWAYS_INLINE double Model3Atan2(double y, double x) noexcept {
+FV_E019_ALWAYS_INLINE double VehicleAtan2(double y, double x) noexcept {
     constexpr double Pi =
             3.14159265358979323846264338327950288;
     constexpr double HalfPi =
@@ -186,8 +192,8 @@ FV_E019_ALWAYS_INLINE double Model3Atan2(double y, double x) noexcept {
         return yNegative ? -HalfPi : HalfPi;
     }
     double angle = absY <= absX
-            ? Model3AtanUnit(absY / absX)
-            : HalfPi - Model3AtanUnit(absX / absY);
+            ? VehicleAtanUnit(absY / absX)
+            : HalfPi - VehicleAtanUnit(absX / absY);
     if (xNegative) {
         angle = Pi - angle;
     }
@@ -195,7 +201,7 @@ FV_E019_ALWAYS_INLINE double Model3Atan2(double y, double x) noexcept {
 }
 
 template<bool NativeBinary32>
-FV_E019_ALWAYS_INLINE float Model3Asin(float value) noexcept {
+FV_E019_ALWAYS_INLINE float VehicleAsin(float value) noexcept {
     if constexpr (!NativeBinary32) {
         return CIasin(value);
     }
@@ -204,29 +210,29 @@ FV_E019_ALWAYS_INLINE float Model3Asin(float value) noexcept {
     }
     const float positiveFactor = 1.0f + value;
     const float negativeFactor = 1.0f - value;
-    const float radical = Model3Sqrt<true>(
+    const float radical = VehicleSqrt<true>(
             positiveFactor * negativeFactor);
-    return Model3FromDouble<true>(
-            Model3Atan2(
+    return VehicleFromDouble<true>(
+            VehicleAtan2(
                     static_cast<double>(value),
                     static_cast<double>(radical)));
 }
 
-FV_E019_ALWAYS_INLINE float Model3LengthSquared(const GmVec3 &value) noexcept {
+FV_E019_ALWAYS_INLINE float VehicleLengthSquared(const GmVec3 &value) noexcept {
     const float xy = value.x * value.x + value.y * value.y;
     return xy + value.z * value.z;
 }
 
 template<bool NativeBinary32>
-FV_E019_ALWAYS_INLINE GmVec3 Model3NormalizeOr(
+FV_E019_ALWAYS_INLINE GmVec3 VehicleNormalizeOr(
         const GmVec3 &value,
         const GmVec3 &shortVectorResult,
         float minimumLengthSquared) noexcept {
-    const float lengthSquared = Model3LengthSquared(value);
+    const float lengthSquared = VehicleLengthSquared(value);
     if (!(lengthSquared > minimumLengthSquared)) {
         return shortVectorResult;
     }
-    const float scale = 1.0f / Model3Sqrt<NativeBinary32>(lengthSquared);
+    const float scale = 1.0f / VehicleSqrt<NativeBinary32>(lengthSquared);
     return {
             value.x * scale,
             value.y * scale,
@@ -236,7 +242,92 @@ FV_E019_ALWAYS_INLINE GmVec3 Model3NormalizeOr(
 
 }  // namespace
 
-struct OptimizedCpuModel3VehicleForceAccess {
+namespace forevervalidator::simulation {
+
+struct OptimizedCpuCompiledModel6Tuning {
+    const CSceneVehicleCarTuning *source = nullptr;
+    OptimizedCpuCompiledTuningCurve maxSideFriction;
+    OptimizedCpuCompiledTuningCurve damperModulation;
+    OptimizedCpuCompiledTuningCurve steerDriveTorque;
+    OptimizedCpuCompiledTuningCurve rolloverLateralFromSpeedRatio;
+    OptimizedCpuCompiledTuningCurve slippingAcceleration;
+    OptimizedCpuCompiledTuningCurve acceleration;
+    OptimizedCpuCompiledTuningCurve rearGearAcceleration;
+    OptimizedCpuCompiledTuningCurve steerSlowdown;
+    OptimizedCpuCompiledTuningCurve burnoutRollover;
+
+    bool TryBuild(const CSceneVehicleCarTuning &tuning) noexcept {
+        if (!tuning.maxSideFrictionFromSpeedCurve.IsBound() ||
+            !tuning.suspension.damperAbsorbModulationCurve.IsBound() ||
+            !tuning.steering.driveTorqueFromSpeedCurve.IsBound() ||
+            !tuning.gearedDrive.burnout.
+                    rolloverLateralFromSpeedRatioCurve.IsBound() ||
+            !tuning.slipResponse.slippingAccelFromSpeedCurve.IsBound() ||
+            !tuning.slipResponse.accelFromSpeedCurve.IsBound() ||
+            !tuning.gearedDrive.transmission.
+                    rearGearAccelFromSpeedCurve.IsBound() ||
+            !tuning.steering.slowDownFromSpeedCurve.IsBound() ||
+            !tuning.gearedDrive.burnout.rolloverFromSpeedCurve.IsBound()) {
+            return false;
+        }
+        OptimizedCpuCompiledModel6Tuning rebuilt;
+        rebuilt.source = &tuning;
+        if (!rebuilt.maxSideFriction.TryBuild(
+                    tuning.maxSideFrictionFromSpeedCurve.Value()) ||
+            !rebuilt.damperModulation.TryBuild(
+                    tuning.suspension.damperAbsorbModulationCurve.Value()) ||
+            !rebuilt.steerDriveTorque.TryBuild(
+                    tuning.steering.driveTorqueFromSpeedCurve.Value()) ||
+            !rebuilt.rolloverLateralFromSpeedRatio.TryBuild(
+                    tuning.gearedDrive.burnout.
+                            rolloverLateralFromSpeedRatioCurve.Value()) ||
+            !rebuilt.slippingAcceleration.TryBuild(
+                    tuning.slipResponse.slippingAccelFromSpeedCurve.Value()) ||
+            !rebuilt.acceleration.TryBuild(
+                    tuning.slipResponse.accelFromSpeedCurve.Value()) ||
+            !rebuilt.rearGearAcceleration.TryBuild(
+                    tuning.gearedDrive.transmission.
+                            rearGearAccelFromSpeedCurve.Value()) ||
+            !rebuilt.steerSlowdown.TryBuild(
+                    tuning.steering.slowDownFromSpeedCurve.Value()) ||
+            !rebuilt.burnoutRollover.TryBuild(
+                    tuning.gearedDrive.burnout.rolloverFromSpeedCurve.Value())) {
+            return false;
+        }
+        *this = std::move(rebuilt);
+        return true;
+    }
+
+    bool IsFor(const CSceneVehicleCarTuning &tuning) const noexcept {
+        return source == &tuning &&
+               maxSideFriction.IsFor(
+                       tuning.maxSideFrictionFromSpeedCurve.Value()) &&
+               damperModulation.IsFor(
+                       tuning.suspension.damperAbsorbModulationCurve.Value()) &&
+               steerDriveTorque.IsFor(
+                       tuning.steering.driveTorqueFromSpeedCurve.Value()) &&
+               rolloverLateralFromSpeedRatio.IsFor(
+                       tuning.gearedDrive.burnout.
+                               rolloverLateralFromSpeedRatioCurve.Value()) &&
+               slippingAcceleration.IsFor(
+                       tuning.slipResponse.slippingAccelFromSpeedCurve.Value()) &&
+               acceleration.IsStorageFor(
+                       tuning.slipResponse.accelFromSpeedCurve.Value()) &&
+               rearGearAcceleration.IsFor(
+                       tuning.gearedDrive.transmission.
+                               rearGearAccelFromSpeedCurve.Value()) &&
+               steerSlowdown.IsFor(
+                       tuning.steering.slowDownFromSpeedCurve.Value()) &&
+               burnoutRollover.IsFor(
+                       tuning.gearedDrive.burnout.rolloverFromSpeedCurve.Value());
+    }
+};
+
+}  // namespace forevervalidator::simulation
+
+using forevervalidator::simulation::OptimizedCpuCompiledModel6Tuning;
+
+struct OptimizedCpuVehicleForceAccess {
     static CSceneVehicleCarTuning *ActiveTuning(
             CSceneVehicleCar &car) noexcept {
         return car.ActiveTuningOrNull();
@@ -253,6 +344,25 @@ struct OptimizedCpuModel3VehicleForceAccess {
                tuning.steering.slowDownFromSpeedCurve.IsBound();
     }
 
+    static bool HasRequiredModel6Configuration(
+            const CSceneVehicleCar &car,
+            const CSceneVehicleCarTuning &tuning) noexcept {
+        return tuning.handlingModel ==
+                       CSceneVehicleCarHandlingModel_GearedDrive &&
+               car.wheels.size() == 4u &&
+               tuning.maxSideFrictionFromSpeedCurve.IsBound() &&
+               tuning.suspension.damperAbsorbModulationCurve.IsBound() &&
+               tuning.steering.driveTorqueFromSpeedCurve.IsBound() &&
+               tuning.gearedDrive.burnout.
+                       rolloverLateralFromSpeedRatioCurve.IsBound() &&
+               tuning.slipResponse.slippingAccelFromSpeedCurve.IsBound() &&
+               tuning.slipResponse.accelFromSpeedCurve.IsBound() &&
+               tuning.gearedDrive.transmission.
+                       rearGearAccelFromSpeedCurve.IsBound() &&
+               tuning.steering.slowDownFromSpeedCurve.IsBound() &&
+               tuning.gearedDrive.burnout.rolloverFromSpeedCurve.IsBound();
+    }
+
     static bool HasStableEligibility(
             CSceneVehicleCar &car,
             CHmsItem *item,
@@ -264,7 +374,31 @@ struct OptimizedCpuModel3VehicleForceAccess {
             car.HmsItem() != item) {
             return false;
         }
-        return HasRequiredModel3Configuration(*tuning);
+        return HasRequiredModel3Configuration(*tuning) ||
+               HasRequiredModel6Configuration(car, *tuning);
+    }
+
+    static bool CanUseModel6CommonPath(
+            CSceneVehicleCar &car,
+            CHmsDyna &dyna) noexcept {
+        if (car.gearedDrive.burnoutPhase ==
+            CSceneVehicleCarBurnoutPhase_CircularDrift) {
+            return false;
+        }
+        if (car.controls.lowSpeedGateA > LowSpeedGateThreshold &&
+            car.controls.lowSpeedGateB > LowSpeedGateThreshold) {
+            return false;
+        }
+        for (const CSceneVehicleCar::SSimulationWheel &wheel : car.wheels) {
+            if (wheel.realTimeState.contactMaterial == DirtSlideMaterial) {
+                return false;
+            }
+        }
+        GmVec3 linearSpeed;
+        dyna.GetLinearSpeed(linearSpeed);
+        return std::isfinite(linearSpeed.x) &&
+               std::isfinite(linearSpeed.y) &&
+               std::isfinite(linearSpeed.z);
     }
 
     static FV_E019_ALWAYS_INLINE GmVec3 LocalDirectionToWorld(
@@ -313,16 +447,16 @@ struct OptimizedCpuModel3VehicleForceAccess {
 
     template<bool NativeBinary32>
     static FV_E019_ALWAYS_INLINE float LowerKeyBound(float key) noexcept {
-        return Model3FromDouble<NativeBinary32>(
+        return VehicleFromDouble<NativeBinary32>(
                 static_cast<double>(key) -
-                static_cast<double>(Model3CurveKeyEpsilon));
+                static_cast<double>(VehicleCurveKeyEpsilon));
     }
 
     template<bool NativeBinary32>
     static FV_E019_ALWAYS_INLINE float UpperKeyBound(float key) noexcept {
-        return Model3FromDouble<NativeBinary32>(
+        return VehicleFromDouble<NativeBinary32>(
                 static_cast<double>(key) +
-                static_cast<double>(Model3CurveKeyEpsilon));
+                static_cast<double>(VehicleCurveKeyEpsilon));
     }
 
     template<bool NativeBinary32>
@@ -398,7 +532,7 @@ struct OptimizedCpuModel3VehicleForceAccess {
 
         const float x0 = curve.keyPositions[keyIndex];
         const float span = curve.keyPositions[nextKeyIndex] - x0;
-        blendCoefficient = std::fabs(span) >= Model3CurveKeyEpsilon
+        blendCoefficient = std::fabs(span) >= VehicleCurveKeyEpsilon
                 ? (x - x0) / span
                 : 0.0f;
         return true;
@@ -433,7 +567,7 @@ struct OptimizedCpuModel3VehicleForceAccess {
     static FV_E019_ALWAYS_INLINE float EvaluateSpeedCurve(
             const CSceneVehicleTuningCurve &curve,
             float speed) noexcept {
-        const float kilometersPerHour = Model3FromDouble<NativeBinary32>(
+        const float kilometersPerHour = VehicleFromDouble<NativeBinary32>(
                 static_cast<double>(speed) * static_cast<double>(3.6f));
         return EvaluateCurve<NativeBinary32>(curve.Value(), kilometersPerHour);
     }
@@ -471,7 +605,7 @@ struct OptimizedCpuModel3VehicleForceAccess {
                 wheel.accumulatedContactNormal.z *
                         wheel.accumulatedContactNormal.z;
         if (normalLenSq > VectorEpsilonSquared) {
-            const float len = Model3Sqrt<true>(normalLenSq);
+            const float len = VehicleSqrt<true>(normalLenSq);
             const float invLen = 1.0f / len;
             wheel.accumulatedContactNormal.x =
                     wheel.accumulatedContactNormal.x * invLen;
@@ -488,11 +622,11 @@ struct OptimizedCpuModel3VehicleForceAccess {
             const GmVec3 sideSeed = GmMath::Cross(
                     wheel.accumulatedContactNormal,
                     directionOfView);
-            const GmVec3 side = Model3NormalizeOr<true>(
+            const GmVec3 side = VehicleNormalizeOr<true>(
                     sideSeed,
                     sideSeed,
                     PhysicsTolerance::SurfaceDirectionLengthSquared);
-            const GmVec3 normalizedUp = Model3NormalizeOr<true>(
+            const GmVec3 normalizedUp = VehicleNormalizeOr<true>(
                     wheel.accumulatedContactNormal,
                     wheel.accumulatedContactNormal,
                     PhysicsTolerance::SurfaceDirectionLengthSquared);
@@ -558,13 +692,13 @@ struct OptimizedCpuModel3VehicleForceAccess {
         } else if (car.controls.lowSpeedGateA > ScalarEpsilon &&
                    car.gearedDrive.wheelDriveSpeedInhibited == 0 &&
                    car.controls.forcedLowSpeedFriction == 0) {
-            targetAngularSpeed = Model3FromDouble<true>(
+            targetAngularSpeed = VehicleFromDouble<true>(
                     static_cast<double>(car.controls.lowSpeedGateA) *
                     WheelLowSpeedGateASpeedScale);
             angularAcceleration = WheelAngularAccelPositive;
         } else {
             wheel.realTimeState.wheelAngularSpeed =
-                    Model3FromDouble<true>(
+                    VehicleFromDouble<true>(
                             static_cast<double>(
                                     wheel.realTimeState.wheelAngularSpeed) *
                             WheelNoContactDamping);
@@ -615,8 +749,8 @@ struct OptimizedCpuModel3VehicleForceAccess {
                       visualSpeedDenominator;
             }
             if constexpr (NativeBinary32) {
-                const float sine = Model3Sin<true>(yaw);
-                const float cosine = Model3Cos<true>(yaw);
+                const float sine = VehicleSin<true>(yaw);
+                const float cosine = VehicleCos<true>(yaw);
                 const GmVec3 oldX =
                         wheel.realTimeState.visualRotation.Row(GmAxis::X);
                 const GmVec3 oldZ =
@@ -732,8 +866,8 @@ struct OptimizedCpuModel3VehicleForceAccess {
         }
         CSceneVehicleCarTuning *tuning =
                 car.Tunings()->ActiveTuning();
-        const float len = Model3Sqrt<true>(lenSq);
-        float slope = Model3FromDouble<true>(
+        const float len = VehicleSqrt<true>(lenSq);
+        float slope = VehicleFromDouble<true>(
                 static_cast<double>(normal.y) /
                 static_cast<double>(len));
         slope = std::fabs(slope);
@@ -751,7 +885,7 @@ struct OptimizedCpuModel3VehicleForceAccess {
             const float angle =
                     ((value - minimum) / (maximum - minimum)) *
                     static_cast<double>(SceneVehicleMath::Pi) * 0.5;
-            return 1.0f - Model3Cos<true>(angle);
+            return 1.0f - VehicleCos<true>(angle);
         };
         outFirst = slopeAdherenceBlend(
                 slope,
@@ -784,7 +918,7 @@ struct OptimizedCpuModel3VehicleForceAccess {
                 SafeTrigInteriorLimit < asinInput) {
                 asinValue = GmFunc::AsinSafe(asinInput);
             } else {
-                asinValue = Model3Asin<true>(asinInput);
+                asinValue = VehicleAsin<true>(asinInput);
             }
         }
         return -car.controls.currentSteering * asinValue;
@@ -941,15 +1075,15 @@ struct OptimizedCpuModel3VehicleForceAccess {
                     -wheel->realTimeState.accumulatedContactNormal.x,
                     0.0f,
             };
-            lateral = Model3NormalizeOr<NativeBinary32>(
+            lateral = VehicleNormalizeOr<NativeBinary32>(
                     lateral,
                     GmVec3{1.0f, 0.0f, 0.0f},
                     VectorEpsilonSquared);
             if (IsFrontVehicleWheel(wheel->axle)) {
                 float visualSteerYawCos =
-                        Model3Cos<NativeBinary32>(request.visualSteerYaw);
+                        VehicleCos<NativeBinary32>(request.visualSteerYaw);
                 float negVisualSteerYawSin =
-                        -Model3Sin<NativeBinary32>(request.visualSteerYaw);
+                        -VehicleSin<NativeBinary32>(request.visualSteerYaw);
                 lateral = GmVec3{
                         visualSteerYawCos * lateral.x,
                         visualSteerYawCos * lateral.y,
@@ -1014,7 +1148,7 @@ struct OptimizedCpuModel3VehicleForceAccess {
                     0.5f;
             float steerRamp = 1.0f;
             if (!(tuning.steering.assistFullSpeed < speedMagnitude)) {
-                steerRamp = Model3Sin<NativeBinary32>(static_cast<float>(
+                steerRamp = VehicleSin<NativeBinary32>(static_cast<float>(
                         (speedMagnitude /
                          tuning.steering.assistFullSpeed) *
                         SceneVehicleMath::HalfPi));
@@ -1169,6 +1303,475 @@ struct OptimizedCpuModel3VehicleForceAccess {
         });
     }
 
+    static FV_E019_ALWAYS_INLINE float Model6DamperModulation(
+            const CSceneVehicleCarTuning &tuning,
+            const OptimizedCpuCompiledModel6Tuning &compiled,
+            float damperAbsorb) noexcept {
+        float normalized = 0.0f;
+        if (tuning.suspension.damperModulationMinAbsorb !=
+            tuning.suspension.damperModulationMaxAbsorb) {
+            normalized =
+                    (damperAbsorb -
+                     tuning.suspension.damperModulationMinAbsorb) /
+                    (tuning.suspension.damperModulationMaxAbsorb -
+                     tuning.suspension.damperModulationMinAbsorb);
+        }
+        return compiled.damperModulation.Evaluate(normalized);
+    }
+
+    template<bool NativeBinary32>
+    static FV_E019_ALWAYS_INLINE void ApplyModel6ContactForcesCompiled(
+            CSceneVehicleCar &car,
+            CHmsDyna &dyna,
+            const CSceneVehicleCar::LegacyForceRequest &request,
+            const CSceneVehicleCarTuning &tuning,
+            const OptimizedCpuCompiledModel6Tuning &compiled,
+            float maxStaticSideForceCurve,
+            float burnoutRollover,
+            CSceneVehicleCar::Model6ForceState &state) {
+        const GmVec3 bodyCenter = car.HmsItem()
+                ->Solid()->Physical().Parameters().localCenterOfMass;
+        state.wheelCount = static_cast<u32>(car.wheels.size());
+
+        const float visualSteerYawCos =
+                VehicleCos<NativeBinary32>(request.visualSteerYaw);
+        const float negVisualSteerYawSin =
+                -VehicleSin<NativeBinary32>(request.visualSteerYaw);
+        GmVec3 feedbackTorqueForce = SceneVehicleMath::Scale(
+                car.gearedDrive.scaledCurrentForce,
+                -tuning.feedback.forceDivisor);
+        const float feedbackTorqueForceLen = VehicleSqrt<NativeBinary32>(
+                SceneVehicleMath::LengthSquared(feedbackTorqueForce));
+        if (feedbackTorqueForceLen <
+            tuning.gearedDrive.currentForceTorqueMin) {
+            feedbackTorqueForce = SceneVehicleMath::Zero();
+        }
+        const float burnoutSideScale =
+                car.BurnoutSideForceFade(&tuning, state.tick);
+
+        for (u32 wheelIndex = 0u;
+             wheelIndex < state.wheelCount;
+             ++wheelIndex) {
+            CSceneVehicleCar::SSimulationWheel &wheel =
+                    car.wheels[wheelIndex];
+            car.WheelAddForceToVehicle(wheel, request.currentForce);
+            if (!wheel.realTimeState.contactPresent ||
+                !(tuning.gearedDrive.lateralForceScale >= 0.0f)) {
+                continue;
+            }
+
+            CSceneVehicleMaterial *material = car.GetWheelMaterial(wheel);
+            const GmVec3 contactLever = SceneVehicleMath::Subtract(
+                    wheel.realTimeState.latestContactPoint, bodyCenter);
+            GmVec3 contactSideAxis = {
+                    wheel.realTimeState.accumulatedContactNormal.y,
+                    -wheel.realTimeState.accumulatedContactNormal.x,
+                    0.0f,
+            };
+            contactSideAxis = VehicleNormalizeOr<NativeBinary32>(
+                    contactSideAxis,
+                    GmVec3{1.0f, 0.0f, 0.0f},
+                    VectorEpsilonSquared);
+            if (IsFrontVehicleWheel(wheel.axle)) {
+                contactSideAxis = {
+                        visualSteerYawCos * contactSideAxis.x,
+                        visualSteerYawCos * contactSideAxis.y,
+                        negVisualSteerYawSin +
+                                visualSteerYawCos * contactSideAxis.z,
+                };
+            }
+
+            GmVec3 feedbackTorque = SceneVehicleMath::Cross(
+                    contactLever, feedbackTorqueForce);
+            feedbackTorque = SceneVehicleMath::Scale(
+                    feedbackTorque, -1.0f);
+            feedbackTorque.x *= tuning.gearedDrive.currentTorqueXScale;
+            feedbackTorque.y = 0.0f;
+            feedbackTorque.z *= tuning.gearedDrive.currentTorqueZScale;
+            AddVehicleTorque(dyna, feedbackTorque);
+
+            if (car.gearedDrive.burnoutPhase ==
+                CSceneVehicleCarBurnoutPhase_TimedSpin) {
+                AddVehicleTorque(
+                        dyna, {burnoutRollover, 0.0f, 0.0f});
+            }
+
+            const float damperMod = Model6DamperModulation(
+                    tuning,
+                    compiled,
+                    wheel.realTimeState.damperAbsorb);
+            const bool slipBefore = wheel.realTimeState.slipping;
+            const float slippingSideGrip = slipBefore
+                    ? tuning.gearedDrive.slippingSideFrictionScale
+                    : 1.0f;
+            const float lowSpeedBSlippingGrip =
+                    (wheel.realTimeState.slipping &&
+                     car.controls.lowSpeedGateB > LowSpeedGateThreshold)
+                    ? tuning.gearedDrive.lowSpeedBSlippingGripScale
+                    : 1.0f;
+            const float maxStaticSideForce =
+                    material->blendableVals.w * request.slopeAdherenceA *
+                    maxStaticSideForceCurve * slippingSideGrip *
+                    lowSpeedBSlippingGrip * damperMod;
+            const float contactSideSpeed = SceneVehicleMath::Dot(
+                    request.linearSpeed, contactSideAxis);
+            float requestedSideForce =
+                    -tuning.gearedDrive.lateralForceScale * 0.5f *
+                    contactSideSpeed * burnoutSideScale;
+            const float requestedSideForceAbs =
+                    std::fabs(requestedSideForce);
+            if (!(maxStaticSideForce < requestedSideForceAbs)) {
+                wheel.realTimeState.slipping = false;
+            } else {
+                const float staticSideForceCap =
+                        SignNonNegative(requestedSideForce) *
+                        maxStaticSideForce;
+                requestedSideForce =
+                        (1.0f -
+                         tuning.gearedDrive.sideFrictionSlipBlend) *
+                                staticSideForceCap +
+                        tuning.gearedDrive.sideFrictionSlipBlend *
+                                requestedSideForce;
+                wheel.realTimeState.slipping = true;
+                request.outSlipFlag = 1;
+            }
+
+            const GmVec3 contactSideForce = SceneVehicleMath::Scale(
+                    contactSideAxis, requestedSideForce);
+            AddVehicleCentralForce(car, dyna, contactSideForce);
+        }
+    }
+
+    template<bool NativeBinary32>
+    static FV_E019_ALWAYS_INLINE float Model6SteerAssistRamp(
+            const CSceneVehicleCarTuning &tuning,
+            const GmVec3 &linearSpeed) noexcept {
+        const float speed = VehicleSqrt<NativeBinary32>(
+                linearSpeed.x * linearSpeed.x +
+                linearSpeed.y * linearSpeed.y +
+                linearSpeed.z * linearSpeed.z);
+        if (speed < 0.7f) {
+            return 0.0f;
+        }
+        if (speed > tuning.steering.assistFullSpeed) {
+            return 1.0f;
+        }
+        const float angle =
+                (speed / tuning.steering.assistFullSpeed) *
+                SceneVehicleMath::HalfPi;
+        return VehicleSin<NativeBinary32>(angle);
+    }
+
+    static FV_E019_ALWAYS_INLINE float Model6DriveForceCompiled(
+            CSceneVehicleCar &car,
+            const CSceneVehicleCar::LegacyForceRequest &request,
+            const CSceneVehicleCarTuning &tuning,
+            const OptimizedCpuCompiledModel6Tuning &compiled,
+            float speedKilometersPerHour,
+            u32 tick,
+            int waterActive,
+            float slipAccelMix) {
+        const float slippingAccelCurve =
+                tuning.slipResponse.slippingAccelScale *
+                compiled.slippingAcceleration.Evaluate(
+                        speedKilometersPerHour);
+        tuning.slipResponse.accelFromSpeedCurve.Value().SetInterpolation(
+                CFuncKeysReal::Constant);
+        const float gearAccelCurve = car.engine.useLowSpeedGateB
+                ? compiled.rearGearAcceleration.Evaluate(
+                          speedKilometersPerHour)
+                : compiled.acceleration.EvaluateConstant(
+                          speedKilometersPerHour);
+        const float blendedAccelCurve =
+                car.gearedDrive.engineState ==
+                        CSceneVehicleCarEngineControlState_GearShift
+                ? 0.0f
+                : (1.0f - slipAccelMix) * slippingAccelCurve +
+                          gearAccelCurve * slipAccelMix;
+        const float turboDriveOverride =
+                car.turbo.type != CSceneVehicleCar::ETurboType_Inactive
+                ? gearAccelCurve * car.turbo.impulseScale
+                : 0.0f;
+        const float rearGearMaterialSign =
+                car.engine.useLowSpeedGateB ? -1.0f : 0.0f;
+        const float steeringSlowdownForce =
+                tuning.steering.slowDownScale *
+                std::fabs(car.controls.currentSteering) *
+                compiled.steerSlowdown.Evaluate(
+                        speedKilometersPerHour) *
+                (car.engine.useLowSpeedGateB ? -1.0f : 1.0f);
+        float driveForce =
+                car.BurnoutExitAcceleration(&tuning, tick) +
+                car.BurnoutDriveFade(&tuning, tick) *
+                        (turboDriveOverride +
+                         (car.controls.lowSpeedGateA *
+                                  request.materialVals.y +
+                          rearGearMaterialSign * request.materialVals.y *
+                                  car.controls.lowSpeedGateB) *
+                                 blendedAccelCurve) -
+                steeringSlowdownForce;
+        if (waterActive != 0) {
+            driveForce *= 0.5f;
+        }
+        if (car.controls.forcedLowSpeedFriction != 0) {
+            driveForce =
+                    car.turbo.type != CSceneVehicleCar::ETurboType_Inactive
+                    ? gearAccelCurve * car.turbo.impulseScale
+                    : 0.0f;
+        }
+        return driveForce;
+    }
+
+    template<bool NativeBinary32>
+    static FV_E019_ALWAYS_INLINE void ApplyModel6GroundForcesCompiled(
+            CSceneVehicleCar &car,
+            CHmsDyna &dyna,
+            const CSceneVehicleCar::LegacyForceRequest &request,
+            const CSceneVehicleCarTuning &tuning,
+            const OptimizedCpuCompiledModel6Tuning &compiled,
+            float speedKilometersPerHour,
+            float maxStaticSideForceCurve,
+            CSceneVehicleCar::Model6ForceState &state) {
+        if (car.controls.forcedLowSpeedFriction == 0 &&
+            car.controls.lowSpeedGateB > LowSpeedGateThreshold &&
+            car.controls.lowSpeedGateA < LowSpeedGateThreshold &&
+            car.gearedDrive.burnoutPhase ==
+                    CSceneVehicleCarBurnoutPhase_TimedSpin) {
+            car.gearedDrive.burnoutExitStartTick = state.tick;
+            car.gearedDrive.burnoutPhase =
+                    CSceneVehicleCarBurnoutPhase_ExitFade;
+        }
+
+        car.TryEnterForwardBurnout(
+                &tuning,
+                request.linearSpeed,
+                request.visualSteerYaw,
+                state.frameY,
+                state.tick,
+                request.hasGroundMaterial);
+        car.UpdateGearDirection(request.linearSpeed);
+
+        const float rolloverInput =
+                (request.linearSpeed.x * request.linearSpeed.x) /
+                (std::fabs(request.linearSpeed.z) + 1.0f);
+        AddVehicleTorque(dyna, {
+                0.0f,
+                0.0f,
+                -SignNonNegative(request.linearSpeed.x) *
+                        compiled.rolloverLateralFromSpeedRatio.Evaluate(
+                                OptimizedCpuCompiledTuningCurve::
+                                        ConvertSpeedToKmh(rolloverInput)),
+        });
+
+        const float steerAssistRamp = Model6SteerAssistRamp<NativeBinary32>(
+                tuning, request.linearSpeed);
+        const float maxStaticSideForce =
+                maxStaticSideForceCurve *
+                request.materialVals.w;
+        const float steerTorque =
+                compiled.steerDriveTorque.Evaluate(
+                        speedKilometersPerHour);
+        for (u32 wheelIndex = 0u;
+             wheelIndex < state.wheelCount;
+             ++wheelIndex) {
+            CSceneVehicleCar::SSimulationWheel &wheel =
+                    car.wheels[wheelIndex];
+            const bool front = IsFrontVehicleWheel(wheel.axle);
+            const float signedHalfTrack =
+                    (front ? car.gearedDrive.wheelLongitudinalSpan
+                           : -car.gearedDrive.wheelLongitudinalSpan) *
+                    0.5f;
+            const float wheelSideSpeed = request.linearSpeed.x +
+                    request.angularSpeed.y * signedHalfTrack;
+            float requestedSideForce =
+                    -tuning.gearedDrive.lateralForceScale * 0.5f *
+                    wheelSideSpeed;
+            CSceneVehicleCar::GearedWheelSideForceResult wheelForce;
+            if (std::fabs(requestedSideForce) > maxStaticSideForce) {
+                const float clippedSideForceMagnitude =
+                        (1.0f -
+                         tuning.gearedDrive.driveSideFrictionSlipBlend) *
+                                maxStaticSideForce +
+                        tuning.gearedDrive.driveSideFrictionSlipBlend *
+                                std::fabs(requestedSideForce);
+                wheelForce.sideLimit = maxStaticSideForce;
+                wheelForce.sideRequested =
+                        std::fabs(requestedSideForce);
+                requestedSideForce =
+                        SignNonNegative(requestedSideForce) *
+                        clippedSideForceMagnitude;
+                wheelForce.slipped = true;
+            }
+
+            float driveSideTorque =
+                    tuning.gearedDrive.sideForceToDriveTorqueScale *
+                    requestedSideForce;
+            float steerAssistTorque = 0.0f;
+            if (front) {
+                steerAssistTorque =
+                        steerAssistRamp * car.controls.currentSteering *
+                        steerTorque;
+                if (car.engine.useLowSpeedGateB) {
+                    steerAssistTorque = -steerAssistTorque;
+                }
+                if (wheel.realTimeState.slipping) {
+                    steerAssistTorque *=
+                            tuning.gearedDrive.slippingSteerTorqueScale;
+                }
+                driveSideTorque -= steerAssistTorque;
+            }
+            AddVehicleTorque(
+                    dyna,
+                    {0.0f,
+                     driveSideTorque * signedHalfTrack,
+                     0.0f});
+            wheelForce.force = requestedSideForce;
+            state.sideForceLimitTotal += wheelForce.sideLimit;
+            state.requestedSideForceTotal += wheelForce.sideRequested;
+            state.slipSeen |= wheelForce.slipped;
+        }
+
+        car.UpdateSlipMemory(state.tick, state.slipSeen);
+        const float slipAccelMix = car.ComputeSlipAccelerationBlend(
+                &tuning,
+                state.tick,
+                state.sideForceLimitTotal,
+                state.requestedSideForceTotal);
+        const float driveForce = Model6DriveForceCompiled(
+                car,
+                request,
+                tuning,
+                compiled,
+                speedKilometersPerHour,
+                state.tick,
+                state.waterActive,
+                slipAccelMix);
+        const CSceneVehicleCar::OpposingLongitudinalResult opposing =
+                car.ComputeOpposingLongitudinalForce(
+                        &tuning,
+                        request.materialVals,
+                        request.linearSpeed,
+                        driveForce,
+                        state.frameY,
+                        state.tick,
+                        request.outSlipFlag);
+        const float opposingLongitudinalForce = opposing.force;
+        state.slipSeen |= opposing.slipped;
+        request.outSurfaceFeedback = opposingLongitudinalForce;
+
+        float netLongitudinal =
+                driveForce - SignNonNegative(request.linearSpeed.z) *
+                                     opposingLongitudinalForce;
+        if (request.linearSpeed.z >
+            tuning.engineSpeedNorm * request.materialVals.x) {
+            netLongitudinal = !(netLongitudinal < 0.0f)
+                    ? -tuning.gearedDrive.speedLimitForce
+                    : netLongitudinal -
+                              tuning.gearedDrive.speedLimitForce;
+        }
+        if (request.linearSpeed.z <
+            -tuning.gearedDrive.transmission.reverseSpeedNorm *
+                    request.materialVals.x) {
+            netLongitudinal = !(netLongitudinal > 0.0f)
+                    ? tuning.gearedDrive.speedLimitForce
+                    : netLongitudinal +
+                              tuning.gearedDrive.speedLimitForce;
+        }
+
+        AddVehicleCentralForce(
+                car,
+                dyna,
+                {0.0f,
+                 0.0f,
+                 netLongitudinal * request.slopeAdherenceB});
+        AddVehicleCentralForce(car, dyna, {
+                0.0f,
+                0.0f,
+                (-tuning.gearedDrive.forceZScale *
+                 request.currentForce.z) /
+                        tuning.bodyAirResponse.groundedSolidFeedback1,
+        });
+        car.slipMemory.active = state.slipSeen != 0;
+        car.gearedDrive.localSpeed = request.linearSpeed;
+    }
+
+    template<bool NativeBinary32>
+    static FV_E019_HOT_NOINLINE void ComputeModel6Compiled(
+            CSceneVehicleCar &car,
+            CHmsDyna &dyna,
+            float dt,
+            const GmVec3 &currentForce,
+            float slopeAdherenceA,
+            float slopeAdherenceB,
+            const GmVec3 &linearSpeed,
+            const GmVec3 &angularSpeed,
+            float visualSteerYaw,
+            int hasGroundMaterial,
+            CSceneVehicleMaterial::SBlendableVals &materialVals,
+            int &outSlipFlag,
+            float &outSurfaceFeedback,
+            const CSceneVehicleCarTuning &tuning,
+            const OptimizedCpuCompiledModel6Tuning &compiled) {
+        CSceneVehicleCar::LegacyForceRequest request{
+                dt,
+                currentForce,
+                slopeAdherenceA,
+                slopeAdherenceB,
+                linearSpeed,
+                angularSpeed,
+                visualSteerYaw,
+                hasGroundMaterial != 0,
+                materialVals,
+                outSlipFlag,
+                outSurfaceFeedback,
+        };
+        car.CaptureBurnoutReferenceFrame();
+
+        CSceneVehicleCar::Model6ForceState state;
+        state.frameY = car.gearedDrive.frameIso.rotation.basisY.y;
+        state.waterActive = car.ApplyWaterForces(currentForce);
+        car.controls.noGroundFrictionGuard = state.waterActive != 0;
+        state.dirtSlideSurface = false;
+        state.tick = CMwCmdBufferCore::Current()->Timer().GetTickTime();
+        state.slipSeen = car.AdvanceBurnoutPhases(&tuning, state.tick);
+        const float speedKilometersPerHour =
+                OptimizedCpuCompiledTuningCurve::ConvertSpeedToKmh(
+                        request.linearSpeed.z);
+        const float maxStaticSideForceCurve =
+                compiled.maxSideFriction.Evaluate(speedKilometersPerHour);
+        const float burnoutRollover =
+                compiled.burnoutRollover.Evaluate(speedKilometersPerHour);
+        ApplyModel6ContactForcesCompiled<NativeBinary32>(
+                car,
+                dyna,
+                request,
+                tuning,
+                compiled,
+                maxStaticSideForceCurve,
+                burnoutRollover,
+                state);
+        if (!request.hasGroundMaterial) {
+            if (car.gearedDrive.burnoutPhase ==
+                CSceneVehicleCarBurnoutPhase_TimedSpin) {
+                car.gearedDrive.burnoutExitStartTick = state.tick;
+                car.gearedDrive.burnoutPhase =
+                        CSceneVehicleCarBurnoutPhase_ExitFade;
+            }
+            car.slipMemory.active = state.slipSeen != 0;
+            car.gearedDrive.localSpeed = linearSpeed;
+            return;
+        }
+        ApplyModel6GroundForcesCompiled<NativeBinary32>(
+                car,
+                dyna,
+                request,
+                tuning,
+                compiled,
+                speedKilometersPerHour,
+                maxStaticSideForceCurve,
+                state);
+    }
+
     template<bool NativeBinary32>
     static FV_E019_ALWAYS_INLINE void ComputeModel3(
             CSceneVehicleCar &car,
@@ -1205,7 +1808,7 @@ struct OptimizedCpuModel3VehicleForceAccess {
         }
 
         float speedMagnitude =
-                Model3Sqrt<NativeBinary32>(Model3LengthSquared(linearSpeed));
+                VehicleSqrt<NativeBinary32>(VehicleLengthSquared(linearSpeed));
         if (car.controls.forcedLowSpeedFriction == 0) {
             if (!(speedMagnitude < car.reverseGearSpeedThreshold)) {
                 if (car.controls.lowSpeedGateA > LowSpeedGateThreshold) {
@@ -1227,7 +1830,8 @@ struct OptimizedCpuModel3VehicleForceAccess {
     static void ComputeForces(
             CSceneVehicleCar &car,
             CHmsDyna &dyna,
-            float dt) {
+            float dt,
+            const OptimizedCpuCompiledModel6Tuning *compiledModel6) {
         GmVec3 savedForce;
         GmVec3 savedImpulse;
         car.SaveAndClearAccumulatedFeedback(savedForce, savedImpulse);
@@ -1290,21 +1894,42 @@ struct OptimizedCpuModel3VehicleForceAccess {
                     car, tuning, linearSpeed);
             car.gearedDrive.localSpeed = linearSpeed;
 
-            ComputeModel3<NativeBinary32>(
-                    car,
-                    dyna,
-                    dt,
-                    currentForce,
-                    slopeAdherenceA,
-                    slopeAdherenceB,
-                    linearSpeed,
-                    angularSpeed,
-                    visualSteerYaw,
-                    hasGroundMaterial,
-                    materialVals,
-                    modelSlipFlag,
-                    surfaceFeedback,
-                    *tuning);
+            if (tuning->handlingModel ==
+                        CSceneVehicleCarHandlingModel_GearedDrive &&
+                compiledModel6 != nullptr) {
+                ComputeModel6Compiled<NativeBinary32>(
+                        car,
+                        dyna,
+                        dt,
+                        currentForce,
+                        slopeAdherenceA,
+                        slopeAdherenceB,
+                        linearSpeed,
+                        angularSpeed,
+                        visualSteerYaw,
+                        hasGroundMaterial,
+                        materialVals,
+                        modelSlipFlag,
+                        surfaceFeedback,
+                        *tuning,
+                        *compiledModel6);
+            } else {
+                ComputeModel3<NativeBinary32>(
+                        car,
+                        dyna,
+                        dt,
+                        currentForce,
+                        slopeAdherenceA,
+                        slopeAdherenceB,
+                        linearSpeed,
+                        angularSpeed,
+                        visualSteerYaw,
+                        hasGroundMaterial,
+                        materialVals,
+                        modelSlipFlag,
+                        surfaceFeedback,
+                        *tuning);
+            }
 
             hasAnyContact = car.ScanWheelSideSpeedKillContacts(
                     hasSideSpeedKillContact);
@@ -1342,7 +1967,13 @@ struct OptimizedCpuModel3VehicleForceAccess {
 
 namespace forevervalidator::simulation {
 
-void OptimizedCpuModel3VehicleForceContext::BeginTick(
+OptimizedCpuVehicleForceContext::OptimizedCpuVehicleForceContext(void) =
+        default;
+
+OptimizedCpuVehicleForceContext::~OptimizedCpuVehicleForceContext(void) =
+        default;
+
+void OptimizedCpuVehicleForceContext::BeginTick(
         CSceneVehicleCar &car,
         OptimizedCpuBinary32MathPath mathPath,
         CHmsItem::CCallback *enabledComputeForcesCallback) noexcept {
@@ -1361,7 +1992,7 @@ void OptimizedCpuModel3VehicleForceContext::BeginTick(
     }
 
     CSceneVehicleCarTuning *tuning =
-            OptimizedCpuModel3VehicleForceAccess::ActiveTuning(car);
+            OptimizedCpuVehicleForceAccess::ActiveTuning(car);
     const bool identityChanged =
             car_ != &car || item_ != item || tuning_ != tuning;
     if (identityChanged) {
@@ -1369,6 +2000,7 @@ void OptimizedCpuModel3VehicleForceContext::BeginTick(
         item_ = item;
         tuning_ = tuning;
         canonicalCallback_ = enabledComputeForcesCallback;
+        compiledModel6_.reset();
         stableEligible_ = false;
     } else if (canonicalCallback_ != enabledComputeForcesCallback) {
         return;
@@ -1376,38 +2008,70 @@ void OptimizedCpuModel3VehicleForceContext::BeginTick(
 
     if (!stableEligible_) {
         stableEligible_ =
-                OptimizedCpuModel3VehicleForceAccess::HasStableEligibility(
+                OptimizedCpuVehicleForceAccess::HasStableEligibility(
                         car, item, tuning, mathPath);
     }
-    tickEligible_ =
-            stableEligible_ && item->SceneMobilOwner() == &car &&
-            OptimizedCpuModel3VehicleForceAccess::
-                    HasRequiredModel3Configuration(*tuning);
+    if (stableEligible_ && tuning->handlingModel ==
+            CSceneVehicleCarHandlingModel_GearedDrive) {
+        if (!OptimizedCpuVehicleForceAccess::
+                    HasRequiredModel6Configuration(car, *tuning)) {
+            compiledModel6_.reset();
+            stableEligible_ = false;
+            return;
+        }
+        if (compiledModel6_ != nullptr &&
+            !compiledModel6_->IsFor(*tuning)) {
+            compiledModel6_.reset();
+        }
+        if (compiledModel6_ == nullptr) {
+            std::unique_ptr<OptimizedCpuCompiledModel6Tuning> compiled;
+            try {
+                compiled =
+                        std::make_unique<OptimizedCpuCompiledModel6Tuning>();
+            } catch (const std::bad_alloc &) {
+                return;
+            }
+            if (!compiled->TryBuild(*tuning)) {
+                return;
+            }
+            compiledModel6_ = std::move(compiled);
+        }
+    }
+    tickEligible_ = stableEligible_ && item->SceneMobilOwner() == &car &&
+            (OptimizedCpuVehicleForceAccess::
+                     HasRequiredModel3Configuration(*tuning) ||
+             (OptimizedCpuVehicleForceAccess::
+                      HasRequiredModel6Configuration(car, *tuning) &&
+              compiledModel6_ != nullptr));
 }
 
-void OptimizedCpuModel3VehicleForceContext::Reset(void) noexcept {
+void OptimizedCpuVehicleForceContext::Reset(void) noexcept {
     car_ = nullptr;
     item_ = nullptr;
     tuning_ = nullptr;
     canonicalCallback_ = nullptr;
+    compiledModel6_.reset();
     stableEligible_ = false;
     tickEligible_ = false;
 }
 
-bool OptimizedCpuModel3VehicleForceContext::WouldUseSpecializationFor(
+bool OptimizedCpuVehicleForceContext::WouldUseSpecializationFor(
         const CHmsItem *item) const noexcept {
     return tickEligible_ && car_ != nullptr && item_ != nullptr &&
            tuning_ != nullptr && item == item_ && car_->HmsItem() == item_ &&
            item_->SceneMobilOwner() == car_ &&
            car_->ArePhysicsUpdatesEnabled() != 0 &&
-           OptimizedCpuModel3VehicleForceAccess::ActiveTuning(*car_) ==
+           OptimizedCpuVehicleForceAccess::ActiveTuning(*car_) ==
                    tuning_ &&
-           tuning_->handlingModel == CSceneVehicleCarHandlingModel_Lateral &&
+           (tuning_->handlingModel == CSceneVehicleCarHandlingModel_Lateral ||
+            (tuning_->handlingModel ==
+                     CSceneVehicleCarHandlingModel_GearedDrive &&
+             compiledModel6_ != nullptr && compiledModel6_->IsFor(*tuning_))) &&
            item_->CallbackGet(CHmsItem::ECallback_ComputeForces) ==
                    canonicalCallback_;
 }
 
-bool OptimizedCpuModel3VehicleForceContext::TryComputeOwnerForces(
+bool OptimizedCpuVehicleForceContext::TryComputeOwnerForces(
         CHmsCorpus *corpus,
         float dt) {
     if (corpus == nullptr ||
@@ -1417,12 +2081,24 @@ bool OptimizedCpuModel3VehicleForceContext::TryComputeOwnerForces(
         corpus->Dynamics() == nullptr) {
         return false;
     }
-    OptimizedCpuModel3VehicleForceAccess::ComputeForces<true>(
-            *car_, *corpus->Dynamics(), dt);
+    if (tuning_->handlingModel ==
+                CSceneVehicleCarHandlingModel_GearedDrive &&
+        !OptimizedCpuVehicleForceAccess::CanUseModel6CommonPath(
+                *car_, *corpus->Dynamics())) {
+        return false;
+    }
+    OptimizedCpuVehicleForceAccess::ComputeForces<true>(
+            *car_,
+            *corpus->Dynamics(),
+            dt,
+            tuning_->handlingModel ==
+                    CSceneVehicleCarHandlingModel_GearedDrive
+                    ? compiledModel6_.get()
+                    : nullptr);
     return true;
 }
 
-float OptimizedCpuEvaluateModel3CurveForDifferential(
+float OptimizedCpuEvaluateVehicleCurveForDifferential(
         CFuncKeysReal &curve,
         float input,
         bool convertSpeedToKmh,
@@ -1430,14 +2106,14 @@ float OptimizedCpuEvaluateModel3CurveForDifferential(
         OptimizedCpuBinary32MathPath mathPath) noexcept {
     const auto evaluate = [&curve, input](auto nativeTag) noexcept {
         constexpr bool NativeBinary32 = decltype(nativeTag)::value;
-        return OptimizedCpuModel3VehicleForceAccess::
+        return OptimizedCpuVehicleForceAccess::
                 EvaluateCurve<NativeBinary32>(curve, input);
     };
     const auto evaluateSpeed = [&curve, input](auto nativeTag) noexcept {
         constexpr bool NativeBinary32 = decltype(nativeTag)::value;
-        const float converted = Model3FromDouble<NativeBinary32>(
+        const float converted = VehicleFromDouble<NativeBinary32>(
                 static_cast<double>(input) * static_cast<double>(3.6f));
-        return OptimizedCpuModel3VehicleForceAccess::
+        return OptimizedCpuVehicleForceAccess::
                 EvaluateCurve<NativeBinary32>(curve, converted);
     };
 
@@ -1456,11 +2132,11 @@ float OptimizedCpuEvaluateModel3CurveForDifferential(
 
 }  // namespace forevervalidator::simulation
 
-void CHmsZoneDynamic::ComputeCorpusForcesOptimizedCpuModel3(
+void CHmsZoneDynamic::ComputeCorpusForcesOptimizedCpuVehicle(
         CHmsCorpus *corpus,
         float dt,
         forevervalidator::simulation::
-                OptimizedCpuModel3VehicleForceContext &context) {
+                OptimizedCpuVehicleForceContext &context) {
     CHmsDyna *dyna = corpus->Dynamics();
     if (dyna == 0) {
         return;
@@ -1511,3 +2187,4 @@ void CHmsZoneDynamic::ComputeCorpusForcesOptimizedCpuModel3(
 }
 
 #undef FV_E019_ALWAYS_INLINE
+#undef FV_E019_HOT_NOINLINE

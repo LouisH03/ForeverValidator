@@ -217,7 +217,8 @@ public operation returns a typed `Result<T>`.
 `ValidationOptions::backend` selects the backend for one library call. The
 optimized CPU backend uses a dedicated deterministic execution path with cached
 static-scene transforms, precomputed mesh data, hierarchical broad-phase
-queries, native binary32 arithmetic, and specialized vehicle physics.
+queries, native binary32 arithmetic, compiled tuning curves, and specialized
+Model3 and Model6 vehicle physics.
 `ValidateReplayBatch` executes an ordered list of independent replay requests
 and preserves an individual report or error for every item.
 

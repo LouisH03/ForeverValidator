@@ -2,6 +2,6 @@
 
 void ReplayPhysicsWorld::StepOptimizedCpuNativeBinary32(
         forevervalidator::simulation::
-                OptimizedCpuModel3VehicleForceContext &model3Context) {
-    zone_.PhysicsStep2OptimizedCpuNativeBinary32(model3Context);
+                OptimizedCpuVehicleForceContext &vehicleForceContext) {
+    zone_.PhysicsStep2OptimizedCpuNativeBinary32(vehicleForceContext);
 }

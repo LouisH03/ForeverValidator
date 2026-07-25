@@ -34,7 +34,7 @@ void CHmsZoneDynamic::PhysicsStep2OptimizedCpuCachedImpl(
         const OptimizedCpuStaticSurfaceTransformCache &transforms,
         bool nativeBinary32,
         forevervalidator::simulation::
-                OptimizedCpuModel3VehicleForceContext *model3Context) {
+                OptimizedCpuVehicleForceContext *vehicleForceContext) {
     const auto detectCollisions =
             [&transforms, nativeBinary32](
                     CHmsCollisionManagerSZone &collisionManagerZone,
@@ -50,10 +50,10 @@ void CHmsZoneDynamic::PhysicsStep2OptimizedCpuCachedImpl(
         }
     };
     const auto computeForces =
-            [this, model3Context](CHmsCorpus *corpus, float dt) {
-        if (model3Context != nullptr) {
-            ComputeCorpusForcesOptimizedCpuModel3(
-                    corpus, dt, *model3Context);
+            [this, vehicleForceContext](CHmsCorpus *corpus, float dt) {
+        if (vehicleForceContext != nullptr) {
+            ComputeCorpusForcesOptimizedCpuVehicle(
+                    corpus, dt, *vehicleForceContext);
         } else {
             ComputeCorpusForces(corpus, dt);
         }
@@ -160,7 +160,7 @@ void CHmsZoneDynamic::PhysicsStep2OptimizedCpuCached(
 void CHmsZoneDynamic::PhysicsStep2OptimizedCpuNativeBinary32Cached(
         const OptimizedCpuStaticSurfaceTransformCache &transforms,
         forevervalidator::simulation::
-                OptimizedCpuModel3VehicleForceContext &model3Context) {
+                OptimizedCpuVehicleForceContext &vehicleForceContext) {
     PhysicsStep2OptimizedCpuCachedImpl(
-            transforms, true, &model3Context);
+            transforms, true, &vehicleForceContext);
 }
