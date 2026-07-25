@@ -6,6 +6,7 @@
 #include <optional>
 #include <vector>
 
+#include <forevervalidator/experimental/physics_sandbox.h>
 #include "engine/game/game_ctn_types.h"
 #include "simulation/replay/replay_challenge_construction.h"
 #include "simulation/control/replay_control_timeline.h"
@@ -35,11 +36,20 @@ struct ReplaySimulationStateView {
     std::uint32_t respawnCount = 0u;
 };
 
+struct ReplayStaticCollisionTriangle {
+    GmVec3 a{};
+    GmVec3 b{};
+    GmVec3 c{};
+};
+
 struct ReplaySimulationInstanceClone {
     CTrackManiaRace::RuntimeClone race;
     ReplaySimulationRuntime::RuntimeClone runtime;
     std::uint32_t incrementalRespawnCount = 0u;
 };
+
+void ClassifyPhysicsSandboxRenderLayers(
+        forevervalidator::experimental::PhysicsSandboxRenderScene &scene);
 
 class ReplaySimulationSession {
 public:
@@ -74,6 +84,10 @@ public:
     std::optional<OptimizedCpuStaticSceneFingerprint>
             CaptureOptimizedCpuStaticSceneFingerprintForTesting(
                     void) const noexcept;
+    const std::vector<ReplayStaticCollisionTriangle> &
+            StaticCollisionTriangles() const noexcept;
+    forevervalidator::experimental::PhysicsSandboxRenderSceneHandle
+            StaticRenderScene() const noexcept;
     std::optional<std::uint32_t> ApplyReplayStuntTimePenalty(
             std::uint32_t overtimeMs);
     std::shared_ptr<const ReplaySimulationInstanceClone>

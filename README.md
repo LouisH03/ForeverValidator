@@ -29,10 +29,9 @@ Platform, and Puzzle validate completion, time, and respawns where recorded.
 Stunts validates completion, respawns, and the independently simulated stunt
 score.
 
-TMInterface replays are detected from the input clock marker written by
-TMInterface. ForeverValidator normalizes their recorded input timeline and
+Scripted-input replays are detected from their input clock marker. ForeverValidator normalizes their recorded input timeline and
 checks whether those inputs reproduce the stored ghost, while clearly marking
-the replay as TMInterface-generated. These replays remain invalid for
+the replay as script-generated. These replays remain invalid for
 competitive validation even when the inputs and ghost match.
 
 ## Game files
@@ -128,9 +127,9 @@ nonzero error code when replay decoding, asset loading, or simulation cannot
 be completed. JSON includes typed map environment, vehicle, play mode,
 replay provenance, input/ghost match, expected and observed outcomes,
 trajectory counts, maximum deviation, and the first divergence when present.
-TMInterface replays use the `tminterface_replay` status and expose
+Scripted replays use the `scripted_replay` status and expose
 `replay_file_metadata.replay_provenance` plus `input_ghost_match`; the CLI also
-prints the TMInterface classification to stderr.
+prints the scripted-input classification to stderr.
 
 ## Container image
 

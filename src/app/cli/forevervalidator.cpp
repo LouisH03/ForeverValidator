@@ -157,11 +157,11 @@ const char *InputGhostMatchName(forevervalidator::InputGhostMatch match) {
 void ReportReplayClassification(const ValidationAttempt &attempt) {
     if (!attempt.HasValue() ||
         attempt.Value().replayProvenance !=
-                forevervalidator::ReplayProvenance::TMInterface) {
+                forevervalidator::ReplayProvenance::Scripted) {
         return;
     }
     std::fprintf(stderr,
-                 "TMInterface replay: input-vs-ghost=%s\n",
+                 "Scripted replay: input-vs-ghost=%s\n",
                  InputGhostMatchName(attempt.Value().inputGhostMatch));
 }
 

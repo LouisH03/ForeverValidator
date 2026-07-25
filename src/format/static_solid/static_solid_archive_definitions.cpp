@@ -1,4 +1,5 @@
 #include "format/static_solid/static_solid_archive_definitions.h"
+#include <new>
 #include "format/archive/gm_wire_conversion.h"
 #include "engine/scene/plug_solid.h"
 namespace {
@@ -338,6 +339,25 @@ void CGameCtnReplayStaticSolidArchiveVisualGeometryDefinition::BindVertexRecords
     vertexRecords = newVertexRecords;
 }
 
+bool CGameCtnReplayStaticSolidArchiveVisualGeometryDefinition::
+        AppendTexCoordStream(
+                u32 dimension,
+                CGameCtnReplayStaticSolidArchivePayloadSlice records) {
+    try {
+        texCoordStreams.push_back({dimension, records});
+        return true;
+    } catch (const std::bad_alloc &) {
+        return false;
+    }
+}
+
+void CGameCtnReplayStaticSolidArchiveVisualGeometryDefinition::BindTangents(
+        CGameCtnReplayStaticSolidArchivePayloadSlice newTangents,
+        CGameCtnReplayStaticSolidArchivePayloadSlice newBinormals) {
+    tangents = newTangents;
+    binormals = newBinormals;
+}
+
 void CGameCtnReplayStaticSolidArchiveVisualGeometryDefinition::BindIndexBuffer(
         u32 newIndexCount,
         CGameCtnReplayStaticSolidArchivePayloadSlice newIndices) {
@@ -368,6 +388,24 @@ CGameCtnReplayStaticSolidArchivePayloadSlice
 CGameCtnReplayStaticSolidArchiveVisualGeometryDefinition::VertexRecords()
         const {
     return vertexRecords;
+}
+
+const std::vector<
+        CGameCtnReplayStaticSolidArchiveVisualGeometryDefinition::
+                TexCoordStream> &
+CGameCtnReplayStaticSolidArchiveVisualGeometryDefinition::TexCoordStreams()
+        const {
+    return texCoordStreams;
+}
+
+CGameCtnReplayStaticSolidArchivePayloadSlice
+CGameCtnReplayStaticSolidArchiveVisualGeometryDefinition::Tangents() const {
+    return tangents;
+}
+
+CGameCtnReplayStaticSolidArchivePayloadSlice
+CGameCtnReplayStaticSolidArchiveVisualGeometryDefinition::Binormals() const {
+    return binormals;
 }
 
 CGameCtnReplayStaticSolidArchivePayloadSlice

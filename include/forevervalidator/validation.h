@@ -186,7 +186,7 @@ enum class ValidationStatus {
     RespawnExpectationUnavailable, ObservationError,
     IncompatibleReplayVersion = 11,
     InputUnavailable = 12,
-    TMInterfaceReplay = 13,
+    ScriptedReplay = 13,
 };
 
 enum class ValidationOutcome { Invalid, Valid, WrongSimulation, Unavailable, Error };
@@ -194,7 +194,7 @@ enum class ObservationError { NonFiniteDistance, ReplayMetadataUnavailable };
 
 enum class ReplayProvenance : std::uint8_t {
     Unmarked,
-    TMInterface,
+    Scripted,
 };
 
 enum class InputGhostMatch : std::uint8_t {

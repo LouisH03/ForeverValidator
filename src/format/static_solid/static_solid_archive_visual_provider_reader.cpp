@@ -7,6 +7,8 @@
 #include "format/static_solid/static_solid_archive_visual_provider_state.h"
 #include "format/archive/tmnf_archive_ids.h"
 #include "format/archive/gbx_archive_format.h"
+#include <new>
+#include <vector>
 namespace {
 
 class CPlugVisualTexCoordArchiveStream {
@@ -15,6 +17,7 @@ public:
     static int FromArchiveWord(u32 archiveWord,
                                CPlugVisualTexCoordArchiveStream *streamOut);
     u32 BytesPerVertex() const;
+    u32 Dimension() const;
 
 private:
     explicit CPlugVisualTexCoordArchiveStream(u32 bytesPerVertex);
@@ -55,6 +58,10 @@ CPlugVisualTexCoordArchiveStream::CPlugVisualTexCoordArchiveStream(
 
 u32 CPlugVisualTexCoordArchiveStream::BytesPerVertex() const {
     return bytesPerVertex;
+}
+
+u32 CPlugVisualTexCoordArchiveStream::Dimension() const {
+    return bytesPerVertex / sizeof(float);
 }
 
 int ApplyIndexBufferFeedback(
@@ -144,6 +151,17 @@ int StaticSolidArchiveVisualReader::
         return 0;
     }
 
+    struct ParsedTexCoordStream {
+        u32 dimension = 2u;
+        CGameCtnReplayStaticSolidArchivePayloadSlice records =
+                CGameCtnReplayStaticSolidArchivePayloadSlice::Empty();
+    };
+    std::vector<ParsedTexCoordStream> texCoordStreams;
+    try {
+        texCoordStreams.reserve(texcoordStreamCount);
+    } catch (const std::bad_alloc &) {
+        return 0;
+    }
     for (u32 i = 0u; i < texcoordStreamCount; i++) {
         u32 texCoordArchiveWord = 0u;
         if (!byteStream->ReadU32(&texCoordArchiveWord)) {
@@ -152,9 +170,23 @@ int StaticSolidArchiveVisualReader::
         CPlugVisualTexCoordArchiveStream texCoordStream;
         if (!CPlugVisualTexCoordArchiveStream::FromArchiveWord(
                     texCoordArchiveWord,
-                    &texCoordStream) ||
-            !byteStream->SkipCounted(vertexCount,
+                    &texCoordStream)) {
+            return 0;
+        }
+        const u32 recordOffset = byteStream->Offset();
+        if (!byteStream->SkipCounted(vertexCount,
                                      texCoordStream.BytesPerVertex())) {
+            return 0;
+        }
+        try {
+            texCoordStreams.push_back({
+                    texCoordStream.Dimension(),
+                    CGameCtnReplayStaticSolidArchivePayloadSlice::
+                            FromRecords(
+                                    recordOffset,
+                                    vertexCount,
+                                    texCoordStream.BytesPerVertex())});
+        } catch (const std::bad_alloc &) {
             return 0;
         }
     }
@@ -179,6 +211,12 @@ int StaticSolidArchiveVisualReader::
                                       flags,
                                       vertexCount,
                                       boundingBox);
+    for (const ParsedTexCoordStream &stream : texCoordStreams) {
+        if (!geometry.AppendTexCoordStream(
+                    stream.dimension, stream.records)) {
+            return 0;
+        }
+    }
     if (!state->StartGeometryAndCommit(store, geometry)) {
         return 0;
     }
@@ -225,10 +263,27 @@ int StaticSolidArchiveVisualReader::
     }
 
     u32 tangentCount = 0u;
-    return byteStream->ReadU32(&tangentCount) &&
-           byteStream->SkipCounted(tangentCount, 4u) &&
-           byteStream->ReadU32(&tangentCount) &&
-           byteStream->SkipCounted(tangentCount, 4u);
+    if (!byteStream->ReadU32(&tangentCount)) {
+        return 0;
+    }
+    const u32 tangentOffset = byteStream->Offset();
+    if (!byteStream->SkipCounted(tangentCount, 4u)) {
+        return 0;
+    }
+    u32 binormalCount = 0u;
+    if (!byteStream->ReadU32(&binormalCount)) {
+        return 0;
+    }
+    const u32 binormalOffset = byteStream->Offset();
+    if (!byteStream->SkipCounted(binormalCount, 4u)) {
+        return 0;
+    }
+    geometry.BindTangents(
+            CGameCtnReplayStaticSolidArchivePayloadSlice::FromRecords(
+                    tangentOffset, tangentCount, 4u),
+            CGameCtnReplayStaticSolidArchivePayloadSlice::FromRecords(
+                    binormalOffset, binormalCount, 4u));
+    return state->CommitActiveGeometry(store);
 }
 
 int StaticSolidArchiveVisualReader::

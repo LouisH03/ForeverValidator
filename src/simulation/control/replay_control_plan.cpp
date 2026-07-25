@@ -39,11 +39,11 @@ struct ReplayControlState {
     s32 steerLeftTime = 0;
     s32 steerRightTime = 0;
     s32 steerTime = 0;
-    double steerValue = 0.0;
+    forevervalidator::AnalogInputState steerValue = 0;
     s32 accelerateTime = 0;
     s32 brakeTime = 0;
     s32 gasTime = 0;
-    double gasValue = 0.0;
+    forevervalidator::AnalogInputState gasValue = 0;
     std::array<u32,
                static_cast<std::size_t>(ReplayStuntInputAction::Count)>
             stuntInputLastChangeTimeMs{};
@@ -142,43 +142,41 @@ ReplayStuntInputState StuntInputStateFromControlState(
 }
 
 ReplayVehicleControlState ControlsFromState(const ReplayControlState &state) {
-    double steering = 0.0;
+    float steering = 0.0f;
     const s32 digitalSteerTime = ((state.steerLeftTime) > (state.steerRightTime) ? (state.steerLeftTime) : (state.steerRightTime));
     const bool analogSteeringWins =
             state.steerTime > digitalSteerTime ||
             (state.steerTime == digitalSteerTime &&
              !state.steerLeft && !state.steerRight &&
-             std::fabs(state.steerValue) > 0.0099999998);
+             std::abs(state.steerValue) > 655);
     if (analogSteeringWins) {
-        steering = -state.steerValue;
+        steering = static_cast<float>(state.steerValue) /
+                static_cast<float>(forevervalidator::kAnalogInputScale);
     } else if (state.steerLeft) {
-        steering = -1.0;
+        steering = -1.0f;
     } else if (state.steerRight) {
-        steering = 1.0;
+        steering = 1.0f;
     }
 
-    double lowSpeedGateA = 0.0;
-    double lowSpeedGateB = 0.0;
+    float lowSpeedGateA = 0.0f;
+    float lowSpeedGateB = 0.0f;
     const s32 digitalGateTime = ((state.accelerateTime) > (state.brakeTime) ? (state.accelerateTime) : (state.brakeTime));
     const bool analogGasWins =
             state.gasTime > digitalGateTime ||
             (state.gasTime == digitalGateTime &&
              !state.accelerate && !state.brake);
     if (analogGasWins) {
-        if (state.gasValue >= 0.30000001) {
-            lowSpeedGateA = 1.0;
-        } else if (state.gasValue <= -0.30000001) {
-            lowSpeedGateB = 1.0;
+        if (state.gasValue <= -19661) {
+            lowSpeedGateA = 1.0f;
+        } else if (state.gasValue >= 19661) {
+            lowSpeedGateB = 1.0f;
         }
     } else {
-        lowSpeedGateA = state.accelerate ? 1.0 : 0.0;
-        lowSpeedGateB = state.brake ? 1.0 : 0.0;
+        lowSpeedGateA = state.accelerate ? 1.0f : 0.0f;
+        lowSpeedGateB = state.brake ? 1.0f : 0.0f;
     }
 
-    return {
-            static_cast<float>(lowSpeedGateA),
-            static_cast<float>(lowSpeedGateB),
-            static_cast<float>(steering)};
+    return {lowSpeedGateA, lowSpeedGateB, steering};
 }
 
 bool AtOrAfter(s32 timeMs, const std::optional<s32> &thresholdMs) {

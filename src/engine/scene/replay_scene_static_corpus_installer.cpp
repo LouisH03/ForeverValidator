@@ -3,20 +3,59 @@
 
 #include "engine/scene/replay_scene_composite_asset.h"
 #include "engine/scene/replay_scene_placements.h"
+#include "engine/game/game_ctn_block.h"
 namespace {
+
+std::string IdName(const CMwId &id) {
+    const char *name = id.GetString();
+    return name != nullptr ? name : "";
+}
+
+StaticSceneProvenance BlockProvenance(
+        const ReplaySceneBlockPlacement &placement,
+        u32 componentIndex = 0u) {
+    const CGameCtnBlock &block = placement.Block();
+    StaticSceneProvenance provenance;
+    provenance.blockName = IdName(block.Identifier().id);
+    provenance.collection = IdName(block.Identifier().collection);
+    provenance.placementIdentity = placement.InstallationOrdinal();
+    if (block.BlockInstanceId().has_value()) {
+        provenance.blockInstanceId = block.BlockInstanceId()->Value();
+    }
+    provenance.variant = block.VariantIndex();
+    provenance.componentIndex = componentIndex;
+    provenance.authored =
+            block.Origin() == CGameCtnBlock::PlacementOrigin::Authored;
+    return provenance;
+}
+
+StaticScenePurpose BlockPurpose(
+        const ReplaySceneBlockPlacement &placement,
+        StaticScenePurpose defaultPurpose) {
+    const CGameCtnBlock::PlacementOrigin origin = placement.Block().Origin();
+    return origin == CGameCtnBlock::PlacementOrigin::TerrainModifier ||
+                   origin == CGameCtnBlock::PlacementOrigin::
+                                     AutomaticBaseTerrainModifier
+            ? StaticScenePurpose::Terrain
+            : defaultPurpose;
+}
 
 bool AddCompositeModel(
         ReplaySceneCompositeAsset &composite,
         const GmIso4 &worldIso,
         StaticScenePurpose purpose,
+        StaticSceneProvenance provenance,
         StaticSceneModelCollection &models) {
     if (composite.Empty()) {
         return true;
     }
     StaticSolidPrototype prototype = composite.TakePrototype();
-    return prototype.IsValid() &&
-           models.Add(StaticSceneModel(
-                   std::move(prototype), worldIso, purpose));
+    if (!prototype.IsValid()) {
+        return false;
+    }
+    StaticSceneModel model(std::move(prototype), worldIso, purpose);
+    model.SetProvenance(std::move(provenance));
+    return models.Add(std::move(model));
 }
 
 bool AddHelperModel(
@@ -37,6 +76,7 @@ bool AddHelperModel(
     return AddCompositeModel(composite,
                              placement.WorldIso(),
                              StaticScenePurpose::Helper,
+                             BlockProvenance(placement),
                              models);
 }
 
@@ -48,6 +88,7 @@ bool AddClipModel(
     return AddCompositeModel(composite,
                              placement.WorldIso(),
                              StaticScenePurpose::Clip,
+                             BlockProvenance(placement),
                              models);
 }
 
@@ -72,6 +113,7 @@ bool AddCheckpointTriggerModel(
     StaticSceneModel model(prototype,
                            *worldIso,
                            StaticScenePurpose::CheckpointTrigger);
+    model.SetProvenance(BlockProvenance(placement));
     model.SetItemProperties(placement.CheckpointTriggerProperties());
     model.SetCheckpoint(placement.CheckpointIdentity(),
                         placement.BlockSpawnIso());
@@ -82,6 +124,7 @@ bool AddSubMobilModels(
         const ReplaySceneBlockPlacement &placement,
         StaticSceneModelCollection &models,
         bool &complete) {
+    u32 componentIndex = 0u;
     for (const ReplaySceneAssetPlacement &asset :
          placement.SubMobilAssetPlacements()) {
         const StaticSolidPrototype prototype = asset.Prototype();
@@ -89,10 +132,13 @@ bool AddSubMobilModels(
             complete = false;
             continue;
         }
-        if (!models.Add(StaticSceneModel(
-                    prototype,
-                    placement.WorldIso(),
-                    StaticScenePurpose::PlacedBlock))) {
+        StaticSceneModel model(
+                prototype,
+                placement.WorldIso(),
+                BlockPurpose(placement, StaticScenePurpose::SubMobil));
+        model.SetProvenance(
+                BlockProvenance(placement, componentIndex++));
+        if (!models.Add(std::move(model))) {
             return false;
         }
     }
@@ -128,7 +174,10 @@ bool AddBlockPlacement(
                     placement.WorldIso(),
                     isDedicatedCollision
                             ? StaticScenePurpose::DedicatedInitialCollision
-                            : StaticScenePurpose::PlacedBlock);
+                            : BlockPurpose(
+                                      placement,
+                                      StaticScenePurpose::PlacedBlock));
+            model.SetProvenance(BlockProvenance(placement));
             if (isDedicatedCollision) {
                 const std::optional<CHmsItem::Properties> properties =
                         placement.DedicatedCollisionProperties();
@@ -162,6 +211,10 @@ bool AddPylonPlacement(
     StaticSceneModel model(asset->Prototype(),
                            placement.WorldIso(),
                            StaticScenePurpose::Pylon);
+    StaticSceneProvenance provenance;
+    provenance.placementIdentity = placement.InstallationOrdinal();
+    provenance.authored = false;
+    model.SetProvenance(std::move(provenance));
     model.SetItemProperties(placement.ItemProperties());
     return models.Add(std::move(model));
 }
