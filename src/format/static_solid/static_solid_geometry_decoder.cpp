@@ -4,9 +4,60 @@
 
 #include "format/static_solid/static_scene_archive_loader.h"
 #include "format/static_solid/static_solid_archive_visual_provider_state.h"
+#include "format/archive/archive_binary32.h"
 namespace {
 
+float ReadF32(const uint8_t *bytes) {
+    return TmnfArchiveBinary32::ReadLittleEndian(bytes);
+}
+
+GmVec3 UnpackSnorm10(const uint8_t *bytes) {
+    const u32 packed =
+            TmnfArchiveBinary32::ReadU32LittleEndian(bytes);
+    const int sx = (static_cast<int32_t>(packed << 22u)) >> 22;
+    const int sy = (static_cast<int32_t>(packed << 12u)) >> 22;
+    const int sz = (static_cast<int32_t>(packed << 2u)) >> 22;
+    return {
+            static_cast<float>(static_cast<double>(sx) / 511.0),
+            static_cast<float>(static_cast<double>(sy) / 511.0),
+            static_cast<float>(static_cast<double>(sz) / 511.0)};
+}
+
 }  // namespace
+
+bool DecodeStaticSolidTexCoordStream(
+        const uint8_t *bytes,
+        u32 recordCount,
+        u32 dimension,
+        u32 recordStride,
+        GxTexCoordSet *destination) {
+    if (bytes == nullptr || destination == nullptr ||
+        dimension < 2u || dimension > 4u ||
+        recordStride != dimension * sizeof(float)) {
+        return false;
+    }
+    GxTexCoordSet decoded = GxTexCoordSet::Create(
+            static_cast<GxTexCoordDimension>(dimension - 2u),
+            recordCount);
+    for (u32 vertex = 0u; vertex < recordCount; ++vertex) {
+        const uint8_t *source =
+                bytes + static_cast<size_t>(vertex) * recordStride;
+        GxTexCoord4 coordinate{
+                ReadF32(source),
+                ReadF32(source + 4u),
+                0.0f,
+                1.0f};
+        if (dimension >= 3u) {
+            coordinate.w = ReadF32(source + 8u);
+        }
+        if (dimension >= 4u) {
+            coordinate.q = ReadF32(source + 12u);
+        }
+        decoded.SetCoordinate(vertex, coordinate);
+    }
+    *destination = std::move(decoded);
+    return true;
+}
 
 StaticSolidDecodedPayloads::
         StaticSolidDecodedPayloads(
@@ -60,6 +111,43 @@ StaticSolidDecodedVisualGeometry::FromArchiveDefinition(
                                      ? indexBytes.Bytes()
                                      : nullptr,
                              indexRecords);
+
+    for (const auto &stream : definition.TexCoordStreams()) {
+        const StaticSolidArchiveDecodedBytes bytes =
+                decodedPayloads.Slice(
+                        definition.VisualProvider().Payload(),
+                        stream.records);
+        if (!bytes.IsAvailable()) {
+            continue;
+        }
+        GxTexCoordSet set;
+        if (DecodeStaticSolidTexCoordStream(
+                    bytes.Bytes(),
+                    definition.VertexCount(),
+                    stream.dimension,
+                    stream.records.RecordStride(),
+                    &set)) {
+            geometry.texCoordSets.push_back(std::move(set));
+        }
+    }
+
+    const auto decodePackedVectors =
+            [&](CGameCtnReplayStaticSolidArchivePayloadSlice records,
+                std::vector<GmVec3> &destination) {
+        const StaticSolidArchiveDecodedBytes bytes =
+                decodedPayloads.Slice(
+                        definition.VisualProvider().Payload(), records);
+        if (!bytes.IsAvailable() || records.RecordStride() != 4u) {
+            return;
+        }
+        destination.reserve(records.RecordCount());
+        for (u32 index = 0u; index < records.RecordCount(); ++index) {
+            destination.push_back(UnpackSnorm10(
+                    bytes.Bytes() + static_cast<size_t>(index) * 4u));
+        }
+    };
+    decodePackedVectors(definition.Tangents(), geometry.tangents);
+    decodePackedVectors(definition.Binormals(), geometry.binormals);
     return geometry;
 }
 
@@ -139,6 +227,21 @@ StaticSolidDecodedVisualGeometry::BoundingBox() const {
     return boundingBox;
 }
 
+const std::vector<GxTexCoordSet> &
+StaticSolidDecodedVisualGeometry::TexCoordSets() const {
+    return texCoordSets;
+}
+
+const std::vector<GmVec3> &
+StaticSolidDecodedVisualGeometry::Tangents() const {
+    return tangents;
+}
+
+const std::vector<GmVec3> &
+StaticSolidDecodedVisualGeometry::Binormals() const {
+    return binormals;
+}
+
 void StaticSolidArchiveVisual::InstallGeometry(
         StaticSolidDecodedVisualGeometry newGeometry) {
     std::vector<GxVertex> ownedVertices(newGeometry.VertexCount());
@@ -151,6 +254,13 @@ void StaticSolidArchiveVisual::InstallGeometry(
         newGeometry.CopyIndicesTo(ownedIndices.data());
     }
     SetOwnedGeometry(std::move(ownedVertices), std::move(ownedIndices));
+    RemoveTexCoordSetAll();
+    for (const GxTexCoordSet &source : newGeometry.TexCoordSets()) {
+        GxTexCoordSet copy = source;
+        AddTexCoordSet(copy);
+    }
+    tangents = newGeometry.Tangents();
+    binormals = newGeometry.Binormals();
     archiveTexCoordVertexCount = newGeometry.TexCoordVertexCount();
     SetBoundingBox(newGeometry.BoundingBox());
 }

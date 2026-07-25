@@ -9,6 +9,7 @@
 #include "engine/rendering/plug_tree.h"
 #include "format/static_solid/static_solid_archive_identity.h"
 #include "format/static_solid/static_solid_archive_payload_slice.h"
+#include <vector>
 class CGameCtnReplayStaticSolidArchiveMeshPayload {
 public:
     static constexpr u32 VertexRecordBytes = 12u;
@@ -154,12 +155,24 @@ private:
 
 class CGameCtnReplayStaticSolidArchiveVisualGeometryDefinition {
 public:
+    struct TexCoordStream {
+        u32 dimension = 2u;
+        CGameCtnReplayStaticSolidArchivePayloadSlice records =
+                CGameCtnReplayStaticSolidArchivePayloadSlice::Empty();
+    };
+
     void BeginGeometry(CGameCtnReplayStaticSolidArchiveNodeIdentity visual,
                        u32 serializedFlags,
                        u32 vertexCount,
                        const GmBoxAligned &boundingBox);
     void BindVertexRecords(
             CGameCtnReplayStaticSolidArchivePayloadSlice vertexRecords);
+    bool AppendTexCoordStream(
+            u32 dimension,
+            CGameCtnReplayStaticSolidArchivePayloadSlice records);
+    void BindTangents(
+            CGameCtnReplayStaticSolidArchivePayloadSlice tangents,
+            CGameCtnReplayStaticSolidArchivePayloadSlice binormals);
     void BindIndexBuffer(u32 indexCount,
                         CGameCtnReplayStaticSolidArchivePayloadSlice indices);
     CGameCtnReplayStaticSolidArchiveNodeIdentity VisualProvider() const;
@@ -169,6 +182,9 @@ public:
     u32 VertexCount() const;
     u32 IndexCount() const;
     CGameCtnReplayStaticSolidArchivePayloadSlice VertexRecords() const;
+    const std::vector<TexCoordStream> &TexCoordStreams() const;
+    CGameCtnReplayStaticSolidArchivePayloadSlice Tangents() const;
+    CGameCtnReplayStaticSolidArchivePayloadSlice Binormals() const;
     CGameCtnReplayStaticSolidArchivePayloadSlice Indices() const;
     const GmBoxAligned &BoundingBox() const;
 
@@ -179,6 +195,11 @@ private:
     u32 vertexCount = 0u;
     u32 indexCount = 0u;
     CGameCtnReplayStaticSolidArchivePayloadSlice vertexRecords =
+            CGameCtnReplayStaticSolidArchivePayloadSlice::Empty();
+    std::vector<TexCoordStream> texCoordStreams;
+    CGameCtnReplayStaticSolidArchivePayloadSlice tangents =
+            CGameCtnReplayStaticSolidArchivePayloadSlice::Empty();
+    CGameCtnReplayStaticSolidArchivePayloadSlice binormals =
             CGameCtnReplayStaticSolidArchivePayloadSlice::Empty();
     CGameCtnReplayStaticSolidArchivePayloadSlice indices =
             CGameCtnReplayStaticSolidArchivePayloadSlice::Empty();

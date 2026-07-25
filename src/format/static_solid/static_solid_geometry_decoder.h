@@ -22,6 +22,13 @@ enum class StaticSolidMaterialRemap {
     DecorationSkin,
 };
 
+bool DecodeStaticSolidTexCoordStream(
+        const uint8_t *bytes,
+        u32 recordCount,
+        u32 dimension,
+        u32 recordStride,
+        GxTexCoordSet *destination);
+
 class StaticSolidDecodedPayloads {
 public:
     explicit StaticSolidDecodedPayloads(
@@ -123,6 +130,9 @@ public:
     int CopyVerticesToGx(GxVertex *destination) const;
     void CopyIndicesTo(uint16_t *destination) const;
     const GmBoxAligned &BoundingBox() const;
+    const std::vector<GxTexCoordSet> &TexCoordSets() const;
+    const std::vector<GmVec3> &Tangents() const;
+    const std::vector<GmVec3> &Binormals() const;
 
 private:
     void BindBox(const GmBoxAligned &boundingBox);
@@ -147,6 +157,9 @@ private:
     CGameCtnReplayStaticSolidArchivePayloadSlice indices =
             CGameCtnReplayStaticSolidArchivePayloadSlice::Empty();
     GmBoxAligned boundingBox{};
+    std::vector<GxTexCoordSet> texCoordSets;
+    std::vector<GmVec3> tangents;
+    std::vector<GmVec3> binormals;
 };
 
 class StaticSolidArchiveVisual

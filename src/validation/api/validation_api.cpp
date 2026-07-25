@@ -247,8 +247,8 @@ ReplayProvenance ToPublicReplayProvenance(
     switch (provenance) {
     case ReplayInputProvenance::Unmarked:
         return ReplayProvenance::Unmarked;
-    case ReplayInputProvenance::TMInterface:
-        return ReplayProvenance::TMInterface;
+    case ReplayInputProvenance::Scripted:
+        return ReplayProvenance::Scripted;
     }
     return ReplayProvenance::Unmarked;
 }
@@ -283,7 +283,7 @@ ValidationReport ToPublicReport(
             ToPublicObservationError(source.validation.observationError);
     report.metadata.replayProvenance = ToPublicReplayProvenance(
             replay.InputTimeline().Provenance());
-    if (report.metadata.replayProvenance == ReplayProvenance::TMInterface) {
+    if (report.metadata.replayProvenance == ReplayProvenance::Scripted) {
         if (source.validation.status ==
             ReplayValidationStatus::WrongSimulation) {
             report.inputGhostMatch = InputGhostMatch::Mismatch;
@@ -295,7 +295,7 @@ ValidationReport ToPublicReport(
         if (source.validation.status == ReplayValidationStatus::Valid ||
             source.validation.status == ReplayValidationStatus::ValidPrefix) {
             report.valid = false;
-            report.status = ValidationStatus::TMInterfaceReplay;
+            report.status = ValidationStatus::ScriptedReplay;
             report.outcome = ValidationOutcome::Invalid;
             report.wrongSimulation = false;
         }
@@ -1109,6 +1109,51 @@ PhysicsSandboxInputValue ToSandboxValue(
     return result;
 }
 
+PhysicsSandboxSceneView BuildSandboxScene(
+        const ReplaySimulationSession &session,
+        const ReplaySimulationDefinition &definition) {
+    PhysicsSandboxSceneView scene;
+    const std::vector<ReplayStaticCollisionTriangle> &triangles =
+            session.StaticCollisionTriangles();
+    scene.collisionTriangles.reserve(triangles.size());
+    for (const ReplayStaticCollisionTriangle &triangle : triangles) {
+        scene.collisionTriangles.push_back({
+                ToPublicVector(triangle.a),
+                ToPublicVector(triangle.b),
+                ToPublicVector(triangle.c)});
+    }
+
+    const std::vector<VehicleCollisionShapeEntry> &shapes =
+            definition.vehicle.collisionModel.ShapesInArchiveOrder();
+    std::vector<GmIso4> absolutePoses;
+    absolutePoses.reserve(shapes.size());
+    scene.carEllipsoids.reserve(shapes.size());
+    for (const VehicleCollisionShapeEntry &entry : shapes) {
+        GmIso4 absolutePose = entry.shape.localPose;
+        if (entry.parentShapeIndex.has_value()) {
+            absolutePose.Mult(absolutePoses[*entry.parentShapeIndex]);
+        }
+        absolutePoses.push_back(absolutePose);
+
+        GmVec3 center;
+        center.SetMult(entry.shape.localBounds.center, absolutePose);
+        GmQuat rotation;
+        rotation.Set(absolutePose.rotation);
+        rotation.Normalize();
+        const GmVec3 &halfExtents = entry.shape.localBounds.halfExtents;
+        scene.carEllipsoids.push_back({
+                rotation.x,
+                rotation.y,
+                rotation.z,
+                rotation.w,
+                ToPublicVector(center),
+                {std::fabs(halfExtents.x),
+                 std::fabs(halfExtents.y),
+                 std::fabs(halfExtents.z)}});
+    }
+    return scene;
+}
+
 ReplayInputActionValue FromSandboxValue(
         const PhysicsSandboxInputValue &value) {
     switch (value.kind) {
@@ -1183,6 +1228,8 @@ struct PhysicsSandbox::Impl {
     ReplayAssetRoute route{};
     ReplayIdentity identity{};
     std::uint64_t scenarioFingerprint = 0u;
+    PhysicsSandboxSceneView scene{};
+    PhysicsSandboxRenderSceneHandle renderScene;
     std::size_t cursor = 0u;
     std::size_t prestartTicks = 0u;
     bool loaded = false;
@@ -1204,7 +1251,7 @@ struct PhysicsSandbox::Impl {
             if (absoluteTime < 0 || absoluteTime >
                     std::numeric_limits<std::uint32_t>::max() ||
                 (event.value.kind == PhysicsSandboxInputValueKind::Analog &&
-                 !std::isfinite(event.value.analog))) {
+                 !IsAnalogInputStateValid(event.value.analog))) {
                 return PhysicsSandboxResult<ReplayControlPlan>::Failure(
                         SandboxError(PhysicsSandboxErrorCode::InvalidRequest,
                                      "sandbox input is out of range"));
@@ -1322,6 +1369,7 @@ struct PhysicsSandbox::Impl {
         PhysicsSandboxStateView view;
         view.tick = cursor - prestartTicks;
         view.timeMs = view.tick * options.tickDurationMs;
+        view.durationMs = inputMetadata.durationMs;
         view.mapEnvironment = ToPublicMapEnvironment(route.mapEnvironment);
         view.vehicleModel = ToPublicVehicleModel(route.vehicleModel);
         view.playMode = ToPublicPlayMode(
@@ -1475,6 +1523,16 @@ PhysicsSandboxResult<PhysicsSandboxStateView> PhysicsSandbox::LoadReplay(
                     ToSandboxValue(event.value)});
         }
 
+        PhysicsSandboxSceneView scene = BuildSandboxScene(
+                *session, definition.Value());
+        PhysicsSandboxRenderSceneHandle renderScene =
+                session->StaticRenderScene();
+        if (!renderScene) {
+            return PhysicsSandboxResult<PhysicsSandboxStateView>::Failure(
+                    SandboxError(
+                            PhysicsSandboxErrorCode::MapLoadingFailed,
+                            "sandbox visual scene could not be built"));
+        }
         impl_->session = std::move(session);
         impl_->definition = std::move(definition).Value();
         impl_->inputMetadata = replay.InputTimeline().Metadata();
@@ -1484,6 +1542,8 @@ PhysicsSandboxResult<PhysicsSandboxStateView> PhysicsSandbox::LoadReplay(
         impl_->route = route;
         impl_->identity = identity;
         impl_->scenarioFingerprint = Fingerprint(replayBytes);
+        impl_->scene = std::move(scene);
+        impl_->renderScene = std::move(renderScene);
         impl_->inputs = std::move(inputs);
         impl_->prestartTicks =
                 impl_->options.prestartDurationMs /
@@ -1736,6 +1796,48 @@ PhysicsSandboxResult<PhysicsSandboxStateView> PhysicsSandbox::ReadState()
         return PhysicsSandboxResult<PhysicsSandboxStateView>::Failure(
                 SandboxError(PhysicsSandboxErrorCode::UnexpectedFailure,
                              "unexpected sandbox state read failure"));
+    }
+}
+
+PhysicsSandboxResult<PhysicsSandboxSceneView> PhysicsSandbox::ReadScene()
+        const noexcept {
+    try {
+        if (!impl_ || !impl_->loaded) {
+            return PhysicsSandboxResult<PhysicsSandboxSceneView>::Failure(
+                    SandboxError(PhysicsSandboxErrorCode::InvalidSandbox,
+                                 "sandbox has no loaded scene"));
+        }
+        return PhysicsSandboxResult<PhysicsSandboxSceneView>::Success(
+                impl_->scene);
+    } catch (const std::bad_alloc &) {
+        return PhysicsSandboxResult<PhysicsSandboxSceneView>::Failure(
+                SandboxError(PhysicsSandboxErrorCode::AllocationFailed,
+                             "could not copy sandbox scene"));
+    } catch (...) {
+        return PhysicsSandboxResult<PhysicsSandboxSceneView>::Failure(
+                SandboxError(PhysicsSandboxErrorCode::UnexpectedFailure,
+                             "unexpected sandbox scene read failure"));
+    }
+}
+
+PhysicsSandboxResult<PhysicsSandboxRenderSceneHandle>
+PhysicsSandbox::ReadRenderScene() const noexcept {
+    try {
+        if (!impl_ || !impl_->loaded || !impl_->renderScene) {
+            return PhysicsSandboxResult<
+                    PhysicsSandboxRenderSceneHandle>::Failure(
+                    SandboxError(PhysicsSandboxErrorCode::InvalidSandbox,
+                                 "sandbox has no loaded render scene"));
+        }
+        return PhysicsSandboxResult<
+                PhysicsSandboxRenderSceneHandle>::Success(
+                impl_->renderScene);
+    } catch (...) {
+        return PhysicsSandboxResult<
+                PhysicsSandboxRenderSceneHandle>::Failure(
+                SandboxError(
+                        PhysicsSandboxErrorCode::UnexpectedFailure,
+                        "unexpected sandbox render scene read failure"));
     }
 }
 

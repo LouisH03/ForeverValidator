@@ -4,11 +4,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include <cmath>
 #include <limits>
 #include <optional>
 #include <utility>
 #include <vector>
+
+#include <forevervalidator/input_state.h>
 
 enum class ReplayInputActionKind {
     Unmapped,
@@ -48,7 +49,8 @@ public:
         return value;
     }
 
-    static ReplayInputActionValue Analog(float analog) {
+    static ReplayInputActionValue Analog(
+            forevervalidator::AnalogInputState analog) {
         ReplayInputActionValue value;
         value.kind_ = ReplayInputActionValueKind::Analog;
         value.analog_ = analog;
@@ -69,14 +71,14 @@ public:
                switchState_ == ReplayInputSwitchState::Pressed;
     }
 
-    float AnalogValue() const {
+    forevervalidator::AnalogInputState AnalogValue() const {
         return analog_;
     }
 
 private:
     ReplayInputActionValueKind kind_ = ReplayInputActionValueKind::None;
     ReplayInputSwitchState switchState_ = ReplayInputSwitchState::Released;
-    float analog_ = 0.0f;
+    forevervalidator::AnalogInputState analog_ = 0;
 };
 
 struct ReplayInputEvent {
@@ -95,7 +97,7 @@ struct ReplayInputMetadata {
 
 enum class ReplayInputProvenance {
     Unmarked,
-    TMInterface,
+    Scripted,
 };
 
 enum class ReplayInputTimelineCreateResult {
@@ -146,7 +148,8 @@ public:
                     ValueKindForAction(event.action);
             if (event.value.Kind() != expectedValueKind ||
                 (expectedValueKind == ReplayInputActionValueKind::Analog &&
-                 !std::isfinite(event.value.AnalogValue()))) {
+                 !forevervalidator::IsAnalogInputStateValid(
+                         event.value.AnalogValue()))) {
                 return ReplayInputTimelineCreateResult::InvalidValue;
             }
         }

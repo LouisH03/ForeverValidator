@@ -1,5 +1,7 @@
 #include "format/static_solid/static_scene_asset_linker.h"
 #include <memory>
+#include <algorithm>
+#include <cctype>
 #include <string>
 #include <utility>
 #include <vector>
@@ -229,9 +231,35 @@ bool AddArchiveSceneModels(
             models.MarkIncomplete();
             return 1;
         }
+        std::string lowerPath = record.source.selectedDescriptorPath;
+        std::transform(
+                lowerPath.begin(), lowerPath.end(), lowerPath.begin(),
+                [](unsigned char value) {
+                    return static_cast<char>(std::tolower(value));
+                });
+        StaticScenePurpose purpose = StaticScenePurpose::Environment;
+        if (!record.source.sceneObjectId.empty()) {
+            purpose = StaticScenePurpose::Generated;
+        }
+        if (lowerPath.find("terrain") != std::string::npos ||
+            lowerPath.find("ground") != std::string::npos ||
+            lowerPath.find("land") != std::string::npos) {
+            purpose = StaticScenePurpose::Terrain;
+        } else if (lowerPath.find("decoration") != std::string::npos ||
+                   lowerPath.find("sky") != std::string::npos) {
+            purpose = StaticScenePurpose::Decoration;
+        }
         StaticSceneModel model(source.Prototype(),
                                source.WorldIso(),
-                               StaticScenePurpose::Environment);
+                               purpose);
+        StaticSceneProvenance provenance;
+        provenance.descriptorPath =
+                record.source.selectedDescriptorPath;
+        provenance.sceneObjectId = record.source.sceneObjectId;
+        provenance.componentIndex =
+                record.source.treeNodeIndex.value_or(0u);
+        provenance.authored = false;
+        model.SetProvenance(std::move(provenance));
         if (source.ItemProperties().has_value()) {
             model.SetItemProperties(*source.ItemProperties());
         }

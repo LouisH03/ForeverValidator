@@ -148,6 +148,19 @@ void CGameCtnReplayStaticSolidVisualGeometryDefinition::BindVertexRecords(
     definition.BindVertexRecords(vertexRecords);
 }
 
+bool CGameCtnReplayStaticSolidVisualGeometryDefinition::
+        AppendTexCoordStream(
+                u32 dimension,
+                CGameCtnReplayStaticSolidArchivePayloadSlice records) {
+    return definition.AppendTexCoordStream(dimension, records);
+}
+
+void CGameCtnReplayStaticSolidVisualGeometryDefinition::BindTangents(
+        CGameCtnReplayStaticSolidArchivePayloadSlice tangents,
+        CGameCtnReplayStaticSolidArchivePayloadSlice binormals) {
+    definition.BindTangents(tangents, binormals);
+}
+
 void CGameCtnReplayStaticSolidVisualGeometryDefinition::BindIndexBuffer(
         u32 indexCount,
         CGameCtnReplayStaticSolidArchivePayloadSlice indices) {

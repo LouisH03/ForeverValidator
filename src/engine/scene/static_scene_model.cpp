@@ -21,6 +21,14 @@ StaticScenePurpose StaticSceneModel::Purpose() const {
     return purpose_;
 }
 
+void StaticSceneModel::SetProvenance(StaticSceneProvenance provenance) {
+    provenance_ = std::move(provenance);
+}
+
+const StaticSceneProvenance &StaticSceneModel::Provenance() const {
+    return provenance_;
+}
+
 void StaticSceneModel::SetItemProperties(
         const CHmsItem::Properties &properties) {
     itemProperties_ = properties;

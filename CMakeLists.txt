@@ -91,3 +91,16 @@ if(FOREVERVALIDATOR_BUILD_CLI)
     endif()
     forevervalidator_configure_target(forevervalidator)
 endif()
+
+if(FOREVERVALIDATOR_BUILD_TESTS)
+    enable_testing()
+    add_executable(forevervalidator-render-scene-tests
+        tests/render_scene_tests.cpp)
+    target_include_directories(forevervalidator-render-scene-tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(forevervalidator-render-scene-tests PRIVATE
+        forevervalidator_core)
+    forevervalidator_configure_target(forevervalidator-render-scene-tests)
+    add_test(NAME forevervalidator-render-scene
+             COMMAND forevervalidator-render-scene-tests)
+endif()

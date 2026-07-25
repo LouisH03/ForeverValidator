@@ -34,8 +34,8 @@ const char *ValidationStatusName(ValidationStatus status) {
         return "incompatible_replay_version";
     case ValidationStatus::InputUnavailable:
         return "validation_input_unavailable";
-    case ValidationStatus::TMInterfaceReplay:
-        return "tminterface_replay";
+    case ValidationStatus::ScriptedReplay:
+        return "scripted_replay";
     }
     return "unexpected_validation_status";
 }
@@ -43,7 +43,7 @@ const char *ValidationStatusName(ValidationStatus status) {
 const char *ReplayProvenanceName(ReplayProvenance provenance) {
     switch (provenance) {
     case ReplayProvenance::Unmarked: return "Unmarked";
-    case ReplayProvenance::TMInterface: return "TMInterface";
+    case ReplayProvenance::Scripted: return "Scripted";
     }
     return "Unmarked";
 }
@@ -179,8 +179,8 @@ void AppendValidationMessageJson(
                 "\"Replay version: TMr.6 is not compatible with current "
                 "game version: TMr.7\"");
         break;
-    case ValidationStatus::TMInterfaceReplay:
-        json.Append("\"TMInterface replay is invalid\"");
+    case ValidationStatus::ScriptedReplay:
+        json.Append("\"Scripted replay is invalid\"");
         break;
     default:
         json.Append("null");

@@ -42,6 +42,12 @@ public:
     u32 FaceRecordStride() const;
     void BindVertexRecords(
             CGameCtnReplayStaticSolidArchivePayloadSlice vertexRecords);
+    bool AppendTexCoordStream(
+            u32 dimension,
+            CGameCtnReplayStaticSolidArchivePayloadSlice records);
+    void BindTangents(
+            CGameCtnReplayStaticSolidArchivePayloadSlice tangents,
+            CGameCtnReplayStaticSolidArchivePayloadSlice binormals);
     void BindIndexBuffer(u32 indexCount,
                          CGameCtnReplayStaticSolidArchivePayloadSlice indices);
     const CGameCtnReplayStaticSolidArchiveVisualGeometryDefinition &ArchiveDefinition()

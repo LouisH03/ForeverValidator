@@ -79,8 +79,7 @@ constexpr Nat32 GhostFixedTimeStep = 1u;
 constexpr Nat32 GhostEncodingMode = 0u;
 constexpr Nat32 GhostStateVersion = 9u;
 constexpr Nat32 GhostEncodedSampleBytes = 61u;
-constexpr double InputAxisScale = 1.0 / 65536.0;
-constexpr Nat32 TMInterfaceInputClockOffsetMs = 0xffffu;
+constexpr Nat32 ScriptedInputClockOffsetMs = 0xffffu;
 
 struct Bytes {
     const Byte *data = nullptr;
@@ -1621,9 +1620,11 @@ ReplayInputActionValue DecodeInputValue(
         Nat32 encoded) {
     if (action == ReplayInputActionKind::Gas ||
         action == ReplayInputActionKind::Steer) {
-        return ReplayInputActionValue::Analog(static_cast<float>(
-                static_cast<double>(DecodeSigned24(encoded)) *
-                InputAxisScale));
+        const std::int64_t scriptInputState =
+                -static_cast<std::int64_t>(DecodeSigned24(encoded));
+        return ReplayInputActionValue::Analog(
+                static_cast<forevervalidator::AnalogInputState>(
+                        scriptInputState));
     }
     if (action == ReplayInputActionKind::Unmapped) {
         return ReplayInputActionValue::None();
@@ -1637,7 +1638,7 @@ ReplayInputActionValue DecodeInputValue(
     return ReplayInputActionValue::Switch(state);
 }
 
-bool NormalizeTMInterfaceInputClock(
+bool NormalizeScriptedInputClock(
         std::vector<ReplayInputEvent> *events,
         const ReplayInputMetadata &metadata,
         ReplayInputProvenance *provenance) {
@@ -1646,23 +1647,23 @@ bool NormalizeTMInterfaceInputClock(
     }
     *provenance = ReplayInputProvenance::Unmarked;
 
-    bool isTMInterfaceClock = false;
+    bool isScriptedClock = false;
     for (const ReplayInputEvent &event : *events) {
         if (event.action == ReplayInputActionKind::RaceRunning &&
             event.timeMs % 10u == 5u) {
-            isTMInterfaceClock = true;
+            isScriptedClock = true;
             break;
         }
     }
-    if (!isTMInterfaceClock) {
+    if (!isScriptedClock) {
         return true;
     }
 
     for (ReplayInputEvent &event : *events) {
-        if (event.timeMs < TMInterfaceInputClockOffsetMs) {
+        if (event.timeMs < ScriptedInputClockOffsetMs) {
             return false;
         }
-        event.timeMs -= TMInterfaceInputClockOffsetMs;
+        event.timeMs -= ScriptedInputClockOffsetMs;
     }
 
     const ReplayInputEvent *raceRunning = nullptr;
@@ -1683,7 +1684,7 @@ bool NormalizeTMInterfaceInputClock(
          finishLine->timeMs - raceRunning->timeMs != metadata.durationMs)) {
         return false;
     }
-    *provenance = ReplayInputProvenance::TMInterface;
+    *provenance = ReplayInputProvenance::Scripted;
     return true;
 }
 
@@ -1818,7 +1819,7 @@ ReplayFileReadError DecodeInputTimeline(
     }
 
     ReplayInputProvenance provenance = ReplayInputProvenance::Unmarked;
-    if (!NormalizeTMInterfaceInputClock(&events, metadata, &provenance)) {
+    if (!NormalizeScriptedInputClock(&events, metadata, &provenance)) {
         return ReplayFileReadError::InvalidInputTimeline;
     }
 
