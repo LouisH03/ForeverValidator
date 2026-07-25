@@ -53,6 +53,25 @@ bool TestUvDecoding() {
                     NearlyEqual(second.v, 2.0f),
             "2D UV values were not preserved");
 
+    std::vector<std::uint8_t> uv3Bytes;
+    for (float value : {-2.5f, 0.125f, 7.75f}) {
+        AppendFloat(&uv3Bytes, value);
+    }
+    GxTexCoordSet uv3;
+    okay &= Check(
+            DecodeStaticSolidTexCoordStream(
+                    uv3Bytes.data(), 1u, 3u, 12u, &uv3),
+            "3D UV stream was rejected");
+    const GxTexCoord4 threeDimensional = uv3.Coordinate4At(0u);
+    okay &= Check(
+            uv3.Dimension() == GxTexCoordDimension::Three &&
+                    uv3.Count() == 1u &&
+                    NearlyEqual(threeDimensional.u, -2.5f) &&
+                    NearlyEqual(threeDimensional.v, 0.125f) &&
+                    NearlyEqual(threeDimensional.w, 7.75f) &&
+                    NearlyEqual(threeDimensional.q, 1.0f),
+            "3D UV values were not preserved");
+
     std::vector<std::uint8_t> uv4Bytes;
     for (float value : {1.0f, 2.0f, 3.0f, 4.0f}) {
         AppendFloat(&uv4Bytes, value);
