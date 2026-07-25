@@ -1,9 +1,12 @@
 #include "simulation/runtime/replay_simulation_session.h"
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <new>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 
@@ -255,6 +258,194 @@ sandbox::PhysicsSandboxTransform PublicTransform(const GmIso4 &source) {
              source.translation.z}};
 }
 
+namespace {
+
+struct RenderBounds {
+    forevervalidator::Vector3 minimum{};
+    forevervalidator::Vector3 maximum{};
+    bool valid = false;
+};
+
+forevervalidator::Vector3 TransformRenderPoint(
+        const sandbox::PhysicsSandboxTransform &transform,
+        const forevervalidator::Vector3 &point) {
+    return {
+            transform.translation.x +
+                    transform.basisX.x * point.x +
+                    transform.basisY.x * point.y +
+                    transform.basisZ.x * point.z,
+            transform.translation.y +
+                    transform.basisX.y * point.x +
+                    transform.basisY.y * point.y +
+                    transform.basisZ.y * point.z,
+            transform.translation.z +
+                    transform.basisX.z * point.x +
+                    transform.basisY.z * point.y +
+                    transform.basisZ.z * point.z};
+}
+
+void IncludePoint(RenderBounds &bounds,
+                  const forevervalidator::Vector3 &point) {
+    if (!bounds.valid) {
+        bounds.minimum = point;
+        bounds.maximum = point;
+        bounds.valid = true;
+        return;
+    }
+    bounds.minimum.x = std::min(bounds.minimum.x, point.x);
+    bounds.minimum.y = std::min(bounds.minimum.y, point.y);
+    bounds.minimum.z = std::min(bounds.minimum.z, point.z);
+    bounds.maximum.x = std::max(bounds.maximum.x, point.x);
+    bounds.maximum.y = std::max(bounds.maximum.y, point.y);
+    bounds.maximum.z = std::max(bounds.maximum.z, point.z);
+}
+
+void IncludeBounds(RenderBounds &target, const RenderBounds &source) {
+    if (!source.valid) {
+        return;
+    }
+    IncludePoint(target, source.minimum);
+    IncludePoint(target, source.maximum);
+}
+
+RenderBounds InstanceRenderBounds(
+        const sandbox::PhysicsSandboxRenderScene &scene,
+        const sandbox::PhysicsSandboxRenderInstance &instance) {
+    RenderBounds bounds;
+    if (instance.meshIndex >= scene.meshes.size()) {
+        return bounds;
+    }
+    const sandbox::PhysicsSandboxRenderMesh &mesh =
+            scene.meshes[instance.meshIndex];
+    for (unsigned corner = 0u; corner < 8u; ++corner) {
+        const forevervalidator::Vector3 local{
+                (corner & 1u) != 0u ? mesh.boundsMax.x : mesh.boundsMin.x,
+                (corner & 2u) != 0u ? mesh.boundsMax.y : mesh.boundsMin.y,
+                (corner & 4u) != 0u ? mesh.boundsMax.z : mesh.boundsMin.z};
+        IncludePoint(
+                bounds,
+                TransformRenderPoint(instance.worldTransform, local));
+    }
+    return bounds;
+}
+
+float MaximumSpan(const RenderBounds &bounds) {
+    return std::max({
+            bounds.maximum.x - bounds.minimum.x,
+            bounds.maximum.y - bounds.minimum.y,
+            bounds.maximum.z - bounds.minimum.z});
+}
+
+float MinimumSpan(const RenderBounds &bounds) {
+    return std::min({
+            bounds.maximum.x - bounds.minimum.x,
+            bounds.maximum.y - bounds.minimum.y,
+            bounds.maximum.z - bounds.minimum.z});
+}
+
+bool ContainsBounds(const RenderBounds &outer,
+                    const RenderBounds &inner,
+                    float tolerance) {
+    return outer.valid && inner.valid &&
+            outer.minimum.x <= inner.minimum.x + tolerance &&
+            outer.minimum.y <= inner.minimum.y + tolerance &&
+            outer.minimum.z <= inner.minimum.z + tolerance &&
+            outer.maximum.x >= inner.maximum.x - tolerance &&
+            outer.maximum.y >= inner.maximum.y - tolerance &&
+            outer.maximum.z >= inner.maximum.z - tolerance;
+}
+
+bool IsBackgroundPurpose(sandbox::PhysicsSandboxScenePurpose purpose) {
+    return purpose == sandbox::PhysicsSandboxScenePurpose::Environment ||
+            purpose == sandbox::PhysicsSandboxScenePurpose::Decoration;
+}
+
+struct RenderGroupKey {
+    sandbox::PhysicsSandboxScenePurpose purpose =
+            sandbox::PhysicsSandboxScenePurpose::Environment;
+    std::string blockName;
+    std::string descriptorPath;
+    std::string sceneObjectId;
+    std::optional<std::uint64_t> placementIdentity;
+
+    bool operator<(const RenderGroupKey &other) const {
+        return std::tie(
+                       purpose, blockName, descriptorPath, sceneObjectId,
+                       placementIdentity) <
+                std::tie(
+                       other.purpose, other.blockName,
+                       other.descriptorPath, other.sceneObjectId,
+                       other.placementIdentity);
+    }
+};
+
+struct RenderGroup {
+    RenderBounds bounds;
+    std::vector<std::size_t> instances;
+};
+
+}  // namespace
+
+void ClassifyRenderLayers(
+        sandbox::PhysicsSandboxRenderScene &scene) {
+    RenderBounds foregroundBounds;
+    for (const sandbox::PhysicsSandboxRenderInstance &instance :
+         scene.instances) {
+        if (!instance.visible || instance.lodLevel != 0u ||
+            IsBackgroundPurpose(instance.purpose)) {
+            continue;
+        }
+        IncludeBounds(
+                foregroundBounds,
+                InstanceRenderBounds(scene, instance));
+    }
+    if (!foregroundBounds.valid) {
+        return;
+    }
+
+    std::map<RenderGroupKey, RenderGroup> groups;
+    for (std::size_t index = 0u; index < scene.instances.size(); ++index) {
+        const sandbox::PhysicsSandboxRenderInstance &instance =
+                scene.instances[index];
+        if (!instance.visible || instance.lodLevel != 0u ||
+            !IsBackgroundPurpose(instance.purpose)) {
+            continue;
+        }
+        const sandbox::PhysicsSandboxRenderProvenance &provenance =
+                instance.provenance;
+        RenderGroup &group = groups[{
+                instance.purpose,
+                provenance.blockName,
+                provenance.descriptorPath,
+                provenance.sceneObjectId,
+                provenance.placementIdentity}];
+        IncludeBounds(group.bounds, InstanceRenderBounds(scene, instance));
+        group.instances.push_back(index);
+    }
+
+    const float foregroundSpan = MaximumSpan(foregroundBounds);
+    if (!(foregroundSpan > 0.0f) || !std::isfinite(foregroundSpan)) {
+        return;
+    }
+    constexpr float BackgroundScaleRatio = 4.0f;
+    const float tolerance = foregroundSpan * 0.01f;
+    for (const auto &[key, group] : groups) {
+        static_cast<void>(key);
+        if (!ContainsBounds(group.bounds, foregroundBounds, tolerance) ||
+            MaximumSpan(group.bounds) <
+                    foregroundSpan * BackgroundScaleRatio ||
+            MinimumSpan(group.bounds) <
+                    foregroundSpan * BackgroundScaleRatio * 0.5f) {
+            continue;
+        }
+        for (std::size_t index : group.instances) {
+            scene.instances[index].renderLayer =
+                    sandbox::PhysicsSandboxRenderLayer::Background;
+            scene.instances[index].castsShadows = false;
+        }
+    }
+}
+
 std::string PreferredPath(const std::string &selected,
                           const std::string &plain) {
     return !selected.empty() ? selected : plain;
@@ -289,6 +480,7 @@ public:
             AppendTree(model, *root, model.WorldIso(), nullptr, true, 0u,
                        0.0f);
         }
+        ClassifyRenderLayers(*scene_);
         return scene_;
     }
 
@@ -584,6 +776,11 @@ ReplayTrajectoryObservation ObserveReplayTrajectory(
 }
 
 }  // namespace
+
+void ClassifyPhysicsSandboxRenderLayers(
+        sandbox::PhysicsSandboxRenderScene &scene) {
+    ClassifyRenderLayers(scene);
+}
 
 struct ReplaySimulationInstance {
     CTrackManiaRace race;

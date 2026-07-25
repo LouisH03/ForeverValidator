@@ -3,6 +3,7 @@
 #include "engine/rendering/plug_tree.h"
 #include "engine/scene/static_scene_model.h"
 #include "format/static_solid/static_solid_geometry_decoder.h"
+#include "simulation/runtime/replay_simulation_session.h"
 
 #include <cmath>
 #include <cstdint>
@@ -161,11 +162,71 @@ bool TestProvenanceAndImmutableScene() {
     return okay;
 }
 
+bool TestGenericBackgroundLayerClassification() {
+    using forevervalidator::experimental::PhysicsSandboxRenderInstance;
+    using forevervalidator::experimental::PhysicsSandboxRenderLayer;
+    using forevervalidator::experimental::PhysicsSandboxRenderMesh;
+    using forevervalidator::experimental::PhysicsSandboxRenderScene;
+    using forevervalidator::experimental::PhysicsSandboxScenePurpose;
+
+    const auto mesh = [](forevervalidator::Vector3 minimum,
+                         forevervalidator::Vector3 maximum) {
+        PhysicsSandboxRenderMesh result;
+        result.boundsMin = minimum;
+        result.boundsMax = maximum;
+        return result;
+    };
+    PhysicsSandboxRenderScene scene;
+    scene.meshes.push_back(mesh(
+            {-10.0f, 0.0f, -10.0f}, {10.0f, 10.0f, 10.0f}));
+    scene.meshes.push_back(mesh(
+            {-100.0f, -100.0f, -100.0f}, {100.0f, 0.0f, 100.0f}));
+    scene.meshes.push_back(mesh(
+            {-100.0f, 0.0f, -100.0f}, {100.0f, 100.0f, 100.0f}));
+    scene.meshes.push_back(mesh(
+            {-20.0f, -5.0f, -20.0f}, {20.0f, 20.0f, 20.0f}));
+
+    PhysicsSandboxRenderInstance foreground;
+    foreground.meshIndex = 0u;
+    foreground.purpose = PhysicsSandboxScenePurpose::PlacedBlock;
+    scene.instances.push_back(foreground);
+
+    PhysicsSandboxRenderInstance lowerBackground;
+    lowerBackground.meshIndex = 1u;
+    lowerBackground.purpose = PhysicsSandboxScenePurpose::Environment;
+    lowerBackground.provenance.descriptorPath = "Shared/Backdrop";
+    scene.instances.push_back(lowerBackground);
+    PhysicsSandboxRenderInstance upperBackground = lowerBackground;
+    upperBackground.meshIndex = 2u;
+    scene.instances.push_back(upperBackground);
+
+    PhysicsSandboxRenderInstance nearbyEnvironment;
+    nearbyEnvironment.meshIndex = 3u;
+    nearbyEnvironment.purpose = PhysicsSandboxScenePurpose::Environment;
+    nearbyEnvironment.provenance.descriptorPath = "Shared/Scenery";
+    scene.instances.push_back(nearbyEnvironment);
+
+    ClassifyPhysicsSandboxRenderLayers(scene);
+    return Check(
+            scene.instances[0].renderLayer ==
+                            PhysicsSandboxRenderLayer::World &&
+                    scene.instances[1].renderLayer ==
+                            PhysicsSandboxRenderLayer::Background &&
+                    scene.instances[2].renderLayer ==
+                            PhysicsSandboxRenderLayer::Background &&
+                    !scene.instances[1].castsShadows &&
+                    !scene.instances[2].castsShadows &&
+                    scene.instances[3].renderLayer ==
+                            PhysicsSandboxRenderLayer::World,
+            "generic enclosing backdrop was not separated from world geometry");
+}
+
 }  // namespace
 
 int main() {
     bool okay = TestUvDecoding();
     okay &= TestTransformComposition();
     okay &= TestProvenanceAndImmutableScene();
+    okay &= TestGenericBackgroundLayerClassification();
     return okay ? 0 : 1;
 }

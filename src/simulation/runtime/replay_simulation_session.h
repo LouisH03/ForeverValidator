@@ -48,6 +48,9 @@ struct ReplaySimulationInstanceClone {
     std::uint32_t incrementalRespawnCount = 0u;
 };
 
+void ClassifyPhysicsSandboxRenderLayers(
+        forevervalidator::experimental::PhysicsSandboxRenderScene &scene);
+
 class ReplaySimulationSession {
 public:
     ReplaySimulationSession();

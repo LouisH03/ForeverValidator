@@ -140,6 +140,11 @@ enum class PhysicsSandboxScenePurpose : std::uint8_t {
     Generated,
 };
 
+enum class PhysicsSandboxRenderLayer : std::uint8_t {
+    World,
+    Background,
+};
+
 struct PhysicsSandboxRenderProvenance {
     std::string blockName;
     std::string collection;
@@ -209,6 +214,8 @@ struct PhysicsSandboxRenderInstance {
     PhysicsSandboxRenderProvenance provenance{};
     PhysicsSandboxScenePurpose purpose =
             PhysicsSandboxScenePurpose::Environment;
+    PhysicsSandboxRenderLayer renderLayer =
+            PhysicsSandboxRenderLayer::World;
     std::uint32_t lodLevel = 0u;
     float lodFarDistance = 0.0f;
     bool visible = true;
