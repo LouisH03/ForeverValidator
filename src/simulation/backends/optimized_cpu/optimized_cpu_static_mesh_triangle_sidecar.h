@@ -25,6 +25,12 @@ struct OptimizedCpuStaticMeshDirectTrianglePosting {
     u32 triangleIndex = 0u;
 };
 
+struct OptimizedCpuStaticMeshTriangleHierarchyView {
+    const GmMeshOctreeCell *cells = nullptr;
+    const u32 *postingIndices = nullptr;
+    std::size_t count = 0u;
+};
+
 static_assert(std::is_standard_layout_v<
               OptimizedCpuStaticMeshDirectTrianglePosting>);
 static_assert(offsetof(OptimizedCpuStaticMeshDirectTrianglePosting,
@@ -53,6 +59,20 @@ public:
                triangleBvh_.CandidateSpanFor(query, result);
     }
 
+    bool TriangleHierarchyView(
+            OptimizedCpuStaticMeshTriangleHierarchyView *result) const
+            noexcept {
+        if (result == nullptr || sourceCells_ == nullptr ||
+            sourceCellCount_ == 0u ||
+            directPostingIndexByCell_.size() != sourceCellCount_) {
+            return false;
+        }
+        result->cells = sourceCells_;
+        result->postingIndices = directPostingIndexByCell_.data();
+        result->count = sourceCellCount_;
+        return true;
+    }
+
     const OptimizedCpuStaticMeshDirectTrianglePosting &DirectTriangleAt(
             u32 postingIndex) const noexcept {
         return directTrianglePostings_[postingIndex];
@@ -75,6 +95,7 @@ private:
     std::vector<OptimizedCpuStaticMeshTriangleData> triangles_;
     std::vector<OptimizedCpuStaticMeshDirectTrianglePosting>
             directTrianglePostings_;
+    std::vector<u32> directPostingIndexByCell_;
     OptimizedCpuStaticUniformGrid triangleGrid_;
     OptimizedCpuStaticBvh triangleBvh_;
 };

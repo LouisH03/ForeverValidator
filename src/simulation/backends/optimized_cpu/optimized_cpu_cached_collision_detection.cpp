@@ -1,5 +1,12 @@
 // OptimizedCpu static collision traversal with immutable transform sidecars.
 
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <typeinfo>
+
 #include "engine/physics/collision/gm_collision_buffer.h"
 #include "engine/physics/collision/hms_collision_manager.h"
 #include "engine/physics/dynamics/hms_corpus.h"
@@ -18,6 +25,281 @@
 using forevervalidator::simulation::OptimizedCpuStaticBoundsOverlap;
 
 namespace {
+
+constexpr std::size_t EllipsoidPacketWidth = 8u;
+
+struct EllipsoidPacketTraversalLane {
+    CPlugTree *tree = nullptr;
+    CPlugSurface *surface = nullptr;
+    GmIso4 location{};
+    GmBoxAligned bounds{};
+    LocatedGmSurf located{};
+    SHmsSphereBufferContact *sphereContact = nullptr;
+    CHmsCollisionBuffer *buffer = nullptr;
+    u32 temporalSlotOrdinal = 0u;
+    bool collided = false;
+};
+
+bool CollectEllipsoidPacketTraversalLanes(
+        const GmIso4 &parentIso,
+        const CPlugTree &tree,
+        std::array<EllipsoidPacketTraversalLane, EllipsoidPacketWidth> *lanes,
+        std::size_t *laneCount,
+        u32 *nextTemporalSlotOrdinal) {
+    const u32 temporalSlotOrdinal = (*nextTemporalSlotOrdinal)++;
+    if (!tree.HasWorldBox()) {
+        return true;
+    }
+
+    GmIso4 localIso;
+    tree.ComposeCollisionIso(parentIso, localIso);
+    const u32 childCount = tree.GetChildCount();
+    for (u32 childIndex = 0u; childIndex < childCount; ++childIndex) {
+        if (!CollectEllipsoidPacketTraversalLanes(
+                    localIso,
+                    *tree.GetChild(childIndex),
+                    lanes,
+                    laneCount,
+                    nextTemporalSlotOrdinal)) {
+            return false;
+        }
+    }
+
+    CPlugSurface *surface = tree.Surface();
+    if (surface == nullptr) {
+        return true;
+    }
+    const GmSurf *geometry = surface->Geometry();
+    if (geometry == nullptr || typeid(*geometry) != typeid(GmSurfEllipsoid) ||
+        !surface->UsesSphereContactBuffer() ||
+        *laneCount >= EllipsoidPacketWidth) {
+        return false;
+    }
+
+    EllipsoidPacketTraversalLane &lane = (*lanes)[(*laneCount)++];
+    lane.tree = const_cast<CPlugTree *>(&tree);
+    lane.surface = surface;
+    lane.location = localIso;
+    tree.GetTransformedCollisionBox(parentIso, lane.bounds);
+    lane.temporalSlotOrdinal = temporalSlotOrdinal;
+    return true;
+}
+
+void CompletePacketCollisionMaterials(
+        CHmsCollisionBuffer &buffer,
+        u32 firstNew,
+        CPlugSurface &movingSurface,
+        CPlugSurface &staticSurface) {
+    const u32 count = buffer.PhysicalCollisionCount();
+    for (u32 collisionIndex = firstNew;
+         collisionIndex < count;
+         ++collisionIndex) {
+        GmCollision &collision = buffer.GetCollision(collisionIndex);
+        collision.materialA =
+                movingSurface.SurfaceMaterialIdFromLocalIndex(
+                        collision.localMaterialA);
+        collision.materialB =
+                staticSurface.SurfaceMaterialIdFromLocalIndex(
+                        collision.localMaterialB);
+    }
+}
+
+bool DetectEllipsoidPacketAgainstStaticGroup(
+        CHmsCollisionManagerSZone &zone,
+        const GmIso4 &movingIso,
+        const CPlugTree &movingTree,
+        const OptimizedCpuStaticSurfaceTransformGroup &transforms,
+        GmOctree<CHmsCollisionManagerSColOctreeCell> &staticTrees) {
+    if (!OptimizedCpuEllipsoidMeshPacketAvailable()) {
+        return false;
+    }
+
+    std::array<EllipsoidPacketTraversalLane, EllipsoidPacketWidth> lanes{};
+    std::size_t laneCount = 0u;
+    u32 nextTemporalSlotOrdinal = 0u;
+    if (!CollectEllipsoidPacketTraversalLanes(
+                movingIso,
+                movingTree,
+                &lanes,
+                &laneCount,
+                &nextTemporalSlotOrdinal) ||
+        laneCount < 2u) {
+        return false;
+    }
+
+    std::array<
+            OptimizedCpuStaticSurfaceTransformGroup::TemporalCandidateSpan,
+            EllipsoidPacketWidth>
+            candidateSpans{};
+    std::array<std::size_t, EllipsoidPacketWidth> candidateOffsets{};
+    for (std::size_t laneIndex = 0u;
+         laneIndex < laneCount;
+         ++laneIndex) {
+        if (!transforms.TemporalCandidateSpanFor(
+                    *lanes[laneIndex].tree,
+                    lanes[laneIndex].temporalSlotOrdinal,
+                    lanes[laneIndex].bounds,
+                    &candidateSpans[laneIndex])) {
+            return false;
+        }
+    }
+
+    std::array<OptimizedCpuEllipsoidMeshPacketLane, EllipsoidPacketWidth>
+            packetLanes{};
+    for (std::size_t laneIndex = 0u;
+         laneIndex < laneCount;
+         ++laneIndex) {
+        EllipsoidPacketTraversalLane &lane = lanes[laneIndex];
+        lane.buffer = zone.ChooseCollisionOutputBuffer(
+                lane.tree, lane.surface, &lane.sphereContact);
+        if (lane.buffer == nullptr || lane.sphereContact == nullptr) {
+            return false;
+        }
+        lane.located = {
+            lane.surface->Geometry(),
+            &lane.location,
+            1,
+        };
+        packetLanes[laneIndex] = {&lane.located, lane.buffer};
+    }
+
+    for (;;) {
+        u32 staticTreeIndex = std::numeric_limits<u32>::max();
+        for (std::size_t laneIndex = 0u;
+             laneIndex < laneCount;
+             ++laneIndex) {
+            const auto &span = candidateSpans[laneIndex];
+            const std::size_t offset = candidateOffsets[laneIndex];
+            if (offset < span.size) {
+                staticTreeIndex = std::min(
+                        staticTreeIndex, span.data[offset]);
+            }
+        }
+        if (staticTreeIndex == std::numeric_limits<u32>::max()) {
+            break;
+        }
+
+        CHmsCollisionManagerSColOctreeCell *record =
+                &staticTrees[staticTreeIndex];
+        std::uint32_t activeMask = 0u;
+        for (std::size_t laneIndex = 0u;
+             laneIndex < laneCount;
+             ++laneIndex) {
+            const auto &span = candidateSpans[laneIndex];
+            std::size_t &offset = candidateOffsets[laneIndex];
+            if (offset >= span.size ||
+                span.data[offset] != staticTreeIndex) {
+                continue;
+            }
+            ++offset;
+            if (OptimizedCpuStaticBoundsOverlap(
+                        lanes[laneIndex].bounds,
+                        record->Bounds())) {
+                activeMask |= 1u << laneIndex;
+            }
+        }
+        if (activeMask == 0u) {
+            continue;
+        }
+
+        const CHmsCollisionManagerSColOctreeCell::StaticSurface &staticSurface =
+                record->SurfaceData();
+        const GmSurf *staticGeometry = staticSurface.surface->Geometry();
+        const OptimizedCpuStaticMeshTriangleSidecar *triangleSidecar =
+                transforms.TriangleSidecarAt(staticTreeIndex);
+        bool packetHandled = false;
+        if (staticGeometry != nullptr &&
+            typeid(*staticGeometry) == typeid(GmSurfMesh) &&
+            triangleSidecar != nullptr) {
+            std::array<u32, EllipsoidPacketWidth> firstNew{};
+            for (std::size_t laneIndex = 0u;
+                 laneIndex < laneCount;
+                 ++laneIndex) {
+                firstNew[laneIndex] =
+                        lanes[laneIndex].buffer->PhysicalCollisionCount();
+            }
+            const LocatedGmSurf locatedMesh = {
+                staticGeometry,
+                &staticSurface.location,
+                1,
+            };
+            std::uint32_t hitMask = 0u;
+            packetHandled =
+                    GmCollision_EllipsoidPacket_Mesh_InlineMathOptimizedCpuNativeBinary32WithStaticCache(
+                            packetLanes.data(),
+                            laneCount,
+                            activeMask,
+                            locatedMesh,
+                            transforms.InverseAt(staticTreeIndex),
+                            *triangleSidecar,
+                            &hitMask);
+            if (packetHandled) {
+                for (std::size_t laneIndex = 0u;
+                     laneIndex < laneCount;
+                     ++laneIndex) {
+                    if ((hitMask & (1u << laneIndex)) == 0u) {
+                        continue;
+                    }
+                    EllipsoidPacketTraversalLane &lane = lanes[laneIndex];
+                    CompletePacketCollisionMaterials(
+                            *lane.buffer,
+                            firstNew[laneIndex],
+                            *lane.surface,
+                            *staticSurface.surface);
+                    zone.TagNewStaticCollisions(
+                            lane.buffer,
+                            firstNew[laneIndex],
+                            lane.tree,
+                            record);
+                    lane.collided = true;
+                }
+            }
+        }
+
+        if (!packetHandled) {
+            for (std::size_t laneIndex = 0u;
+                 laneIndex < laneCount;
+                 ++laneIndex) {
+                if ((activeMask & (1u << laneIndex)) == 0u) {
+                    continue;
+                }
+                EllipsoidPacketTraversalLane &lane = lanes[laneIndex];
+                const u32 firstNew =
+                        lane.buffer->PhysicalCollisionCount();
+                const SPlugSurfaceLocatedPair surfacePair = {
+                    *lane.surface,
+                    lane.location,
+                    *staticSurface.surface,
+                    staticSurface.location,
+                };
+                const int collided =
+                        ComputePlugSurfaceCollisionInlineMathOptimizedCpuNativeBinary32WithStaticCache(
+                                surfacePair,
+                                transforms.InverseAt(staticTreeIndex),
+                                triangleSidecar,
+                                *lane.buffer);
+                if (collided == 0) {
+                    continue;
+                }
+                zone.TagNewStaticCollisions(
+                        lane.buffer,
+                        firstNew,
+                        lane.tree,
+                        record);
+                lane.collided = true;
+            }
+        }
+    }
+
+    for (std::size_t laneIndex = 0u;
+         laneIndex < laneCount;
+         ++laneIndex) {
+        if (lanes[laneIndex].collided) {
+            zone.AddSphereContactOnce(lanes[laneIndex].sphereContact);
+        }
+    }
+    return true;
+}
 
 bool TrySkipWholeTreeBoundsEmpty(
         const GmIso4 &movingIso,
@@ -367,12 +649,19 @@ DetectCollisionsCorpusOptimizedCpuNativeBinary32Cached(
                 if (empty) {
                     continue;
                 }
-                u32 nextTemporalSlotOrdinal = 0u;
-                DetectCollisionBetweenTreeAndStaticCollisionTreeOptimizedCpuNativeBinary32Cached(
-                        *corpus->LocationIso(),
-                        *corpus->CollisionTree(),
-                        nextTemporalSlotOrdinal,
-                        *groupTransforms);
+                if (!DetectEllipsoidPacketAgainstStaticGroup(
+                            *this,
+                            *corpus->LocationIso(),
+                            *corpus->CollisionTree(),
+                            *groupTransforms,
+                            against->targetGroup->staticTrees)) {
+                    u32 nextTemporalSlotOrdinal = 0u;
+                    DetectCollisionBetweenTreeAndStaticCollisionTreeOptimizedCpuNativeBinary32Cached(
+                            *corpus->LocationIso(),
+                            *corpus->CollisionTree(),
+                            nextTemporalSlotOrdinal,
+                            *groupTransforms);
+                }
             }
         }
     }

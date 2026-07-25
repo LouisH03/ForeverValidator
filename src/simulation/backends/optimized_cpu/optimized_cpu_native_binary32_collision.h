@@ -1,11 +1,29 @@
 #ifndef FOREVERVALIDATOR_OPTIMIZED_CPU_NATIVE_BINARY32_COLLISION_H
 #define FOREVERVALIDATOR_OPTIMIZED_CPU_NATIVE_BINARY32_COLLISION_H
 
+#include <cstddef>
+#include <cstdint>
+
 struct CGmCollisionBuffer;
 struct LocatedGmSurf;
 class OptimizedCpuStaticMeshTriangleSidecar;
 struct GmIso4;
 struct SPlugSurfaceLocatedPair;
+
+struct OptimizedCpuEllipsoidMeshPacketLane {
+    const LocatedGmSurf *ellipsoid = nullptr;
+    CGmCollisionBuffer *collisionBuffer = nullptr;
+};
+
+bool OptimizedCpuEllipsoidMeshPacketAvailable(void) noexcept;
+bool GmCollision_EllipsoidPacket_Mesh_InlineMathOptimizedCpuNativeBinary32WithStaticCache(
+        const OptimizedCpuEllipsoidMeshPacketLane *lanes,
+        std::size_t laneCount,
+        std::uint32_t activeMask,
+        const LocatedGmSurf &mesh,
+        const GmIso4 &meshInverse,
+        const OptimizedCpuStaticMeshTriangleSidecar &triangles,
+        std::uint32_t *hitMask) noexcept;
 
 int GmCollision_Sphere_Mesh_OptimizedCpuNativeBinary32(
         const LocatedGmSurf &sphere,
@@ -39,6 +57,12 @@ int GmCollision_Ellipsoid_Mesh_InlineMathOptimizedCpuNativeBinary32WithStaticInv
         const LocatedGmSurf &ellipsoid,
         const LocatedGmSurf &mesh,
         const GmIso4 &meshInverse,
+        CGmCollisionBuffer &collisionBuffer);
+int GmCollision_Ellipsoid_Mesh_InlineMathOptimizedCpuNativeBinary32WithStaticCache(
+        const LocatedGmSurf &ellipsoid,
+        const LocatedGmSurf &mesh,
+        const GmIso4 &meshInverse,
+        const OptimizedCpuStaticMeshTriangleSidecar &triangles,
         CGmCollisionBuffer &collisionBuffer);
 #if defined(FOREVERVALIDATOR_RELEASE_IPO_BUILD) && \
         defined(__GNUC__) && !defined(__clang__)

@@ -151,6 +151,22 @@ if(FOREVERVALIDATOR_BUILD_BENCHMARKS)
             INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     endif()
 
+    add_executable(optimized_cpu_ellipsoid_mesh_kernel_benchmark
+        tools/optimized_cpu_ellipsoid_mesh_kernel_benchmark.cpp)
+    target_include_directories(
+        optimized_cpu_ellipsoid_mesh_kernel_benchmark PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(
+        optimized_cpu_ellipsoid_mesh_kernel_benchmark PRIVATE
+        forevervalidator_core)
+    forevervalidator_configure_target(
+        optimized_cpu_ellipsoid_mesh_kernel_benchmark)
+    if(FOREVERVALIDATOR_RELEASE_IPO_AVAILABLE)
+        set_property(
+            TARGET optimized_cpu_ellipsoid_mesh_kernel_benchmark
+            PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    endif()
+
     add_executable(optimized_cpu_differential
         tools/optimized_cpu_differential.cpp)
     target_include_directories(optimized_cpu_differential PRIVATE
@@ -253,6 +269,17 @@ if(FOREVERVALIDATOR_BUILD_BENCHMARKS)
     forevervalidator_configure_target(
         optimized_cpu_static_bvh_differential)
 
+    add_executable(optimized_cpu_ellipsoid_mesh_packet_differential
+        tools/optimized_cpu_ellipsoid_mesh_packet_differential.cpp)
+    target_include_directories(
+        optimized_cpu_ellipsoid_mesh_packet_differential PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(
+        optimized_cpu_ellipsoid_mesh_packet_differential PRIVATE
+        forevervalidator_core)
+    forevervalidator_configure_target(
+        optimized_cpu_ellipsoid_mesh_packet_differential)
+
     add_test(NAME optimized_cpu_sphere_mesh
         COMMAND optimized_cpu_sphere_mesh_differential)
     add_test(NAME optimized_cpu_ellipsoid_mesh
@@ -267,4 +294,6 @@ if(FOREVERVALIDATOR_BUILD_BENCHMARKS)
         COMMAND optimized_cpu_static_bounds_overlap_differential)
     add_test(NAME optimized_cpu_static_bvh
         COMMAND optimized_cpu_static_bvh_differential)
+    add_test(NAME optimized_cpu_ellipsoid_mesh_packet
+        COMMAND optimized_cpu_ellipsoid_mesh_packet_differential)
 endif()

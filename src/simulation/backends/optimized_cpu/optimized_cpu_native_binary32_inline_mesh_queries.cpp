@@ -1024,6 +1024,24 @@ int GmCollision_Ellipsoid_Mesh_InlineMathOptimizedCpuNativeBinary32WithStaticInv
             collisionBuffer);
 }
 
+int GmCollision_Ellipsoid_Mesh_InlineMathOptimizedCpuNativeBinary32WithStaticCache(
+        const LocatedGmSurf &ellipsoid,
+        const LocatedGmSurf &meshLocated,
+        const GmIso4 &meshInverse,
+        const OptimizedCpuStaticMeshTriangleSidecar &triangles,
+        CGmCollisionBuffer &collisionBuffer) {
+    const GmSurfMesh &mesh =
+            static_cast<const GmSurfMesh &>(*meshLocated.surf);
+    const OptimizedCpuStaticMeshTriangleSidecar *usableTriangles =
+            triangles.IsFor(mesh) ? &triangles : nullptr;
+    return RunInlineEllipsoidMeshQuery(
+            ellipsoid,
+            meshLocated,
+            &meshInverse,
+            usableTriangles,
+            collisionBuffer);
+}
+
 int ComputePlugSurfaceCollisionInlineMathOptimizedCpuNativeBinary32(
         const SPlugSurfaceLocatedPair &pairRef,
         CGmCollisionBuffer &collisionBufferRef) {
