@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <utility>
 
@@ -20,9 +21,19 @@
 #include "engine/rendering/plug_tree.h"
 
 SHmsSphereBufferContact *CHmsCollisionManager::SZone::EnsureTreeSphereContact(CPlugTree *tree) {
+    static_assert((TreeSphereContactCacheSize &
+                   (TreeSphereContactCacheSize - 1u)) == 0u);
+    const std::size_t cacheIndex =
+            (reinterpret_cast<std::uintptr_t>(tree) >> 4u) &
+            (TreeSphereContactCacheSize - 1u);
+    TreeSphereContactCacheEntry &cached = sphereContactCache[cacheIndex];
+    if (tree != nullptr && cached.tree == tree) {
+        return cached.contact;
+    }
     for (TreeSphereContact &owned : ownedSphereContacts) {
         if (owned.tree == tree) {
-            return owned.contact.get();
+            cached = {tree, owned.contact.get()};
+            return cached.contact;
         }
     }
     TreeSphereContact owned;
@@ -30,6 +41,7 @@ SHmsSphereBufferContact *CHmsCollisionManager::SZone::EnsureTreeSphereContact(CP
     owned.contact = std::make_unique<SHmsSphereBufferContact>();
     SHmsSphereBufferContact *contact = owned.contact.get();
     ownedSphereContacts.push_back(std::move(owned));
+    cached = {tree, contact};
     return contact;
 }
 
