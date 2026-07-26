@@ -301,8 +301,6 @@ bool OptimizedCpuStaticMeshTriangleSidecar::TryBuild(
         std::vector<OptimizedCpuStaticUniformGrid::Entry> gridEntries;
         gridEntries.reserve(triangles.size());
         rebuilt.directTrianglePostings_.reserve(triangles.size());
-        rebuilt.directPostingIndexByCell_.assign(
-                cells.size(), std::numeric_limits<u32>::max());
         for (std::size_t cellIndex = 0u;
              cellIndex < cells.size();
              ++cellIndex) {
@@ -313,7 +311,6 @@ bool OptimizedCpuStaticMeshTriangleSidecar::TryBuild(
                     cells[cellIndex].Bounds(),
                     cells[cellIndex].TriangleIndex(),
                 });
-                rebuilt.directPostingIndexByCell_[cellIndex] = postingIndex;
                 gridEntries.push_back({
                     postingIndex,
                     cells[cellIndex].Bounds(),
@@ -402,7 +399,6 @@ void OptimizedCpuStaticMeshTriangleSidecar::Clear(void) noexcept {
     maximumTraversalDepth_ = 0u;
     triangles_.clear();
     directTrianglePostings_.clear();
-    directPostingIndexByCell_.clear();
     triangleGrid_.Clear();
     triangleBvh_.Clear();
 }

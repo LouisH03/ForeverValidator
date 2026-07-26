@@ -27,7 +27,6 @@ struct OptimizedCpuStaticMeshDirectTrianglePosting {
 
 struct OptimizedCpuStaticMeshTriangleHierarchyView {
     const GmMeshOctreeCell *cells = nullptr;
-    const u32 *postingIndices = nullptr;
     std::size_t count = 0u;
     std::size_t maximumTraversalDepth = 0u;
 };
@@ -69,12 +68,10 @@ public:
             OptimizedCpuStaticMeshTriangleHierarchyView *result) const
             noexcept {
         if (result == nullptr || sourceCells_ == nullptr ||
-            sourceCellCount_ == 0u ||
-            directPostingIndexByCell_.size() != sourceCellCount_) {
+            sourceCellCount_ == 0u) {
             return false;
         }
         result->cells = sourceCells_;
-        result->postingIndices = directPostingIndexByCell_.data();
         result->count = sourceCellCount_;
         result->maximumTraversalDepth = maximumTraversalDepth_;
         return true;
@@ -107,7 +104,6 @@ private:
     std::vector<OptimizedCpuStaticMeshTriangleData> triangles_;
     std::vector<OptimizedCpuStaticMeshDirectTrianglePosting>
             directTrianglePostings_;
-    std::vector<u32> directPostingIndexByCell_;
     OptimizedCpuStaticUniformGrid triangleGrid_;
     OptimizedCpuStaticBvh triangleBvh_;
 };

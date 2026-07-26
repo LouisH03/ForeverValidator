@@ -850,8 +850,7 @@ FV_E031_AVX2 bool RunPacketAvx2(
         const OptimizedCpuStaticMeshTriangleSidecar &triangles,
         const OptimizedCpuStaticMeshTriangleHierarchyView &hierarchy,
         std::uint32_t *hitMask) noexcept {
-    if (hierarchy.cells == nullptr || hierarchy.postingIndices == nullptr ||
-        hierarchy.count == 0u ||
+    if (hierarchy.cells == nullptr || hierarchy.count == 0u ||
         hierarchy.maximumTraversalDepth > PacketTraversalCapacity) {
         return false;
     }
@@ -927,15 +926,9 @@ FV_E031_AVX2 bool RunPacketAvx2(
             continue;
         }
 
-        const u32 postingIndex = hierarchy.postingIndices[cellIndex];
-        if (postingIndex == std::numeric_limits<u32>::max()) {
-            return false;
-        }
         ++cellIndex;
-        const OptimizedCpuStaticMeshDirectTrianglePosting &posting =
-                triangles.DirectTriangleAt(postingIndex);
         const OptimizedCpuStaticMeshTriangleData &triangle =
-                triangles.TriangleAt(posting.triangleIndex);
+                triangles.TriangleAt(cell.TriangleIndex());
         // BoundsMask and every parent mask use canonical all-zero/all-one
         // lanes, so converting through movemask and rebuilding the vector is
         // redundant. Preserve the exact mask produced by the bounds test.
