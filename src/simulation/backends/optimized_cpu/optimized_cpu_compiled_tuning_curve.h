@@ -28,6 +28,7 @@ private:
     struct Lookup {
         std::size_t index = 0u;
         bool raisesInexact = false;
+        bool clamped = false;
     };
 
     Lookup LookupFor(float input) const noexcept;

@@ -212,15 +212,18 @@ OptimizedCpuCompiledTuningCurve::LookupFor(float input) const
 
     Lookup result;
     if (count == 1u) {
+        result.clamped = true;
         return result;
     }
     if (input < lowerBounds_.front()) {
         result.raisesInexact = lowerClampRaisesInexact_;
+        result.clamped = true;
         return result;
     }
     if (input > upperBounds_.back()) {
         result.index = count - 1u;
         result.raisesInexact = upperClampRaisesInexact_;
+        result.clamped = true;
         return result;
     }
 
@@ -268,9 +271,7 @@ float OptimizedCpuCompiledTuningCurve::Evaluate(float input) const noexcept {
     const std::size_t nextKeyIndex = keyIndex + 1u < count
             ? keyIndex + 1u
             : 0u;
-    const bool clampedLow = count == 1u || input < lowerBounds_.front();
-    const bool clampedHigh = input > upperBounds_.back();
-    const std::size_t effectiveNext = clampedLow || clampedHigh
+    const std::size_t effectiveNext = lookup.clamped
             ? keyIndex
             : nextKeyIndex;
 
@@ -324,9 +325,7 @@ float OptimizedCpuCompiledTuningCurve::EvaluateConstant(float input) const
     const std::size_t nextKeyIndex = keyIndex + 1u < count
             ? keyIndex + 1u
             : 0u;
-    const bool clampedLow = count == 1u || input < lowerBounds_.front();
-    const bool clampedHigh = input > upperBounds_.back();
-    const std::size_t effectiveNext = clampedLow || clampedHigh
+    const std::size_t effectiveNext = lookup.clamped
             ? keyIndex
             : nextKeyIndex;
     if (keyIndex != effectiveNext) {
