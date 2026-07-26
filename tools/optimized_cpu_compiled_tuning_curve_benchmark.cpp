@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
+#include <string>
 #include <vector>
 
 #include "engine/core/binary32_math.h"
@@ -69,7 +71,26 @@ std::uint64_t Measure(
 
 }  // namespace
 
-int main(void) {
+int main(int argc, char **argv) {
+    std::size_t keyCount = 12u;
+    if (argc == 2) {
+        try {
+            std::size_t consumed = 0u;
+            const unsigned long parsed = std::stoul(argv[1], &consumed);
+            if (argv[1][consumed] != '\0' || parsed == 0u || parsed > 12u) {
+                std::fprintf(stderr, "key count must be in [1, 12]\n");
+                return 1;
+            }
+            keyCount = static_cast<std::size_t>(parsed);
+        } catch (...) {
+            std::fprintf(stderr, "key count must be in [1, 12]\n");
+            return 1;
+        }
+    } else if (argc != 1) {
+        std::fprintf(stderr, "usage: %s [KEY_COUNT]\n", argv[0]);
+        return 1;
+    }
+
     tmnf::simulation::DeterministicExecutionScope deterministicScope;
     if (!deterministicScope.Established()) {
         std::fprintf(stderr, "could not establish deterministic execution\n");
@@ -77,8 +98,7 @@ int main(void) {
     }
 
     CFuncKeysReal curve;
-    curve.SetKeys(
-            {
+    std::vector<CFuncKeysReal::Key> keys = {
                 {-160.0f, 0.22f},
                 {-80.0f, 0.29f},
                 {-30.0f, 0.41f},
@@ -91,8 +111,9 @@ int main(void) {
                 {300.0f, 0.74f},
                 {400.0f, 0.51f},
                 {520.0f, 0.34f},
-            },
-            CFuncKeysReal::Linear);
+            };
+    keys.resize(keyCount);
+    curve.SetKeys(std::move(keys), CFuncKeysReal::Linear);
 
     forevervalidator::simulation::OptimizedCpuCompiledTuningCurve compiled;
     if (!compiled.TryBuild(curve)) {
@@ -156,9 +177,11 @@ int main(void) {
     const double nativePerCall = nativeNanoseconds / calls;
     const double compiledPerCall = compiledNanoseconds / calls;
     std::printf(
-            "calls=%zu reference_ns_per_call=%.3f native_ns_per_call=%.3f "
+            "key_count=%zu calls=%zu reference_ns_per_call=%.3f "
+            "native_ns_per_call=%.3f "
             "compiled_ns_per_call=%.3f speedup_vs_reference=%.3fx "
             "speedup_vs_native=%.3fx sink=%llu result=identical\n",
+            keyCount,
             InputCount * Repetitions,
             referencePerCall,
             nativePerCall,
