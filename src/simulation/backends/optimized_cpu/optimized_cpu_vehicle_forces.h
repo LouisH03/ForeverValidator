@@ -4,8 +4,10 @@
 
 #include "engine/physics/dynamics/hms_item.h"
 #include "simulation/backends/optimized_cpu/optimized_cpu_binary32_math.h"
+#include "simulation/backends/optimized_cpu/optimized_cpu_vehicle_collision_bounds_plan.h"
 
 class CFuncKeysReal;
+class CPlugTree;
 class CSceneVehicleCar;
 class CSceneVehicleCarTuning;
 struct CHmsCorpus;
@@ -42,8 +44,11 @@ private:
     CSceneVehicleCar *car_ = nullptr;
     CHmsItem *item_ = nullptr;
     CSceneVehicleCarTuning *tuning_ = nullptr;
+    CPlugTree *collisionTree_ = nullptr;
     CHmsItem::CCallback *canonicalCallback_ = nullptr;
     std::unique_ptr<OptimizedCpuCompiledModel6Tuning> compiledModel6_;
+    OptimizedCpuVehicleCollisionBoundsPlan collisionBoundsPlan_;
+    bool collisionBoundsPlanAttempted_ = false;
     bool stableEligible_ = false;
     bool tickEligible_ = false;
 };

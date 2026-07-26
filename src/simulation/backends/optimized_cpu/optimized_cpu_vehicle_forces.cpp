@@ -794,7 +794,10 @@ struct OptimizedCpuVehicleForceAccess {
     template<bool NativeBinary32>
     static FV_E019_ALWAYS_INLINE void IntegrateVehicle(
             CSceneVehicleCar &car,
-            float dt) {
+            float dt,
+            forevervalidator::simulation::
+                    OptimizedCpuVehicleCollisionBoundsPlan
+                            *collisionBoundsPlan) {
         if constexpr (!NativeBinary32) {
             car.IntegrateVehicle(dt);
             return;
@@ -844,7 +847,11 @@ struct OptimizedCpuVehicleForceAccess {
         }
 
         car.UpdateCurrentSteering(tuning, dt);
-        car.RefreshCollisionTree();
+        if (collisionBoundsPlan == nullptr) {
+            car.RefreshCollisionTree();
+        } else {
+            collisionBoundsPlan->RefreshRuntimeCertified();
+        }
     }
 
     template<bool NativeBinary32>
@@ -1831,7 +1838,10 @@ struct OptimizedCpuVehicleForceAccess {
             CSceneVehicleCar &car,
             CHmsDyna &dyna,
             float dt,
-            const OptimizedCpuCompiledModel6Tuning *compiledModel6) {
+            const OptimizedCpuCompiledModel6Tuning *compiledModel6,
+            forevervalidator::simulation::
+                    OptimizedCpuVehicleCollisionBoundsPlan
+                            *collisionBoundsPlan) {
         GmVec3 savedForce;
         GmVec3 savedImpulse;
         car.SaveAndClearAccumulatedFeedback(savedForce, savedImpulse);
@@ -1844,7 +1854,8 @@ struct OptimizedCpuVehicleForceAccess {
         }
 
         car.CreateFakeContacts();
-        IntegrateVehicle<NativeBinary32>(car, dt);
+        IntegrateVehicle<NativeBinary32>(
+                car, dt, collisionBoundsPlan);
 
         u32 tick = CMwCmdBufferCore::Current()->Timer().GetTickTime();
         int isGroundContact = car.IsGroundContact();
@@ -1993,14 +2004,21 @@ void OptimizedCpuVehicleForceContext::BeginTick(
 
     CSceneVehicleCarTuning *tuning =
             OptimizedCpuVehicleForceAccess::ActiveTuning(car);
+    CPlugTree *collisionTree = item->Solid() != nullptr
+            ? item->Solid()->CollisionTree()
+            : nullptr;
     const bool identityChanged =
-            car_ != &car || item_ != item || tuning_ != tuning;
+            car_ != &car || item_ != item || tuning_ != tuning ||
+            collisionTree_ != collisionTree;
     if (identityChanged) {
         car_ = &car;
         item_ = item;
         tuning_ = tuning;
+        collisionTree_ = collisionTree;
         canonicalCallback_ = enabledComputeForcesCallback;
         compiledModel6_.reset();
+        collisionBoundsPlan_.Clear();
+        collisionBoundsPlanAttempted_ = false;
         stableEligible_ = false;
     } else if (canonicalCallback_ != enabledComputeForcesCallback) {
         return;
@@ -2010,6 +2028,12 @@ void OptimizedCpuVehicleForceContext::BeginTick(
         stableEligible_ =
                 OptimizedCpuVehicleForceAccess::HasStableEligibility(
                         car, item, tuning, mathPath);
+    }
+    if (stableEligible_ && !collisionBoundsPlanAttempted_) {
+        collisionBoundsPlanAttempted_ = true;
+        if (collisionTree_ != nullptr) {
+            (void)collisionBoundsPlan_.TryBuild(*collisionTree_);
+        }
     }
     if (stableEligible_ && tuning->handlingModel ==
             CSceneVehicleCarHandlingModel_GearedDrive) {
@@ -2049,8 +2073,11 @@ void OptimizedCpuVehicleForceContext::Reset(void) noexcept {
     car_ = nullptr;
     item_ = nullptr;
     tuning_ = nullptr;
+    collisionTree_ = nullptr;
     canonicalCallback_ = nullptr;
     compiledModel6_.reset();
+    collisionBoundsPlan_.Clear();
+    collisionBoundsPlanAttempted_ = false;
     stableEligible_ = false;
     tickEligible_ = false;
 }
@@ -2094,6 +2121,9 @@ bool OptimizedCpuVehicleForceContext::TryComputeOwnerForces(
             tuning_->handlingModel ==
                     CSceneVehicleCarHandlingModel_GearedDrive
                     ? compiledModel6_.get()
+                    : nullptr,
+            collisionBoundsPlan_.IsFor(collisionTree_)
+                    ? &collisionBoundsPlan_
                     : nullptr);
     return true;
 }
