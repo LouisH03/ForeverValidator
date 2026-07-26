@@ -1493,6 +1493,296 @@ struct PhysicsSandbox::Impl {
     }
 };
 
+struct PhysicsSandboxCudaSearchSession::Impl {
+    std::unique_ptr<simulation::CudaSearchExecutor> executor;
+    std::uint64_t scenarioFingerprint = 0u;
+    std::uint32_t validationSeed = 0u;
+    std::uint32_t tickDurationMs = 0u;
+    std::uint32_t prestartDurationMs = 0u;
+    std::uint64_t durationMs = 0u;
+    std::size_t prestartTicks = 0u;
+    MapEnvironment mapEnvironment = MapEnvironment::Unknown;
+    VehicleModel vehicleModel = VehicleModel::Unknown;
+    std::optional<PlayMode> playMode;
+
+    PhysicsSandboxResult<PhysicsSandboxCudaSearchBatch> Convert(
+            simulation::CudaSearchBatchExecution execution);
+};
+
+namespace {
+
+simulation::CudaSearchWindow CudaWindow(
+        const PhysicsSandboxCudaModifierWindow &source) {
+    return {source.minimumTimeMs,
+            source.maximumTimeMs,
+            source.seed};
+}
+
+simulation::CudaSearchModifierConfiguration CudaModifier(
+        const PhysicsSandboxCudaModifier &source) {
+    return std::visit(
+            [](const auto &modifier) {
+                using T = std::decay_t<decltype(modifier)>;
+                simulation::CudaSearchModifierConfiguration result;
+                result.window = CudaWindow(modifier.window);
+                if constexpr (std::is_same_v<
+                                      T,
+                                      PhysicsSandboxCudaRandomSteeringModifier>) {
+                    result.kind = simulation::CudaSearchModifierKind::
+                            RandomSteering;
+                } else if constexpr (std::is_same_v<
+                                             T,
+                                             PhysicsSandboxCudaExistingEventModifier>) {
+                    result.kind = simulation::CudaSearchModifierKind::
+                            ExistingEvent;
+                    result.minimumCount = modifier.minimumCount;
+                    result.maximumCount = modifier.maximumCount;
+                    result.timeParameterMs = modifier.maximumTimeShiftMs;
+                    result.analogMinimum =
+                            modifier.steeringDeltaMinimum;
+                    result.analogMaximum =
+                            modifier.steeringDeltaMaximum;
+                    result.secondaryAnalogMinimum =
+                            modifier.steeringAbsoluteMinimum;
+                    result.secondaryAnalogMaximum =
+                            modifier.steeringAbsoluteMaximum;
+                    result.optionFlags =
+                            (modifier.absoluteSteering ? 1u : 0u) |
+                            (modifier.toggleAccelerate ? 2u : 0u) |
+                            (modifier.toggleBrake ? 4u : 0u);
+                } else if constexpr (std::is_same_v<
+                                             T,
+                                             PhysicsSandboxCudaSmoothSteeringModifier>) {
+                    result.kind = simulation::CudaSearchModifierKind::
+                            SmoothSteering;
+                    result.minimumCount = modifier.deformationCount;
+                    result.timeParameterMs = modifier.radiusMs;
+                    result.analogMinimum = modifier.amplitudeMinimum;
+                    result.analogMaximum = modifier.amplitudeMaximum;
+                } else if constexpr (std::is_same_v<
+                                             T,
+                                             PhysicsSandboxCudaInputInsertionModifier>) {
+                    result.kind = simulation::CudaSearchModifierKind::
+                            InputInsertion;
+                    const auto channel = [](const auto &value) {
+                        return simulation::CudaSearchChannel{
+                                value.enabled ? 1u : 0u,
+                                value.minimumCount,
+                                value.maximumCount,
+                                value.maximumHoldMs};
+                    };
+                    result.steering = channel(modifier.steering);
+                    result.accelerate = channel(modifier.accelerate);
+                    result.brake = channel(modifier.brake);
+                    result.analogMinimum =
+                            modifier.steeringAbsoluteMinimum;
+                    result.analogMaximum =
+                            modifier.steeringAbsoluteMaximum;
+                    result.secondaryAnalogMinimum =
+                            modifier.steeringOffsetMinimum;
+                    result.secondaryAnalogMaximum =
+                            modifier.steeringOffsetMaximum;
+                    result.optionFlags =
+                            modifier.steeringOffset ? 1u : 0u;
+                } else {
+                    result.kind = simulation::CudaSearchModifierKind::
+                            InputDeletion;
+                    const auto channel = [](const auto &value) {
+                        return simulation::CudaSearchChannel{
+                                value.enabled ? 1u : 0u,
+                                0u,
+                                value.maximumCount,
+                                0};
+                    };
+                    result.steering = channel(modifier.steering);
+                    result.accelerate = channel(modifier.accelerate);
+                    result.brake = channel(modifier.brake);
+                }
+                return result;
+            },
+            source);
+}
+
+simulation::CudaSearchEvaluatorConfiguration CudaEvaluator(
+        const PhysicsSandboxCudaEvaluator &source) {
+    return std::visit(
+            [](const auto &evaluator) {
+                using T = std::decay_t<decltype(evaluator)>;
+                simulation::CudaSearchEvaluatorConfiguration result;
+                if constexpr (std::is_same_v<
+                                      T,
+                                      PhysicsSandboxCudaVelocityEvaluator>) {
+                    result.kind =
+                            simulation::CudaSearchEvaluatorKind::Velocity;
+                    result.optionFlags =
+                            (evaluator.projected ? 1u : 0u) |
+                            (evaluator.alignmentEnabled ? 2u : 0u);
+                    result.values[0] = evaluator.direction.x;
+                    result.values[1] = evaluator.direction.y;
+                    result.values[2] = evaluator.direction.z;
+                    result.values[3] = evaluator.minimumAlignment;
+                } else if constexpr (std::is_same_v<
+                                             T,
+                                             PhysicsSandboxCudaPointEvaluator>) {
+                    result.kind =
+                            simulation::CudaSearchEvaluatorKind::Point;
+                    result.values[0] = evaluator.target.x;
+                    result.values[1] = evaluator.target.y;
+                    result.values[2] = evaluator.target.z;
+                } else if constexpr (std::is_same_v<
+                                             T,
+                                             PhysicsSandboxCudaPoseEvaluator>) {
+                    result.kind =
+                            simulation::CudaSearchEvaluatorKind::Pose;
+                    result.values[0] = evaluator.targetPosition.x;
+                    result.values[1] = evaluator.targetPosition.y;
+                    result.values[2] = evaluator.targetPosition.z;
+                    result.values[3] = evaluator.targetRotationX;
+                    result.values[4] = evaluator.targetRotationY;
+                    result.values[5] = evaluator.targetRotationZ;
+                    result.values[6] = evaluator.targetRotationW;
+                    result.values[7] = evaluator.rotationWeight;
+                } else if constexpr (std::is_same_v<
+                                             T,
+                                             PhysicsSandboxCudaVolumeEntryEvaluator>) {
+                    result.kind =
+                            simulation::CudaSearchEvaluatorKind::VolumeEntry;
+                    result.values[0] = evaluator.minimum.x;
+                    result.values[1] = evaluator.minimum.y;
+                    result.values[2] = evaluator.minimum.z;
+                    result.values[3] = evaluator.maximum.x;
+                    result.values[4] = evaluator.maximum.y;
+                    result.values[5] = evaluator.maximum.z;
+                } else {
+                    result.kind =
+                            simulation::CudaSearchEvaluatorKind::FinishTime;
+                }
+                return result;
+            },
+            source);
+}
+
+simulation::CudaSearchInputEvent CudaInput(
+        const PhysicsSandboxInputEvent &source) {
+    simulation::CudaSearchInputEvent result;
+    result.timeMs = source.timeMs;
+    result.action = static_cast<std::uint32_t>(source.action);
+    result.valueKind = static_cast<std::uint32_t>(source.value.kind);
+    if (source.value.kind == PhysicsSandboxInputValueKind::Analog) {
+        result.value = source.value.analog;
+    } else {
+        result.value =
+                static_cast<std::int32_t>(source.value.switchState);
+    }
+    return result;
+}
+
+PhysicsSandboxInputEvent PublicInput(
+        const simulation::CudaSearchInputEvent &source) {
+    PhysicsSandboxInputEvent result;
+    result.timeMs = source.timeMs;
+    result.action =
+            static_cast<PhysicsSandboxInputAction>(source.action);
+    result.value.kind =
+            static_cast<PhysicsSandboxInputValueKind>(source.valueKind);
+    if (result.value.kind == PhysicsSandboxInputValueKind::Analog) {
+        result.value.analog = source.value;
+    } else {
+        result.value.switchState =
+                static_cast<PhysicsSandboxSwitchState>(source.value);
+    }
+    return result;
+}
+
+bool AddEventCapacity(std::size_t amount, std::size_t *capacity) {
+    constexpr std::size_t MaximumSearchEvents = 1024u * 1024u;
+    if (amount > MaximumSearchEvents - *capacity) {
+        return false;
+    }
+    *capacity += amount;
+    return true;
+}
+
+bool MaximumEventCapacity(
+        std::size_t baselineCount,
+        const std::vector<PhysicsSandboxCudaModifier> &modifiers,
+        std::uint32_t tickDurationMs,
+        std::size_t *capacity) {
+    *capacity = baselineCount;
+    for (const PhysicsSandboxCudaModifier &modifier : modifiers) {
+        bool valid = std::visit(
+                [&](const auto &value) {
+                    using T = std::decay_t<decltype(value)>;
+                    if constexpr (std::is_same_v<
+                                          T,
+                                          PhysicsSandboxCudaSmoothSteeringModifier>) {
+                        if (value.radiusMs < 0 ||
+                            value.radiusMs %
+                                            static_cast<std::int64_t>(
+                                                    tickDurationMs) !=
+                                    0) {
+                            return false;
+                        }
+                        const std::uint64_t perDeformation =
+                                static_cast<std::uint64_t>(
+                                        value.radiusMs /
+                                        tickDurationMs) *
+                                        2u +
+                                2u;
+                        if (value.deformationCount != 0u &&
+                            perDeformation >
+                                    std::numeric_limits<std::size_t>::max() /
+                                            value.deformationCount) {
+                            return false;
+                        }
+                        return AddEventCapacity(
+                                static_cast<std::size_t>(
+                                        perDeformation *
+                                        value.deformationCount),
+                                capacity);
+                    } else if constexpr (std::is_same_v<
+                                                 T,
+                                                 PhysicsSandboxCudaInputInsertionModifier>) {
+                        const std::uint64_t operations =
+                                (value.steering.enabled
+                                         ? value.steering.maximumCount
+                                         : 0u) +
+                                (value.accelerate.enabled
+                                         ? value.accelerate.maximumCount
+                                         : 0u) +
+                                (value.brake.enabled
+                                         ? value.brake.maximumCount
+                                         : 0u);
+                        if (operations >
+                            std::numeric_limits<std::size_t>::max() / 2u) {
+                            return false;
+                        }
+                        return AddEventCapacity(
+                                static_cast<std::size_t>(operations * 2u),
+                                capacity);
+                    } else {
+                        return true;
+                    }
+                },
+                modifier);
+        if (!valid) {
+            return false;
+        }
+    }
+    return true;
+}
+
+PhysicsSandboxError SearchError(
+        PhysicsSandboxErrorCode code,
+        const std::string &diagnostic) {
+    PhysicsSandboxError result;
+    result.code = code;
+    result.diagnostic = diagnostic;
+    return result;
+}
+
+}  // namespace
+
 PhysicsSandboxState::PhysicsSandboxState(std::shared_ptr<const Impl> impl)
     : impl_(std::move(impl)) {}
 PhysicsSandboxState::PhysicsSandboxState(const PhysicsSandboxState &) = default;
@@ -1970,6 +2260,433 @@ PhysicsSandboxResult<PhysicsSandbox> CreatePhysicsSandbox(
         return PhysicsSandboxResult<PhysicsSandbox>::Failure(
                 SandboxError(PhysicsSandboxErrorCode::UnexpectedFailure,
                              "unexpected sandbox creation failure"));
+    }
+}
+
+PhysicsSandboxCudaSearchSession::PhysicsSandboxCudaSearchSession(
+        std::unique_ptr<Impl> impl)
+    : impl_(std::move(impl)) {}
+PhysicsSandboxCudaSearchSession::~PhysicsSandboxCudaSearchSession() =
+        default;
+PhysicsSandboxCudaSearchSession::PhysicsSandboxCudaSearchSession(
+        PhysicsSandboxCudaSearchSession &&) noexcept = default;
+PhysicsSandboxCudaSearchSession &
+PhysicsSandboxCudaSearchSession::operator=(
+        PhysicsSandboxCudaSearchSession &&) noexcept = default;
+
+PhysicsSandboxResult<PhysicsSandboxCudaSearchBatch>
+PhysicsSandboxCudaSearchSession::Impl::Convert(
+        simulation::CudaSearchBatchExecution execution) {
+    if (execution.status != simulation::CudaSearchStatus::Success &&
+        execution.status != simulation::CudaSearchStatus::Cancelled) {
+        const PhysicsSandboxErrorCode code =
+                execution.status ==
+                                simulation::CudaSearchStatus::CapacityExceeded
+                        ? PhysicsSandboxErrorCode::AllocationFailed
+                        : execution.status ==
+                                          simulation::CudaSearchStatus::
+                                                  InvalidArgument ||
+                                  execution.status ==
+                                          simulation::CudaSearchStatus::
+                                                  UnsupportedConfiguration
+                        ? PhysicsSandboxErrorCode::InvalidRequest
+                        : PhysicsSandboxErrorCode::SimulationFailed;
+        std::string diagnostic = "CUDA search batch failed";
+        if (!execution.diagnostic.empty()) {
+            diagnostic += ": " + execution.diagnostic;
+        }
+        return PhysicsSandboxResult<
+                PhysicsSandboxCudaSearchBatch>::Failure(
+                SearchError(code, diagnostic));
+    }
+
+    PhysicsSandboxCudaSearchBatch result;
+    result.firstCandidateId = execution.firstCandidateId;
+    result.candidateCount = execution.candidateCount;
+    result.evaluatedCandidateCount =
+            execution.evaluatedCandidateCount;
+    result.evaluatorCalls = execution.evaluatorCalls;
+    result.totalMutationCount = execution.totalMutationCount;
+    result.mutationImprovementCount =
+            execution.mutationImprovementCount;
+    result.cancelled =
+            execution.status == simulation::CudaSearchStatus::Cancelled;
+    result.bestChanged = execution.bestChanged;
+    result.metrics.residentDeviceBytes =
+            execution.residentDeviceBytes;
+    result.metrics.hostToDeviceBytes = execution.hostToDeviceBytes;
+    result.metrics.deviceToHostBytes = execution.deviceToHostBytes;
+    result.metrics.kernelMilliseconds = execution.kernelMilliseconds;
+    if (!execution.best.valid) {
+        return PhysicsSandboxResult<
+                PhysicsSandboxCudaSearchBatch>::Success(
+                std::move(result));
+    }
+
+    const simulation::CudaSearchBest &best = execution.best;
+    result.bestIsMutation = best.mutation;
+    if (best.mutation) {
+        result.bestCandidateId = best.candidateId;
+    }
+    result.bestMutationCount = best.mutationCount;
+    result.bestScore = best.score;
+    result.bestTimeMs = best.timeMs;
+    result.bestDetail0 = best.detail0;
+    result.bestDetail1 = best.detail1;
+    result.bestInputs.reserve(best.inputs.size());
+    for (const simulation::CudaSearchInputEvent &input : best.inputs) {
+        result.bestInputs.push_back(PublicInput(input));
+    }
+
+    ReplaySimulationInstanceClone clone;
+    if (simulation::DecodeCudaCandidateState(
+                best.state, &clone) !=
+        simulation::CudaStateConversionResult::Success ||
+        best.state.controlCursor < prestartTicks ||
+        best.state.controlCursor >
+                std::numeric_limits<std::size_t>::max()) {
+        return PhysicsSandboxResult<
+                PhysicsSandboxCudaSearchBatch>::Failure(
+                SearchError(
+                        PhysicsSandboxErrorCode::SimulationFailed,
+                        "CUDA winning state conversion failed"));
+    }
+
+    PhysicsSandboxStateView view;
+    view.tick = best.state.controlCursor - prestartTicks;
+    view.timeMs = view.tick * tickDurationMs;
+    view.durationMs = durationMs;
+    view.mapEnvironment = mapEnvironment;
+    view.vehicleModel = vehicleModel;
+    view.playMode = playMode;
+    const CHmsDyna::CHmsStateDyna &frame = best.state.body.current;
+    view.car.rotationX = frame.rotationQuat.x;
+    view.car.rotationY = frame.rotationQuat.y;
+    view.car.rotationZ = frame.rotationQuat.z;
+    view.car.rotationW = frame.rotationQuat.w;
+    view.car.position = ToPublicVector(frame.position);
+    view.car.linearSpeed = ToPublicVector(frame.linearSpeed);
+    view.car.angularSpeed = ToPublicVector(frame.angularSpeed);
+    view.car.force = ToPublicVector(frame.force);
+    view.car.torque = ToPublicVector(frame.torque);
+    view.accelerate = best.state.vehicle.controls.lowSpeedGateA;
+    view.brake = best.state.vehicle.controls.lowSpeedGateB;
+    view.steering = best.state.vehicle.controls.steeringControl;
+    const ReplayRaceProgress &race = best.state.race.progress;
+    view.checkpointsCollected = race.checkpointCount;
+    view.checkpointsTotal = race.requiredCheckpointCount;
+    view.completedLaps = race.completedLapCount;
+    view.totalLaps = race.requiredLapCount;
+    view.raceCompleted = race.raceCompleted;
+    if (race.raceCompleted) {
+        view.finishTimeMs =
+                race.lastPrepareTimeMs >= prestartDurationMs
+                ? race.lastPrepareTimeMs - prestartDurationMs
+                : 0u;
+    }
+    view.respawnCount = best.state.incrementalRespawnCount;
+    if (best.state.stuntsEnabled) {
+        view.stuntsScore = best.state.race.stuntsScore;
+    }
+    result.bestState = view;
+
+    auto state = std::make_shared<PhysicsSandboxState::Impl>();
+    state->view = view;
+    state->runtimeClone =
+            std::make_shared<ReplaySimulationInstanceClone>(
+                    std::move(clone));
+    state->inputs = result.bestInputs;
+    state->scenarioFingerprint = scenarioFingerprint;
+    state->validationSeed = validationSeed;
+    state->backend = SimulationBackend::Cuda;
+    state->tickDurationMs = tickDurationMs;
+    state->prestartDurationMs = prestartDurationMs;
+    state->cursor =
+            static_cast<std::size_t>(best.state.controlCursor);
+    state->runtimeCloneSchema = SandboxRuntimeCloneSchema;
+    PhysicsSandboxState snapshot(std::move(state));
+    result.bestSnapshot = std::move(snapshot);
+    return PhysicsSandboxResult<
+            PhysicsSandboxCudaSearchBatch>::Success(std::move(result));
+}
+
+PhysicsSandboxResult<PhysicsSandboxCudaSearchBatch>
+PhysicsSandboxCudaSearchSession::EvaluateBaseline() noexcept {
+    return EvaluateBaseline(std::function<bool()>{});
+}
+
+PhysicsSandboxResult<PhysicsSandboxCudaSearchBatch>
+PhysicsSandboxCudaSearchSession::EvaluateBaseline(
+        const std::function<bool()> &cancellationRequested) noexcept {
+    try {
+        if (!impl_ || !impl_->executor) {
+            return PhysicsSandboxResult<
+                    PhysicsSandboxCudaSearchBatch>::Failure(
+                    SearchError(
+                            PhysicsSandboxErrorCode::InvalidSandbox,
+                            "CUDA search session is invalid"));
+        }
+        return impl_->Convert(
+                impl_->executor->EvaluateBaseline(
+                        cancellationRequested));
+    } catch (const std::bad_alloc &) {
+        return PhysicsSandboxResult<
+                PhysicsSandboxCudaSearchBatch>::Failure(
+                SearchError(
+                        PhysicsSandboxErrorCode::AllocationFailed,
+                        "CUDA baseline result allocation failed"));
+    } catch (...) {
+        return PhysicsSandboxResult<
+                PhysicsSandboxCudaSearchBatch>::Failure(
+                SearchError(
+                        PhysicsSandboxErrorCode::UnexpectedFailure,
+                        "unexpected CUDA baseline evaluation failure"));
+    }
+}
+
+PhysicsSandboxResult<PhysicsSandboxCudaSearchBatch>
+PhysicsSandboxCudaSearchSession::RunBatch(
+        std::uint64_t firstCandidateId,
+        std::uint32_t candidateCount,
+        bool cancellationRequested) noexcept {
+    const std::function<bool()> probe = cancellationRequested
+            ? std::function<bool()>([] { return true; })
+            : std::function<bool()>{};
+    return RunBatch(firstCandidateId, candidateCount, probe);
+}
+
+PhysicsSandboxResult<PhysicsSandboxCudaSearchBatch>
+PhysicsSandboxCudaSearchSession::RunBatch(
+        std::uint64_t firstCandidateId,
+        std::uint32_t candidateCount,
+        const std::function<bool()> &cancellationRequested) noexcept {
+    try {
+        if (!impl_ || !impl_->executor) {
+            return PhysicsSandboxResult<
+                    PhysicsSandboxCudaSearchBatch>::Failure(
+                    SearchError(
+                            PhysicsSandboxErrorCode::InvalidSandbox,
+                            "CUDA search session is invalid"));
+        }
+        return impl_->Convert(impl_->executor->RunBatch(
+                firstCandidateId,
+                candidateCount,
+                cancellationRequested));
+    } catch (const std::bad_alloc &) {
+        return PhysicsSandboxResult<
+                PhysicsSandboxCudaSearchBatch>::Failure(
+                SearchError(
+                        PhysicsSandboxErrorCode::AllocationFailed,
+                        "CUDA batch result allocation failed"));
+    } catch (...) {
+        return PhysicsSandboxResult<
+                PhysicsSandboxCudaSearchBatch>::Failure(
+                SearchError(
+                        PhysicsSandboxErrorCode::UnexpectedFailure,
+                        "unexpected CUDA search batch failure"));
+    }
+}
+
+PhysicsSandboxResult<PhysicsSandboxCudaSearchSession>
+CreatePhysicsSandboxCudaSearchSession(
+        PhysicsSandbox &sandbox,
+        const PhysicsSandboxCudaSearchConfiguration &configuration) noexcept {
+    try {
+        if (!sandbox.impl_ || !sandbox.impl_->loaded ||
+            !sandbox.impl_->session ||
+            sandbox.impl_->options.backend != SimulationBackend::Cuda ||
+            configuration.maximumBatchSize == 0u ||
+            configuration.modifiers.empty()) {
+            return PhysicsSandboxResult<
+                    PhysicsSandboxCudaSearchSession>::Failure(
+                    SearchError(
+                            PhysicsSandboxErrorCode::InvalidRequest,
+                            "invalid CUDA search session request"));
+        }
+        const PhysicsSandbox::Impl &source = *sandbox.impl_;
+        const std::uint32_t tickDurationMs =
+                source.options.tickDurationMs;
+        const PhysicsSandboxResult<PhysicsSandboxStateView> current =
+                source.ReadView();
+        if (!current) {
+            return PhysicsSandboxResult<
+                    PhysicsSandboxCudaSearchSession>::Failure(
+                    current.Error());
+        }
+        const std::int64_t branchTimeMs =
+                static_cast<std::int64_t>(current.Value().timeMs);
+        if (configuration.earliestMutationTimeMs !=
+                        branchTimeMs + tickDurationMs ||
+            configuration.evaluationStartTimeMs <
+                    configuration.earliestMutationTimeMs ||
+            configuration.evaluationEndTimeMs <
+                    configuration.evaluationStartTimeMs ||
+            configuration.evaluationEndTimeMs >
+                    static_cast<std::int64_t>(
+                            current.Value().durationMs) ||
+            configuration.evaluationStartTimeMs % tickDurationMs != 0 ||
+            configuration.evaluationEndTimeMs % tickDurationMs != 0) {
+            return PhysicsSandboxResult<
+                    PhysicsSandboxCudaSearchSession>::Failure(
+                    SearchError(
+                            PhysicsSandboxErrorCode::InvalidRequest,
+                            "CUDA search times are invalid or unaligned"));
+        }
+
+        const std::uint64_t endRaceTicks =
+                static_cast<std::uint64_t>(
+                        configuration.evaluationEndTimeMs) /
+                tickDurationMs;
+        if (endRaceTicks >
+                    std::numeric_limits<std::size_t>::max() -
+                            source.prestartTicks ||
+            source.cursor >
+                    source.prestartTicks +
+                            static_cast<std::size_t>(endRaceTicks)) {
+            return PhysicsSandboxResult<
+                    PhysicsSandboxCudaSearchSession>::Failure(
+                    SearchError(
+                            PhysicsSandboxErrorCode::InvalidRequest,
+                            "CUDA search timeline is out of range"));
+        }
+        const std::size_t endCursor =
+                source.prestartTicks +
+                static_cast<std::size_t>(endRaceTicks);
+        if (endCursor > source.controlPlan.ticks.size()) {
+            return PhysicsSandboxResult<
+                    PhysicsSandboxCudaSearchSession>::Failure(
+                    SearchError(
+                            PhysicsSandboxErrorCode::InvalidRequest,
+                            "CUDA search timeline exceeds the replay"));
+        }
+
+        std::size_t maximumEventCount = 0u;
+        if (!MaximumEventCapacity(
+                    source.inputs.size(),
+                    configuration.modifiers,
+                    tickDurationMs,
+                    &maximumEventCount)) {
+            return PhysicsSandboxResult<
+                    PhysicsSandboxCudaSearchSession>::Failure(
+                    SearchError(
+                            PhysicsSandboxErrorCode::InvalidRequest,
+                            "CUDA modifier pipeline event capacity is unsupported"));
+        }
+
+        simulation::CudaSearchExecutorConfiguration internal;
+        internal.maximumBatchSize = configuration.maximumBatchSize;
+        internal.tickDurationMs = tickDurationMs;
+        internal.prestartDurationMs =
+                source.options.prestartDurationMs;
+        internal.branchTimeMs = branchTimeMs;
+        internal.evaluationStartTimeMs =
+                configuration.evaluationStartTimeMs;
+        internal.evaluationEndTimeMs =
+                configuration.evaluationEndTimeMs;
+        internal.maximumEventCount = maximumEventCount;
+        internal.baselineTicks.reserve(endCursor - source.cursor);
+        for (std::size_t index = source.cursor;
+             index < endCursor; ++index) {
+            internal.baselineTicks.push_back(
+                    simulation::FlattenCudaControlTick(
+                            source.controlPlan.ticks[index]));
+        }
+        internal.baselineInputs.reserve(source.inputs.size());
+        for (const PhysicsSandboxInputEvent &input : source.inputs) {
+            internal.baselineInputs.push_back(CudaInput(input));
+        }
+        internal.modifiers.reserve(configuration.modifiers.size());
+        for (const PhysicsSandboxCudaModifier &modifier :
+             configuration.modifiers) {
+            simulation::CudaSearchModifierConfiguration converted =
+                    CudaModifier(modifier);
+            if (const auto *smooth = std::get_if<
+                        PhysicsSandboxCudaSmoothSteeringModifier>(
+                        &modifier)) {
+                converted.weightOffset = static_cast<std::uint32_t>(
+                        internal.smoothWeights.size());
+                const std::uint64_t radiusTicks =
+                        static_cast<std::uint64_t>(smooth->radiusMs) /
+                        tickDurationMs;
+                if (radiusTicks >
+                    std::numeric_limits<std::uint32_t>::max() -
+                            internal.smoothWeights.size()) {
+                    return PhysicsSandboxResult<
+                            PhysicsSandboxCudaSearchSession>::Failure(
+                            SearchError(
+                                    PhysicsSandboxErrorCode::InvalidRequest,
+                                    "CUDA smooth-steering weight table is too large"));
+                }
+                constexpr double pi = 3.14159265358979323846;
+                internal.smoothWeights.reserve(
+                        internal.smoothWeights.size() +
+                        static_cast<std::size_t>(radiusTicks + 1u));
+                for (std::uint64_t distance = 0u;
+                     distance <= radiusTicks; ++distance) {
+                    internal.smoothWeights.push_back(
+                            smooth->radiusMs == 0
+                                    ? 1.0
+                                    : 0.5 *
+                                              (1.0 +
+                                               std::cos(
+                                                       pi *
+                                                       static_cast<double>(
+                                                               distance *
+                                                               tickDurationMs) /
+                                                       static_cast<double>(
+                                                               smooth->radiusMs))));
+                }
+            }
+            internal.modifiers.push_back(converted);
+        }
+        internal.evaluator = CudaEvaluator(configuration.evaluator);
+
+        std::string diagnostic;
+        std::unique_ptr<simulation::CudaSearchExecutor> executor =
+                source.session->CreateCudaSearchExecutor(
+                        std::move(internal),
+                        source.cursor,
+                        &diagnostic);
+        if (!executor) {
+            return PhysicsSandboxResult<
+                    PhysicsSandboxCudaSearchSession>::Failure(
+                    SearchError(
+                            PhysicsSandboxErrorCode::SimulationFailed,
+                            diagnostic.empty()
+                                    ? "CUDA search session creation failed"
+                                    : diagnostic));
+        }
+        auto impl =
+                std::make_unique<PhysicsSandboxCudaSearchSession::Impl>();
+        impl->executor = std::move(executor);
+        impl->scenarioFingerprint = source.scenarioFingerprint;
+        impl->validationSeed = source.inputMetadata.validationSeed;
+        impl->tickDurationMs = tickDurationMs;
+        impl->prestartDurationMs = source.options.prestartDurationMs;
+        impl->durationMs = source.inputMetadata.durationMs;
+        impl->prestartTicks = source.prestartTicks;
+        impl->mapEnvironment =
+                ToPublicMapEnvironment(source.route.mapEnvironment);
+        impl->vehicleModel =
+                ToPublicVehicleModel(source.route.vehicleModel);
+        impl->playMode = ToPublicPlayMode(
+                source.challengeMetadata.playMode.value_or(
+                        EChallengePlayMode::Race));
+        return PhysicsSandboxResult<
+                PhysicsSandboxCudaSearchSession>::Success(
+                PhysicsSandboxCudaSearchSession(std::move(impl)));
+    } catch (const std::bad_alloc &) {
+        return PhysicsSandboxResult<
+                PhysicsSandboxCudaSearchSession>::Failure(
+                SearchError(
+                        PhysicsSandboxErrorCode::AllocationFailed,
+                        "CUDA search session allocation failed"));
+    } catch (...) {
+        return PhysicsSandboxResult<
+                PhysicsSandboxCudaSearchSession>::Failure(
+                SearchError(
+                        PhysicsSandboxErrorCode::UnexpectedFailure,
+                        "unexpected CUDA search session creation failure"));
     }
 }
 

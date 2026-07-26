@@ -5,9 +5,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include <forevervalidator/input_state.h>
@@ -21,6 +23,8 @@ struct PhysicsSandboxStaticSceneTestAccess;
 namespace cuda_test {
 struct PhysicsSandboxCudaTestAccess;
 }
+
+class PhysicsSandboxCudaSearchSession;
 
 enum class PhysicsSandboxErrorCode : std::uint8_t {
     InvalidSandbox,
@@ -282,6 +286,126 @@ struct PhysicsSandboxStateView {
     std::optional<std::uint32_t> stuntsScore;
 };
 
+struct PhysicsSandboxCudaModifierWindow {
+    std::int64_t minimumTimeMs = 0;
+    std::int64_t maximumTimeMs = 0;
+    std::uint32_t seed = 0u;
+};
+
+struct PhysicsSandboxCudaRandomSteeringModifier {
+    PhysicsSandboxCudaModifierWindow window{};
+};
+
+struct PhysicsSandboxCudaExistingEventModifier {
+    PhysicsSandboxCudaModifierWindow window{};
+    std::uint32_t minimumCount = 0u;
+    std::uint32_t maximumCount = 0u;
+    std::int64_t maximumTimeShiftMs = 0;
+    bool absoluteSteering = false;
+    AnalogInputState steeringDeltaMinimum = 0;
+    AnalogInputState steeringDeltaMaximum = 0;
+    AnalogInputState steeringAbsoluteMinimum = kAnalogInputMinimum;
+    AnalogInputState steeringAbsoluteMaximum = kAnalogInputMaximum;
+    bool toggleAccelerate = false;
+    bool toggleBrake = false;
+};
+
+struct PhysicsSandboxCudaSmoothSteeringModifier {
+    PhysicsSandboxCudaModifierWindow window{};
+    std::uint32_t deformationCount = 0u;
+    std::int64_t radiusMs = 0;
+    AnalogInputState amplitudeMinimum = 0;
+    AnalogInputState amplitudeMaximum = 0;
+};
+
+struct PhysicsSandboxCudaInsertionChannel {
+    bool enabled = false;
+    std::uint32_t minimumCount = 0u;
+    std::uint32_t maximumCount = 0u;
+    std::int64_t maximumHoldMs = 0;
+};
+
+struct PhysicsSandboxCudaInputInsertionModifier {
+    PhysicsSandboxCudaModifierWindow window{};
+    PhysicsSandboxCudaInsertionChannel steering{};
+    PhysicsSandboxCudaInsertionChannel accelerate{};
+    PhysicsSandboxCudaInsertionChannel brake{};
+    bool steeringOffset = false;
+    AnalogInputState steeringAbsoluteMinimum = kAnalogInputMinimum;
+    AnalogInputState steeringAbsoluteMaximum = kAnalogInputMaximum;
+    AnalogInputState steeringOffsetMinimum = 0;
+    AnalogInputState steeringOffsetMaximum = 0;
+};
+
+struct PhysicsSandboxCudaDeletionChannel {
+    bool enabled = false;
+    std::uint32_t maximumCount = 0u;
+};
+
+struct PhysicsSandboxCudaInputDeletionModifier {
+    PhysicsSandboxCudaModifierWindow window{};
+    PhysicsSandboxCudaDeletionChannel steering{};
+    PhysicsSandboxCudaDeletionChannel accelerate{};
+    PhysicsSandboxCudaDeletionChannel brake{};
+};
+
+using PhysicsSandboxCudaModifier = std::variant<
+        PhysicsSandboxCudaRandomSteeringModifier,
+        PhysicsSandboxCudaExistingEventModifier,
+        PhysicsSandboxCudaSmoothSteeringModifier,
+        PhysicsSandboxCudaInputInsertionModifier,
+        PhysicsSandboxCudaInputDeletionModifier>;
+
+struct PhysicsSandboxCudaVector3 {
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
+};
+
+struct PhysicsSandboxCudaVelocityEvaluator {
+    bool projected = false;
+    bool alignmentEnabled = false;
+    PhysicsSandboxCudaVector3 direction{};
+    double minimumAlignment = -1.0;
+};
+
+struct PhysicsSandboxCudaPointEvaluator {
+    PhysicsSandboxCudaVector3 target{};
+};
+
+struct PhysicsSandboxCudaPoseEvaluator {
+    PhysicsSandboxCudaVector3 targetPosition{};
+    double targetRotationX = 0.0;
+    double targetRotationY = 0.0;
+    double targetRotationZ = 0.0;
+    double targetRotationW = 1.0;
+    double rotationWeight = 0.5;
+};
+
+struct PhysicsSandboxCudaVolumeEntryEvaluator {
+    PhysicsSandboxCudaVector3 minimum{};
+    PhysicsSandboxCudaVector3 maximum{};
+};
+
+struct PhysicsSandboxCudaFinishTimeEvaluator {};
+
+using PhysicsSandboxCudaEvaluator = std::variant<
+        PhysicsSandboxCudaVelocityEvaluator,
+        PhysicsSandboxCudaPointEvaluator,
+        PhysicsSandboxCudaPoseEvaluator,
+        PhysicsSandboxCudaVolumeEntryEvaluator,
+        PhysicsSandboxCudaFinishTimeEvaluator>;
+
+struct PhysicsSandboxCudaSearchConfiguration {
+    std::uint32_t maximumBatchSize = 1u;
+    std::int64_t earliestMutationTimeMs = 0;
+    std::int64_t evaluationStartTimeMs = 0;
+    std::int64_t evaluationEndTimeMs = 0;
+    std::vector<PhysicsSandboxCudaModifier> modifiers;
+    PhysicsSandboxCudaEvaluator evaluator =
+            PhysicsSandboxCudaFinishTimeEvaluator{};
+};
+
 // An opaque in-process runtime clone. States are not serializable and are not
 // compatible across ForeverValidator builds.
 class PhysicsSandboxState {
@@ -299,6 +423,36 @@ private:
     explicit PhysicsSandboxState(std::shared_ptr<const Impl> impl);
     std::shared_ptr<const Impl> impl_;
     friend class PhysicsSandbox;
+    friend class PhysicsSandboxCudaSearchSession;
+};
+
+struct PhysicsSandboxCudaSearchMetrics {
+    std::uint64_t residentDeviceBytes = 0u;
+    std::uint64_t hostToDeviceBytes = 0u;
+    std::uint64_t deviceToHostBytes = 0u;
+    double kernelMilliseconds = 0.0;
+};
+
+struct PhysicsSandboxCudaSearchBatch {
+    std::uint64_t firstCandidateId = 0u;
+    std::uint32_t candidateCount = 0u;
+    std::uint32_t evaluatedCandidateCount = 0u;
+    std::uint64_t evaluatorCalls = 0u;
+    std::uint64_t totalMutationCount = 0u;
+    std::uint64_t mutationImprovementCount = 0u;
+    bool cancelled = false;
+    bool bestChanged = false;
+    bool bestIsMutation = false;
+    std::optional<std::uint64_t> bestCandidateId;
+    std::size_t bestMutationCount = 0u;
+    double bestScore = 0.0;
+    double bestTimeMs = 0.0;
+    double bestDetail0 = 0.0;
+    double bestDetail1 = 0.0;
+    PhysicsSandboxStateView bestState{};
+    std::vector<PhysicsSandboxInputEvent> bestInputs;
+    std::optional<PhysicsSandboxState> bestSnapshot;
+    PhysicsSandboxCudaSearchMetrics metrics{};
 };
 
 class PhysicsSandbox {
@@ -340,11 +494,58 @@ private:
                     std::uint32_t count) noexcept;
     friend struct static_scene_test::PhysicsSandboxStaticSceneTestAccess;
     friend struct cuda_test::PhysicsSandboxCudaTestAccess;
+    friend class PhysicsSandboxCudaSearchSession;
+    friend PhysicsSandboxResult<PhysicsSandboxCudaSearchSession>
+            CreatePhysicsSandboxCudaSearchSession(
+                    PhysicsSandbox &sandbox,
+                    const PhysicsSandboxCudaSearchConfiguration
+                            &configuration) noexcept;
+};
+
+class PhysicsSandboxCudaSearchSession {
+public:
+    PhysicsSandboxCudaSearchSession(
+            PhysicsSandboxCudaSearchSession &&) noexcept;
+    PhysicsSandboxCudaSearchSession &operator=(
+            PhysicsSandboxCudaSearchSession &&) noexcept;
+    ~PhysicsSandboxCudaSearchSession();
+    PhysicsSandboxCudaSearchSession(
+            const PhysicsSandboxCudaSearchSession &) = delete;
+    PhysicsSandboxCudaSearchSession &operator=(
+            const PhysicsSandboxCudaSearchSession &) = delete;
+
+    PhysicsSandboxResult<PhysicsSandboxCudaSearchBatch> EvaluateBaseline()
+            noexcept;
+    PhysicsSandboxResult<PhysicsSandboxCudaSearchBatch> EvaluateBaseline(
+            const std::function<bool()> &cancellationRequested) noexcept;
+    PhysicsSandboxResult<PhysicsSandboxCudaSearchBatch> RunBatch(
+            std::uint64_t firstCandidateId,
+            std::uint32_t candidateCount,
+            bool cancellationRequested = false) noexcept;
+    PhysicsSandboxResult<PhysicsSandboxCudaSearchBatch> RunBatch(
+            std::uint64_t firstCandidateId,
+            std::uint32_t candidateCount,
+            const std::function<bool()> &cancellationRequested) noexcept;
+
+private:
+    struct Impl;
+    explicit PhysicsSandboxCudaSearchSession(std::unique_ptr<Impl> impl);
+    std::unique_ptr<Impl> impl_;
+    friend PhysicsSandboxResult<PhysicsSandboxCudaSearchSession>
+            CreatePhysicsSandboxCudaSearchSession(
+                    PhysicsSandbox &sandbox,
+                    const PhysicsSandboxCudaSearchConfiguration
+                            &configuration) noexcept;
 };
 
 PhysicsSandboxResult<PhysicsSandbox> CreatePhysicsSandbox(
         AssetSource source,
         const PhysicsSandboxOptions &options = {}) noexcept;
+
+PhysicsSandboxResult<PhysicsSandboxCudaSearchSession>
+CreatePhysicsSandboxCudaSearchSession(
+        PhysicsSandbox &sandbox,
+        const PhysicsSandboxCudaSearchConfiguration &configuration) noexcept;
 
 std::vector<PhysicsSandboxResult<PhysicsSandboxStateView>>
 AdvancePhysicsSandboxes(

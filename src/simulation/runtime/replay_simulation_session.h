@@ -19,6 +19,7 @@
 #include "simulation/backends/cuda/cuda_scene_storage.h"
 #include "simulation/backends/cuda/cuda_static_configuration_storage.h"
 #include "simulation/backends/cuda/cuda_timeline_executor.h"
+#include "simulation/backends/cuda/cuda_search_executor.h"
 #include "engine/scene/static_scene_model.h"
 #include "engine/game/trackmania_race.h"
 struct ReplaySimulationTimelineResult {
@@ -151,6 +152,12 @@ public:
             std::uint32_t overtimeMs);
     std::shared_ptr<const ReplaySimulationInstanceClone>
             CaptureRuntimeClone() const;
+    std::unique_ptr<forevervalidator::simulation::CudaSearchExecutor>
+            CreateCudaSearchExecutor(
+                    forevervalidator::simulation::
+                            CudaSearchExecutorConfiguration configuration,
+                    std::uint64_t initialControlCursor,
+                    std::string *diagnostic) const;
     bool PrepareRuntimeCloneRestore(
             const ReplaySimulationInstanceClone &clone);
     void RestoreRuntimeClone(ReplaySimulationInstanceClone clone) noexcept;

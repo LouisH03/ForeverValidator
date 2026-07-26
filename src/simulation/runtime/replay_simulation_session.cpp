@@ -1582,6 +1582,60 @@ ReplaySimulationSession::CaptureRuntimeClone() const {
     return clone;
 }
 
+std::unique_ptr<forevervalidator::simulation::CudaSearchExecutor>
+ReplaySimulationSession::CreateCudaSearchExecutor(
+        forevervalidator::simulation::CudaSearchExecutorConfiguration
+                configuration,
+        std::uint64_t initialControlCursor,
+        std::string *diagnostic) const {
+#if !FOREVERVALIDATOR_HAS_CUDA
+    (void)configuration;
+    (void)initialControlCursor;
+    if (diagnostic != nullptr) {
+        *diagnostic = "CUDA support is not compiled into this build";
+    }
+    return {};
+#else
+    if (impl->backend != forevervalidator::SimulationBackend::Cuda ||
+        !impl->instance.runtime || !impl->cudaDeviceScene.Ready() ||
+        !impl->cudaDeviceConfiguration.Ready()) {
+        if (diagnostic != nullptr) {
+            *diagnostic = "CUDA search prerequisites are not ready";
+        }
+        return {};
+    }
+    const std::shared_ptr<const ReplaySimulationInstanceClone> initial =
+            CaptureRuntimeClone();
+    if (!initial) {
+        if (diagnostic != nullptr) {
+            *diagnostic = "CUDA search branch state capture failed";
+        }
+        return {};
+    }
+    const auto conversion =
+            forevervalidator::simulation::EncodeCudaCandidateState(
+                    *initial,
+                    impl->incrementalValidationSeed,
+                    initialControlCursor,
+                    0u,
+                    initial->randomState,
+                    &configuration.branchState);
+    if (conversion != forevervalidator::simulation::
+                              CudaStateConversionResult::Success) {
+        if (diagnostic != nullptr) {
+            *diagnostic = "CUDA search branch state conversion failed";
+        }
+        return {};
+    }
+    configuration.deviceScene =
+            impl->cudaDeviceScene.DeviceData();
+    configuration.deviceStaticConfiguration =
+            impl->cudaDeviceConfiguration.DeviceData();
+    return forevervalidator::simulation::CudaSearchExecutor::Create(
+            configuration, diagnostic);
+#endif
+}
+
 bool ReplaySimulationSession::PrepareRuntimeCloneRestore(
         const ReplaySimulationInstanceClone &clone) {
     return impl->instance.runtime &&

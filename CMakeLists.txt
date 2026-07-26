@@ -102,6 +102,7 @@ if(FOREVERVALIDATOR_ENABLE_CUDA)
         "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_vehicle_force_certification.cu"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_stunt_certification.cu"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_scene_storage.cu"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_search_executor.cu"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_timeline_executor.cu")
     target_link_libraries(forevervalidator_core PUBLIC CUDA::cudart)
     target_compile_definitions(forevervalidator_core PUBLIC
