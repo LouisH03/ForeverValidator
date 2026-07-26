@@ -1,0 +1,158 @@
+#include "simulation/backends/cuda/cuda_static_configuration.h"
+#include "simulation/backends/cuda/cuda_static_configuration_storage.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <iostream>
+#include <optional>
+#include <vector>
+
+namespace {
+
+GmIso4 IdentityAt(float x, float y, float z) {
+    GmIso4 result{};
+    result.rotation.basisX = {1.0f, 0.0f, 0.0f};
+    result.rotation.basisY = {0.0f, 1.0f, 0.0f};
+    result.rotation.basisZ = {0.0f, 0.0f, 1.0f};
+    result.translation = {x, y, z};
+    return result;
+}
+
+ReplaySimulationDefinition BuildDefinition() {
+    ReplaySimulationDefinition result;
+    result.environment.zoneLinearDampingCoefficient = 0.75f;
+    result.environment.zoneAngularDampingCoefficient = 0.5f;
+    result.environment.forceFields.push_back(
+            ReplayUniformForceFieldDefinition{{0.0f, -10.0f, 0.0f}});
+    result.environment.forceFields.push_back(
+            ReplayBallForceFieldDefinition{
+                    {10.0f, 20.0f, 30.0f}, 5.0f, -2.0f});
+    std::optional<ReplayWaterDefinition> water =
+            ReplayWaterDefinition::Create(
+                    {4.0f, 4.0f}, {-8.0f, -8.0f}, {2u, 2u},
+                    WaterOccupancy::Dry, 3.0f, -100.0f);
+    water->MarkWaterCell({1u, 0u});
+    result.environment.water = std::move(*water);
+
+    result.vehicle.tuning = MakeDefaultVehicleTuningDefinition();
+    result.vehicle.tuning.handlingModel =
+            ReplayVehicleHandlingModel::GearedDrive;
+    result.vehicle.tuning.curves.maxSideFrictionFromSpeed =
+            ReplayTuningCurveDefinition{
+                    ReplayTuningCurveInterpolation::Linear,
+                    {{0.0f, 1.0f}, {100.0f, 0.5f}}};
+    ReplayVehicleTransmissionTuning &transmission =
+            result.vehicle.tuning.gearedDrive.transmission;
+    transmission.gearSpeedRatio = {1.0f, 2.0f, 3.0f};
+    transmission.upshiftThreshold = {0.0f, 0.5f, 0.8f};
+    transmission.downshiftThreshold = {0.0f, 0.2f, 0.4f};
+    transmission.rpmWanted = {0.0f, 0.6f, 0.9f};
+    transmission.targetInputBias = {0.0f, 0.0f, 0.1f};
+    transmission.rpmDelta = {0.0f, 0.1f, 0.0f};
+
+    for (std::size_t index = 0u;
+         index < result.vehicle.wheels.wheels.size(); ++index) {
+        VehicleWheelDefinition &wheel =
+                result.vehicle.wheels.wheels[index];
+        wheel.surfaceId = VehicleWheelSurfaceIdForIndex(index);
+        wheel.collisionRole = VehicleWheelCollisionRole(index);
+        wheel.rollingRadius = 0.4f;
+        wheel.restSurfacePose =
+                IdentityAt(static_cast<float>(index), -0.5f, 1.0f);
+    }
+
+    VehicleCollisionShapeDefinition bodyShape;
+    bodyShape.localPose = IdentityAt(0.0f, 0.0f, 0.0f);
+    result.vehicle.collisionModel.AddBodyShape(bodyShape);
+    for (std::size_t index = 0u; index < 4u; ++index) {
+        VehicleCollisionShapeDefinition wheelShape;
+        wheelShape.localPose =
+                IdentityAt(static_cast<float>(index), -0.5f, 1.0f);
+        result.vehicle.collisionModel.SetWheelShape(
+                VehicleWheelCollisionRole(index), wheelShape, 0u);
+    }
+
+    VehicleMaterialDefinition material;
+    material.naturalId = 7u;
+    material.usesFakeContactTexture = true;
+    result.vehicle.materials.materials.push_back(material);
+    result.vehicle.materials.materialIndexByNaturalId.push_back(0u);
+    VehicleFakeContactTextureDefinition texture;
+    texture.rgbPixels.assign(
+            VehicleFakeContactTexturePixelBytes, 0x5au);
+    result.vehicle.materials.fakeContactTexture = std::move(texture);
+    return result;
+}
+
+}  // namespace
+
+int main() {
+    using namespace forevervalidator::simulation;
+    const ReplaySimulationDefinition source = BuildDefinition();
+    CudaHostStaticConfiguration first;
+    CudaHostStaticConfiguration second;
+    if (BuildCudaHostStaticConfiguration(source, &first) !=
+                CudaStaticConfigurationBuildResult::Success ||
+        BuildCudaHostStaticConfiguration(source, &second) !=
+                CudaStaticConfigurationBuildResult::Success ||
+        !first.Valid() || first.deterministicHash == 0u ||
+        first.deterministicHash != second.deterministicHash) {
+        std::cerr << "static configuration build was not deterministic\n";
+        return 1;
+    }
+    if (first.forceFields.size() != 2u ||
+        first.waterOccupancy.size() != 4u ||
+        first.collisionShapes.size() != 5u ||
+        first.fakeContactTextureRgb.size() !=
+                VehicleFakeContactTexturePixelBytes) {
+        std::cerr << "static configuration omitted immutable inputs\n";
+        return 1;
+    }
+    const CudaTuningCurve &curve = first.tuning.curves[
+            static_cast<std::size_t>(
+                    CudaTuningCurveId::MaxSideFrictionFromSpeed)];
+    if (curve.keyCount != 2u ||
+        first.curveKeys[curve.firstKey + 1u].value != 0.5f) {
+        std::cerr << "tuning curve ordering changed\n";
+        return 1;
+    }
+
+    std::vector<std::byte> packed;
+    CudaPackedStaticConfigurationHeader header;
+    if (!PackCudaStaticConfiguration(first, &packed, &header) ||
+        header.magic != CudaPackedStaticConfigurationHeader::Magic ||
+        header.totalSize != packed.size() ||
+        header.curveKeys.offset % 16u != 0u ||
+        header.collisionShapes.count != 5u) {
+        std::cerr << "static configuration packing failed\n";
+        return 1;
+    }
+
+    CudaStaticConfigurationBuildLimits limits;
+    limits.maximumCurveKeys = 1u;
+    CudaHostStaticConfiguration overflow;
+    if (BuildCudaHostStaticConfiguration(source, &overflow, limits) !=
+            CudaStaticConfigurationBuildResult::CurveOverflow) {
+        std::cerr << "static configuration overflow was not explicit\n";
+        return 1;
+    }
+
+    CudaDeviceStaticConfiguration device;
+    const CudaStaticConfigurationTransferMetrics transfer =
+            device.Upload(first);
+#if FOREVERVALIDATOR_HAS_CUDA
+    if (!transfer.success || !device.Ready() ||
+        device.ConfigurationHash() != first.deterministicHash ||
+        transfer.deviceBytes != packed.size()) {
+        std::cerr << "static configuration device upload failed: "
+                  << transfer.diagnostic << '\n';
+        return 1;
+    }
+#else
+    if (transfer.success || device.Ready()) {
+        std::cerr << "CPU-only build reported a CUDA upload\n";
+        return 1;
+    }
+#endif
+    return 0;
+}

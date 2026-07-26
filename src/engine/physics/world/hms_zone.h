@@ -86,6 +86,8 @@ struct CHmsZoneDynamic : CHmsZone {
             CHmsPhysicalContact *contactB);
     void ComputeCollisionResponse(
             void);
+    void ComputeCollisionResponse(
+            CHmsCollisionBuffer &collisionBuffer);
     void PhysicsStep2(
             void);
     void PhysicsStep2OptimizedCpu(

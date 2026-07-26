@@ -8,6 +8,8 @@ SimulationBackend ResolveLeafBackend(SimulationBackend backend) noexcept {
         return SimulationBackend::OptimizedCpu;
     case SimulationBackend::SpeculativeTicking:
         return SimulationBackend::SpeculativeTicking;
+    case SimulationBackend::Cuda:
+        return SimulationBackend::Cuda;
     case SimulationBackend::Batched:
         return SimulationBackend::Reference;
     case SimulationBackend::Reference:

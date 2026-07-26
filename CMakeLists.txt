@@ -10,6 +10,20 @@ option(FOREVERVALIDATOR_BUILD_BENCHMARKS
 option(FOREVERVALIDATOR_ENABLE_RELEASE_IPO
        "Enable supported GCC interprocedural optimization in Release builds"
        ON)
+option(FOREVERVALIDATOR_ENABLE_CUDA
+       "Build the optional NVIDIA CUDA simulation backend" OFF)
+
+if(FOREVERVALIDATOR_ENABLE_CUDA)
+    include(CheckLanguage)
+    check_language(CUDA)
+    if(NOT CMAKE_CUDA_COMPILER)
+        message(FATAL_ERROR
+            "FOREVERVALIDATOR_ENABLE_CUDA is ON, but no CUDA compiler "
+            "was found")
+    endif()
+    enable_language(CUDA)
+    find_package(CUDAToolkit REQUIRED)
+endif()
 
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CXX_STANDARD 17)
@@ -61,12 +75,12 @@ function(forevervalidator_configure_target target)
         NOMINMAX
         OPENSSL_SUPPRESS_DEPRECATED)
     target_compile_options(${target} PRIVATE
-        -Wall
-        -Wextra
-        -Wno-deprecated-declarations
-        -ffp-contract=off
-        -frandom-seed=forevervalidator
-        "-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=.")
+        "$<$<COMPILE_LANGUAGE:CXX>:-Wall>"
+        "$<$<COMPILE_LANGUAGE:CXX>:-Wextra>"
+        "$<$<COMPILE_LANGUAGE:CXX>:-Wno-deprecated-declarations>"
+        "$<$<COMPILE_LANGUAGE:CXX>:-ffp-contract=off>"
+        "$<$<COMPILE_LANGUAGE:CXX>:-frandom-seed=forevervalidator>"
+        "$<$<COMPILE_LANGUAGE:CXX>:-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=.>")
 endfunction()
 
 add_library(forevervalidator_core STATIC ${FOREVERVALIDATOR_CORE_SOURCES})
@@ -77,6 +91,47 @@ target_include_directories(forevervalidator_core
 target_link_libraries(forevervalidator_core
     PUBLIC OpenSSL::Crypto ZLIB::ZLIB)
 forevervalidator_configure_target(forevervalidator_core)
+if(FOREVERVALIDATOR_ENABLE_CUDA)
+    target_sources(forevervalidator_core PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_backend.cu"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_arithmetic_certification.cu"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_dynamics_certification.cu"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_collision_certification.cu"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_physics_step_certification.cu"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_vehicle_prefix_certification.cu"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_vehicle_force_certification.cu"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_stunt_certification.cu"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_scene_storage.cu"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_timeline_executor.cu")
+    target_link_libraries(forevervalidator_core PUBLIC CUDA::cudart)
+    target_compile_definitions(forevervalidator_core PUBLIC
+        FOREVERVALIDATOR_HAS_CUDA=1)
+    target_compile_options(forevervalidator_core PRIVATE
+        "$<$<COMPILE_LANGUAGE:CUDA>:--fmad=false>"
+        "$<$<COMPILE_LANGUAGE:CUDA>:--prec-div=true>"
+        "$<$<COMPILE_LANGUAGE:CUDA>:--prec-sqrt=true>"
+        "$<$<COMPILE_LANGUAGE:CUDA>:--ftz=false>"
+        "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-ffp-contract=off>")
+    set_target_properties(forevervalidator_core PROPERTIES
+        CUDA_STANDARD 17
+        CUDA_STANDARD_REQUIRED ON
+        CUDA_EXTENSIONS OFF
+        CUDA_SEPARABLE_COMPILATION OFF)
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+        if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.24)
+            set_property(TARGET forevervalidator_core PROPERTY
+                CUDA_ARCHITECTURES native)
+        else()
+            set_property(TARGET forevervalidator_core PROPERTY
+                CUDA_ARCHITECTURES "75-real;80-real;86")
+        endif()
+    endif()
+    message(STATUS "ForeverValidator CUDA backend enabled")
+else()
+    message(STATUS
+        "ForeverValidator CUDA backend disabled "
+        "(set FOREVERVALIDATOR_ENABLE_CUDA=ON to enable)")
+endif()
 
 if(FOREVERVALIDATOR_RELEASE_IPO_AVAILABLE)
     set_property(TARGET forevervalidator_core PROPERTY
@@ -149,6 +204,35 @@ if(FOREVERVALIDATOR_BUILD_BENCHMARKS)
     if(FOREVERVALIDATOR_RELEASE_IPO_AVAILABLE)
         set_property(TARGET optimized_cpu_benchmark PROPERTY
             INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    endif()
+
+    if(FOREVERVALIDATOR_ENABLE_CUDA)
+
+        add_executable(cuda_backend_benchmark
+            tools/cuda_backend_benchmark.cpp)
+        target_include_directories(
+            cuda_backend_benchmark PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/include"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src")
+        target_link_libraries(
+            cuda_backend_benchmark PRIVATE
+            forevervalidator_native
+            forevervalidator_core)
+        forevervalidator_configure_target(
+            cuda_backend_benchmark)
+
+        add_executable(cuda_replay_parity
+            tools/cuda_replay_parity.cpp)
+        target_include_directories(
+            cuda_replay_parity PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/include"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src")
+        target_link_libraries(
+            cuda_replay_parity PRIVATE
+            forevervalidator_native
+            forevervalidator_core)
+        forevervalidator_configure_target(
+            cuda_replay_parity)
     endif()
 
     add_executable(optimized_cpu_ellipsoid_mesh_kernel_benchmark
@@ -326,6 +410,106 @@ if(FOREVERVALIDATOR_BUILD_TESTS)
     forevervalidator_configure_target(forevervalidator-backend-routing-tests)
     add_test(NAME forevervalidator-backend-routing
              COMMAND forevervalidator-backend-routing-tests)
+
+    add_executable(forevervalidator-cuda-state-layout-tests
+        tests/cuda_state_layout_tests.cpp)
+    target_include_directories(
+        forevervalidator-cuda-state-layout-tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(
+        forevervalidator-cuda-state-layout-tests PRIVATE
+        forevervalidator_core)
+    forevervalidator_configure_target(
+        forevervalidator-cuda-state-layout-tests)
+    add_test(NAME forevervalidator-cuda-state-layout
+             COMMAND forevervalidator-cuda-state-layout-tests)
+
+    add_executable(forevervalidator-cuda-static-configuration-tests
+        tests/cuda_static_configuration_tests.cpp)
+    target_include_directories(
+        forevervalidator-cuda-static-configuration-tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(
+        forevervalidator-cuda-static-configuration-tests PRIVATE
+        forevervalidator_core)
+    forevervalidator_configure_target(
+        forevervalidator-cuda-static-configuration-tests)
+    add_test(NAME forevervalidator-cuda-static-configuration
+             COMMAND forevervalidator-cuda-static-configuration-tests)
+
+    if(FOREVERVALIDATOR_ENABLE_CUDA)
+        add_executable(forevervalidator-cuda-arithmetic-tests
+            tests/cuda_arithmetic_tests.cpp)
+        target_include_directories(
+            forevervalidator-cuda-arithmetic-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/include"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src")
+        target_link_libraries(
+            forevervalidator-cuda-arithmetic-tests PRIVATE
+            forevervalidator_core)
+        forevervalidator_configure_target(
+            forevervalidator-cuda-arithmetic-tests)
+        add_test(NAME forevervalidator-cuda-arithmetic
+                 COMMAND forevervalidator-cuda-arithmetic-tests)
+
+        add_executable(forevervalidator-cuda-dynamics-tests
+            tests/cuda_dynamics_tests.cpp)
+        target_include_directories(
+            forevervalidator-cuda-dynamics-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/include"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src")
+        target_link_libraries(
+            forevervalidator-cuda-dynamics-tests PRIVATE
+            forevervalidator_core)
+        forevervalidator_configure_target(
+            forevervalidator-cuda-dynamics-tests)
+        add_test(NAME forevervalidator-cuda-dynamics
+                 COMMAND forevervalidator-cuda-dynamics-tests)
+
+        add_executable(forevervalidator-cuda-timeline-tests
+            tests/cuda_timeline_executor_tests.cpp)
+        target_include_directories(
+            forevervalidator-cuda-timeline-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/include"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src")
+        target_link_libraries(
+            forevervalidator-cuda-timeline-tests PRIVATE
+            forevervalidator_core CUDA::cudart)
+        forevervalidator_configure_target(
+            forevervalidator-cuda-timeline-tests)
+        add_test(NAME forevervalidator-cuda-timeline
+                 COMMAND forevervalidator-cuda-timeline-tests)
+
+        add_executable(forevervalidator-cuda-stunt-tests
+            tests/cuda_stunt_tests.cpp)
+        target_include_directories(
+            forevervalidator-cuda-stunt-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/include"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src")
+        target_link_libraries(
+            forevervalidator-cuda-stunt-tests PRIVATE
+            forevervalidator_core)
+        forevervalidator_configure_target(
+            forevervalidator-cuda-stunt-tests)
+        add_test(NAME forevervalidator-cuda-stunts
+                 COMMAND forevervalidator-cuda-stunt-tests)
+
+        add_executable(forevervalidator-cuda-collision-tests
+            tests/cuda_collision_tests.cpp)
+        target_include_directories(
+            forevervalidator-cuda-collision-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/include"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src")
+        target_link_libraries(
+            forevervalidator-cuda-collision-tests PRIVATE
+            forevervalidator_core CUDA::cudart)
+        forevervalidator_configure_target(
+            forevervalidator-cuda-collision-tests)
+        add_test(NAME forevervalidator-cuda-collision
+                 COMMAND forevervalidator-cuda-collision-tests)
+    endif()
 
     add_executable(forevervalidator-render-scene-tests
         tests/render_scene_tests.cpp)

@@ -14,6 +14,10 @@
 
 #define FOREVERVALIDATOR_HAS_SPECULATIVE_TICKING 1
 
+#ifndef FOREVERVALIDATOR_HAS_CUDA
+#define FOREVERVALIDATOR_HAS_CUDA 0
+#endif
+
 namespace forevervalidator {
 
 namespace detail {
@@ -35,7 +39,36 @@ enum class SimulationBackend : std::uint8_t {
     OptimizedCpu,
     Batched,
     SpeculativeTicking,
+    Cuda,
 };
+
+enum class CudaBackendStatus : std::uint8_t {
+    NotCompiled,
+    RuntimeUnavailable,
+    NoDevice,
+    UnsupportedDevice,
+    InitializationFailed,
+    Ready,
+};
+
+struct CudaBackendDiagnostics {
+    CudaBackendStatus status = CudaBackendStatus::NotCompiled;
+    std::int32_t runtimeVersion = 0;
+    std::int32_t driverVersion = 0;
+    std::int32_t deviceCount = 0;
+    std::int32_t selectedDevice = -1;
+    std::int32_t computeCapabilityMajor = 0;
+    std::int32_t computeCapabilityMinor = 0;
+    std::uint64_t totalGlobalMemoryBytes = 0u;
+    std::string deviceName;
+    std::string diagnostic;
+
+    bool IsReady() const noexcept {
+        return status == CudaBackendStatus::Ready;
+    }
+};
+
+CudaBackendDiagnostics QueryCudaBackendDiagnostics() noexcept;
 
 struct ValidationOptions {
     std::uint32_t requestedSamples = 0xffffffffu;
@@ -83,6 +116,9 @@ enum class ValidationErrorCode : std::uint16_t {
     DeterministicExecutionUnavailable = 11,
     SerializationFailed = 12,
     UnexpectedFailure = 13,
+    CudaUnavailable = 14,
+    CudaInitializationFailed = 15,
+    CudaExecutionFailed = 16,
 };
 
 enum class ValidationFailureReason : std::uint16_t {
@@ -156,6 +192,13 @@ enum class ValidationFailureReason : std::uint16_t {
     ObservationAllocationFailed = 713,
     DeterministicExecutionUnavailable = 714,
     DeterministicStateRestoreFailed = 715,
+    CudaNotCompiled = 716,
+    CudaRuntimeUnavailable = 717,
+    CudaDeviceUnavailable = 718,
+    CudaDeviceUnsupported = 719,
+    CudaInitializationFailed = 720,
+    CudaExecutionFailed = 721,
+    CudaUnsupportedSimulationScope = 722,
     SerializationFailed = 900,
     UnexpectedFailure = 1000,
 };

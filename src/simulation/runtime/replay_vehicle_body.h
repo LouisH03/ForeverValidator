@@ -11,7 +11,10 @@
 #include "engine/scene/plug_solid.h"
 class ReplayVehicleBody {
 public:
-    using RuntimeClone = CHmsDyna::RuntimeClone;
+    struct RuntimeClone : CHmsDyna::RuntimeClone {
+        CPlugPhysicalParameters physicalParameters{};
+        GmIso4 corpusLocalIso{};
+    };
     ReplayVehicleBody();
 
     void InitializeAtSpawn(const ReplayDynaParameters &parameters,

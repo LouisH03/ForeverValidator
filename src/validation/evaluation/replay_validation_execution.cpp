@@ -48,6 +48,12 @@ ReplayValidationExecutionResult FromSimulationResult(
     case ReplaySimulationRunResult::DeterministicExecutionUnavailable:
         return ReplayValidationExecutionResult::
                 DeterministicExecutionUnavailable;
+    case ReplaySimulationRunResult::CudaUnavailable:
+        return ReplayValidationExecutionResult::CudaUnavailable;
+    case ReplaySimulationRunResult::CudaInitializationFailed:
+        return ReplayValidationExecutionResult::CudaInitializationFailed;
+    case ReplaySimulationRunResult::CudaExecutionFailed:
+        return ReplayValidationExecutionResult::CudaExecutionFailed;
     case ReplaySimulationRunResult::StaticSceneConstructionFailed:
     case ReplaySimulationRunResult::StaticSceneSourcesMissing:
     case ReplaySimulationRunResult::StaticSceneCorpusCountMismatch:

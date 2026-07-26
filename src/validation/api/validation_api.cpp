@@ -26,6 +26,7 @@
 #include "simulation/control/replay_control_plan.h"
 #include "validation/evaluation/replay_validation_session.h"
 #include "validation/api/physics_sandbox_static_scene_test_access.h"
+#include "validation/api/physics_sandbox_cuda_test_access.h"
 #include "validation/planning/replay_asset_route.h"
 #include "validation/planning/replay_challenge_map_preload.h"
 
@@ -125,6 +126,29 @@ ValidationError AllocationError(
             ValidationFailureReason::AllocationFailed,
             identity,
             diagnostic);
+}
+
+bool IsCudaSupportedRoute(const ReplayAssetRoute &route) noexcept {
+    return route.mapEnvironment == ReplayMapEnvironment::Stadium &&
+           route.decorationEnvironment ==
+                   ReplayMapEnvironment::Stadium &&
+           route.vehicleModel == ReplayVehicleModel::StadiumCar;
+}
+
+ValidationError CudaScopeError(
+        const ReplayAssetRoute &route,
+        const ReplayIdentity &identity) {
+    ValidationError error = MakeError(
+            ValidationErrorCategory::Simulation,
+            ValidationErrorCode::CudaUnavailable,
+            ValidationStage::SimulationStartup,
+            ValidationFailureReason::CudaUnsupportedSimulationScope,
+            identity,
+            "CUDA supports only Stadium maps with the StadiumCar");
+    error.relatedAsset =
+            std::string(ReplayMapEnvironmentName(route.mapEnvironment)) +
+            "/" + ReplayVehicleModelName(route.vehicleModel);
+    return error;
 }
 
 ValidationStatus ToPublicStatus(ReplayValidationStatus status) {
@@ -550,6 +574,28 @@ ValidationFailureReason ExecutionReason(
         return ValidationFailureReason::ObservationAllocationFailed;
     case ReplayValidationExecutionResult::DeterministicExecutionUnavailable:
         return ValidationFailureReason::DeterministicExecutionUnavailable;
+    case ReplayValidationExecutionResult::CudaUnavailable: {
+        const CudaBackendDiagnostics diagnostics =
+                QueryCudaBackendDiagnostics();
+        switch (diagnostics.status) {
+        case CudaBackendStatus::NotCompiled:
+            return ValidationFailureReason::CudaNotCompiled;
+        case CudaBackendStatus::RuntimeUnavailable:
+            return ValidationFailureReason::CudaRuntimeUnavailable;
+        case CudaBackendStatus::NoDevice:
+            return ValidationFailureReason::CudaDeviceUnavailable;
+        case CudaBackendStatus::UnsupportedDevice:
+            return ValidationFailureReason::CudaDeviceUnsupported;
+        case CudaBackendStatus::InitializationFailed:
+        case CudaBackendStatus::Ready:
+            return ValidationFailureReason::CudaInitializationFailed;
+        }
+        return ValidationFailureReason::CudaInitializationFailed;
+    }
+    case ReplayValidationExecutionResult::CudaInitializationFailed:
+        return ValidationFailureReason::CudaInitializationFailed;
+    case ReplayValidationExecutionResult::CudaExecutionFailed:
+        return ValidationFailureReason::CudaExecutionFailed;
     }
     return ValidationFailureReason::UnexpectedFailure;
 }
@@ -581,6 +627,21 @@ ValidationError ExecutionError(
         stage = ValidationStage::SimulationStartup;
         diagnostic = "deterministic execution mode unavailable";
         break;
+    case ReplayValidationExecutionResult::CudaUnavailable:
+        code = ValidationErrorCode::CudaUnavailable;
+        stage = ValidationStage::SimulationStartup;
+        diagnostic = "CUDA backend unavailable";
+        break;
+    case ReplayValidationExecutionResult::CudaInitializationFailed:
+        code = ValidationErrorCode::CudaInitializationFailed;
+        stage = ValidationStage::SimulationStartup;
+        diagnostic = "CUDA backend initialization or certification failed";
+        break;
+    case ReplayValidationExecutionResult::CudaExecutionFailed:
+        code = ValidationErrorCode::CudaExecutionFailed;
+        stage = ValidationStage::SimulationStep;
+        diagnostic = "CUDA backend execution failed";
+        break;
     case ReplayValidationExecutionResult::Success:
     case ReplayValidationExecutionResult::MissingInput:
     case ReplayValidationExecutionResult::InvalidPlan:
@@ -593,8 +654,17 @@ ValidationError ExecutionError(
     case ReplayValidationExecutionResult::PhysicsInputInvalid:
         break;
     }
-    return MakeError(
+    ValidationError error = MakeError(
             category, code, stage, ExecutionReason(result), identity, diagnostic);
+    if (result == ReplayValidationExecutionResult::CudaUnavailable ||
+        result == ReplayValidationExecutionResult::CudaInitializationFailed ||
+        result == ReplayValidationExecutionResult::CudaExecutionFailed) {
+        const CudaBackendDiagnostics cuda = QueryCudaBackendDiagnostics();
+        if (!cuda.diagnostic.empty()) {
+            error.diagnostic = cuda.diagnostic;
+        }
+    }
+    return error;
 }
 
 Result<AssetBytes> LoadRequiredAsset(
@@ -954,6 +1024,11 @@ Result<ValidationReport> RunReplayValidation(
         return Result<ValidationReport>::Failure(
                 ReplayRouteError(routeResult, identity, replayFile));
     }
+    if (options.backend == SimulationBackend::Cuda &&
+        !IsCudaSupportedRoute(route)) {
+        return Result<ValidationReport>::Failure(
+                CudaScopeError(route, identity));
+    }
 
     const ReplayValidationConfiguration configuration{
             options.requestedSamples,
@@ -991,8 +1066,14 @@ Result<ValidationReport> RunReplayValidation(
             *prepared.decorationAssets,
             simulationSession);
     if (preloadResult != ReplayChallengePreloadResult::Success) {
+        ValidationError error = PreloadError(preloadResult, identity);
+        if (options.backend == SimulationBackend::Cuda &&
+            !simulationSession.CudaInitializationDiagnostic().empty()) {
+            error.diagnostic =
+                    simulationSession.CudaInitializationDiagnostic();
+        }
         return Result<ValidationReport>::Failure(
-                PreloadError(preloadResult, identity));
+                std::move(error));
     }
 
     ReplaySimulationDefinitionBuild definition =
@@ -1011,8 +1092,15 @@ Result<ValidationReport> RunReplayValidation(
             definition.Value(),
             configuration);
     if (!validation) {
+        ValidationError error =
+                ExecutionError(validation.Error(), identity);
+        if (options.backend == SimulationBackend::Cuda &&
+            !simulationSession.CudaInitializationDiagnostic().empty()) {
+            error.diagnostic =
+                    simulationSession.CudaInitializationDiagnostic();
+        }
         return Result<ValidationReport>::Failure(
-                ExecutionError(validation.Error(), identity));
+                std::move(error));
     }
     return Result<ValidationReport>::Success(
             ToPublicReport(identity, validation.Value(), replayFile, route));
@@ -1468,6 +1556,14 @@ PhysicsSandboxResult<PhysicsSandboxStateView> PhysicsSandbox::LoadReplay(
                             "sandbox replay route is unsupported",
                             ReplayRouteError(routeResult, identity, replay)));
         }
+        if (impl_->options.backend == SimulationBackend::Cuda &&
+            !IsCudaSupportedRoute(route)) {
+            return PhysicsSandboxResult<PhysicsSandboxStateView>::Failure(
+                    SandboxError(
+                            PhysicsSandboxErrorCode::SimulationFailed,
+                            "CUDA simulation scope is unsupported",
+                            CudaScopeError(route, identity)));
+        }
         Result<PreparedAssets> prepared = PrepareAssets(
                 impl_->validationState, route, identity);
         if (!prepared) {
@@ -1487,11 +1583,17 @@ PhysicsSandboxResult<PhysicsSandboxStateView> PhysicsSandbox::LoadReplay(
                 *prepared.Value().decorationAssets,
                 *session);
         if (preloadResult != ReplayChallengePreloadResult::Success) {
+            ValidationError error = PreloadError(preloadResult, identity);
+            if (impl_->options.backend == SimulationBackend::Cuda &&
+                !session->CudaInitializationDiagnostic().empty()) {
+                error.diagnostic =
+                        session->CudaInitializationDiagnostic();
+            }
             return PhysicsSandboxResult<PhysicsSandboxStateView>::Failure(
                     SandboxError(
                             PhysicsSandboxErrorCode::MapLoadingFailed,
                             "sandbox map could not be loaded",
-                            PreloadError(preloadResult, identity)));
+                            std::move(error)));
         }
         ReplaySimulationDefinitionBuild definition =
                 BuildReplaySimulationDefinition(
@@ -1899,6 +2001,150 @@ AdvancePhysicsSandboxes(
     return results;
 }
 
+forevervalidator::simulation::CudaTimelineBatchResult
+cuda_test::PhysicsSandboxCudaTestAccess::RunCandidateBatch(
+        PhysicsSandbox &sandbox,
+        std::uint32_t candidateCount,
+        std::uint32_t tickCount,
+        bool mutateControls,
+        bool cancellationRequested) {
+    forevervalidator::simulation::CudaTimelineBatchResult result;
+    if (!sandbox.impl_ || !sandbox.impl_->loaded ||
+        !sandbox.impl_->session || tickCount == 0u ||
+        sandbox.impl_->cursor > sandbox.impl_->controlPlan.ticks.size() ||
+        tickCount >
+                sandbox.impl_->controlPlan.ticks.size() -
+                        sandbox.impl_->cursor) {
+        result.status = forevervalidator::simulation::
+                CudaTimelineStatus::InvalidArgument;
+        result.diagnostic =
+                "sandbox CUDA candidate batch request is invalid";
+        return result;
+    }
+    try {
+        std::vector<ReplayControlTick> ticks(
+                sandbox.impl_->controlPlan.ticks.begin() +
+                        sandbox.impl_->cursor,
+                sandbox.impl_->controlPlan.ticks.begin() +
+                        sandbox.impl_->cursor + tickCount);
+        return sandbox.impl_->session->
+                ExecuteCudaCandidateBatchForTesting(
+                        ticks, candidateCount, mutateControls,
+                        sandbox.impl_->cursor,
+                        cancellationRequested);
+    } catch (const std::bad_alloc &) {
+        result.status = forevervalidator::simulation::
+                CudaTimelineStatus::CapacityExceeded;
+        result.diagnostic =
+                "sandbox CUDA candidate batch allocation failed";
+        return result;
+    }
+}
+
+ReplayCudaVehiclePrefixDifferential
+cuda_test::PhysicsSandboxCudaTestAccess::
+        RunCandidateBatchDifferential(
+                PhysicsSandbox &sandbox,
+                std::uint32_t candidateCount,
+                std::uint32_t tickCount,
+                bool mutateControls) {
+    ReplayCudaVehiclePrefixDifferential result;
+    if (!sandbox.impl_ || !sandbox.impl_->loaded ||
+        !sandbox.impl_->session || tickCount == 0u ||
+        sandbox.impl_->cursor >
+                sandbox.impl_->controlPlan.ticks.size() ||
+        tickCount >
+                sandbox.impl_->controlPlan.ticks.size() -
+                        sandbox.impl_->cursor) {
+        result.diagnostic =
+                "sandbox CUDA candidate batch differential request is invalid";
+        return result;
+    }
+    tmnf::simulation::DeterministicExecutionScope scope;
+    if (!scope.Established()) {
+        result.diagnostic =
+                "deterministic execution mode is unavailable";
+        return result;
+    }
+    try {
+        std::vector<ReplayControlTick> ticks(
+                sandbox.impl_->controlPlan.ticks.begin() +
+                        sandbox.impl_->cursor,
+                sandbox.impl_->controlPlan.ticks.begin() +
+                        sandbox.impl_->cursor + tickCount);
+        result = sandbox.impl_->session->
+                RunCudaCandidateBatchDifferentialForTesting(
+                        ticks, candidateCount, mutateControls,
+                        sandbox.impl_->cursor);
+    } catch (const std::bad_alloc &) {
+        result.diagnostic =
+                "sandbox CUDA candidate batch differential allocation failed";
+    }
+    if (!scope.Restore()) {
+        result.success = false;
+        result.diagnostic =
+                "deterministic execution restoration failed";
+    }
+    return result;
+}
+
+std::optional<forevervalidator::simulation::CudaSceneTransferMetrics>
+cuda_test::PhysicsSandboxCudaTestAccess::SceneTransfer(
+        const PhysicsSandbox &sandbox) {
+    if (!sandbox.impl_ || !sandbox.impl_->session) {
+        return std::nullopt;
+    }
+    return sandbox.impl_->session->
+            CudaSceneTransferMetricsForTesting();
+}
+
+std::optional<forevervalidator::simulation::
+                      CudaStaticConfigurationTransferMetrics>
+cuda_test::PhysicsSandboxCudaTestAccess::ConfigurationTransfer(
+        const PhysicsSandbox &sandbox) {
+    if (!sandbox.impl_ || !sandbox.impl_->session) {
+        return std::nullopt;
+    }
+    return sandbox.impl_->session->
+            CudaStaticConfigurationTransferMetricsForTesting();
+}
+
+std::optional<forevervalidator::simulation::CudaCandidateState>
+cuda_test::PhysicsSandboxCudaTestAccess::CaptureCandidateState(
+        const PhysicsSandbox &sandbox) {
+    if (!sandbox.impl_ || !sandbox.impl_->loaded ||
+        !sandbox.impl_->session) {
+        return std::nullopt;
+    }
+    const auto clone = sandbox.impl_->session->CaptureRuntimeClone();
+    if (!clone) {
+        return std::nullopt;
+    }
+    forevervalidator::simulation::CudaCandidateState result;
+    if (forevervalidator::simulation::EncodeCudaCandidateState(
+                *clone, sandbox.impl_->inputMetadata.validationSeed,
+                sandbox.impl_->cursor, 0u, clone->randomState,
+                &result) != forevervalidator::simulation::
+                            CudaStateConversionResult::Success) {
+        return std::nullopt;
+    }
+    return result;
+}
+
+std::size_t cuda_test::PhysicsSandboxCudaTestAccess::TimelineSize(
+        const PhysicsSandbox &sandbox) noexcept {
+    return sandbox.impl_ && sandbox.impl_->loaded
+            ? sandbox.impl_->controlPlan.ticks.size()
+            : 0u;
+}
+
+std::size_t cuda_test::PhysicsSandboxCudaTestAccess::Cursor(
+        const PhysicsSandbox &sandbox) noexcept {
+    return sandbox.impl_ && sandbox.impl_->loaded
+            ? sandbox.impl_->cursor
+            : 0u;
+}
+
 std::optional<OptimizedCpuStaticSceneFingerprint>
 static_scene_test::PhysicsSandboxStaticSceneTestAccess::
         CaptureStaticSceneFingerprint(
@@ -1931,6 +2177,234 @@ static_scene_test::PhysicsSandboxStaticSceneTestAccess::RestartAtRaceTick(
                 SandboxError(PhysicsSandboxErrorCode::UnexpectedFailure,
                              "unexpected sandbox restart failure"));
     }
+}
+
+ReplayCudaVehiclePrefixDifferential
+cuda_test::PhysicsSandboxCudaTestAccess::RunVehiclePrefix(
+        PhysicsSandbox &sandbox,
+        float dt) {
+    if (!sandbox.impl_ || !sandbox.impl_->loaded ||
+        !sandbox.impl_->session) {
+        ReplayCudaVehiclePrefixDifferential result;
+        result.diagnostic =
+                "sandbox has no loaded CUDA simulation";
+        return result;
+    }
+    return sandbox.impl_->session->
+            RunCudaVehiclePrefixDifferentialForTesting(dt);
+}
+
+ReplayCudaVehiclePrefixDifferential
+cuda_test::PhysicsSandboxCudaTestAccess::RunVehicleForce(
+        PhysicsSandbox &sandbox,
+        float dt) {
+    if (!sandbox.impl_ || !sandbox.impl_->loaded ||
+        !sandbox.impl_->session) {
+        ReplayCudaVehiclePrefixDifferential result;
+        result.diagnostic =
+                "sandbox has no loaded CUDA simulation";
+        return result;
+    }
+    tmnf::simulation::DeterministicExecutionScope scope;
+    if (!scope.Established()) {
+        ReplayCudaVehiclePrefixDifferential result;
+        result.diagnostic =
+                "deterministic execution mode is unavailable";
+        return result;
+    }
+    ReplayCudaVehiclePrefixDifferential result =
+            sandbox.impl_->session->
+                    RunCudaVehicleForceDifferentialForTesting(dt);
+    if (!scope.Restore()) {
+        result.success = false;
+        result.diagnostic =
+                "deterministic execution restoration failed";
+    }
+    return result;
+}
+
+ReplayCudaVehiclePrefixDifferential
+cuda_test::PhysicsSandboxCudaTestAccess::RunCollision(
+        PhysicsSandbox &sandbox) {
+    if (!sandbox.impl_ || !sandbox.impl_->loaded ||
+        !sandbox.impl_->session) {
+        ReplayCudaVehiclePrefixDifferential result;
+        result.diagnostic =
+                "sandbox has no loaded CUDA simulation";
+        return result;
+    }
+    tmnf::simulation::DeterministicExecutionScope scope;
+    if (!scope.Established()) {
+        ReplayCudaVehiclePrefixDifferential result;
+        result.diagnostic =
+                "deterministic execution mode is unavailable";
+        return result;
+    }
+    ReplayCudaVehiclePrefixDifferential result =
+            sandbox.impl_->session->
+                    RunCudaCollisionDifferentialForTesting();
+    if (!scope.Restore()) {
+        result.success = false;
+        result.diagnostic =
+                "deterministic execution restoration failed";
+    }
+    return result;
+}
+
+ReplayCudaVehiclePrefixDifferential
+cuda_test::PhysicsSandboxCudaTestAccess::RunPhysicsStep(
+        PhysicsSandbox &sandbox) {
+    if (!sandbox.impl_ || !sandbox.impl_->loaded ||
+        !sandbox.impl_->session) {
+        ReplayCudaVehiclePrefixDifferential result;
+        result.diagnostic =
+                "sandbox has no loaded CUDA simulation";
+        return result;
+    }
+    tmnf::simulation::DeterministicExecutionScope scope;
+    if (!scope.Established()) {
+        ReplayCudaVehiclePrefixDifferential result;
+        result.diagnostic =
+                "deterministic execution mode is unavailable";
+        return result;
+    }
+    ReplayCudaVehiclePrefixDifferential result =
+            sandbox.impl_->session->
+                    RunCudaPhysicsStepDifferentialForTesting();
+    if (!scope.Restore()) {
+        result.success = false;
+        result.diagnostic =
+                "deterministic execution restoration failed";
+    }
+    return result;
+}
+
+ReplayCudaVehiclePrefixDifferential
+cuda_test::PhysicsSandboxCudaTestAccess::RunCollisionSubstep(
+        PhysicsSandbox &sandbox,
+        float dt) {
+    if (!sandbox.impl_ || !sandbox.impl_->loaded ||
+        !sandbox.impl_->session) {
+        ReplayCudaVehiclePrefixDifferential result;
+        result.diagnostic =
+                "sandbox has no loaded CUDA simulation";
+        return result;
+    }
+    tmnf::simulation::DeterministicExecutionScope scope;
+    if (!scope.Established()) {
+        ReplayCudaVehiclePrefixDifferential result;
+        result.diagnostic =
+                "deterministic execution mode is unavailable";
+        return result;
+    }
+    ReplayCudaVehiclePrefixDifferential result =
+            sandbox.impl_->session->
+                    RunCudaCollisionSubstepDifferentialForTesting(dt);
+    if (!scope.Restore()) {
+        result.success = false;
+        result.diagnostic =
+                "deterministic execution restoration failed";
+    }
+    return result;
+}
+
+ReplayCudaVehiclePrefixDifferential
+cuda_test::PhysicsSandboxCudaTestAccess::RunPreCollision(
+        PhysicsSandbox &sandbox,
+        float dt) {
+    if (!sandbox.impl_ || !sandbox.impl_->loaded ||
+        !sandbox.impl_->session) {
+        ReplayCudaVehiclePrefixDifferential result;
+        result.diagnostic =
+                "sandbox has no loaded CUDA simulation";
+        return result;
+    }
+    tmnf::simulation::DeterministicExecutionScope scope;
+    if (!scope.Established()) {
+        ReplayCudaVehiclePrefixDifferential result;
+        result.diagnostic =
+                "deterministic execution mode is unavailable";
+        return result;
+    }
+    ReplayCudaVehiclePrefixDifferential result =
+            sandbox.impl_->session->
+                    RunCudaPreCollisionDifferentialForTesting(dt);
+    if (!scope.Restore()) {
+        result.success = false;
+        result.diagnostic =
+                "deterministic execution restoration failed";
+    }
+    return result;
+}
+
+ReplayCudaVehiclePrefixDifferential
+cuda_test::PhysicsSandboxCudaTestAccess::RunNextTimelineTick(
+        PhysicsSandbox &sandbox) {
+    if (!sandbox.impl_ || !sandbox.impl_->loaded ||
+        !sandbox.impl_->session ||
+        sandbox.impl_->cursor >=
+                sandbox.impl_->controlPlan.ticks.size()) {
+        ReplayCudaVehiclePrefixDifferential result;
+        result.diagnostic =
+                "sandbox has no next CUDA timeline tick";
+        return result;
+    }
+    tmnf::simulation::DeterministicExecutionScope scope;
+    if (!scope.Established()) {
+        ReplayCudaVehiclePrefixDifferential result;
+        result.diagnostic =
+                "deterministic execution mode is unavailable";
+        return result;
+    }
+    ReplayCudaVehiclePrefixDifferential result =
+            sandbox.impl_->session->
+                    RunCudaTimelineTickDifferentialForTesting(
+                            sandbox.impl_->controlPlan.ticks[
+                                    sandbox.impl_->cursor]);
+    if (!scope.Restore()) {
+        result.success = false;
+        result.diagnostic =
+                "deterministic execution restoration failed";
+    }
+    return result;
+}
+
+bool cuda_test::PhysicsSandboxCudaTestAccess::StageNextTimelinePrefix(
+        PhysicsSandbox &sandbox) {
+    return sandbox.impl_ && sandbox.impl_->loaded &&
+            sandbox.impl_->session &&
+            sandbox.impl_->cursor <
+                    sandbox.impl_->controlPlan.ticks.size() &&
+            sandbox.impl_->session->
+                    StageCudaTimelinePrefixForTesting(
+                            sandbox.impl_->controlPlan.ticks[
+                                    sandbox.impl_->cursor]);
+}
+
+bool cuda_test::PhysicsSandboxCudaTestAccess::StageCollisionSubstep(
+        PhysicsSandbox &sandbox,
+        float dt) {
+    return sandbox.impl_ && sandbox.impl_->loaded &&
+            sandbox.impl_->session &&
+            sandbox.impl_->session->
+                    StageCollisionSubstepForTesting(dt);
+}
+
+bool cuda_test::PhysicsSandboxCudaTestAccess::StagePreCollision(
+        PhysicsSandbox &sandbox,
+        float dt) {
+    return sandbox.impl_ && sandbox.impl_->loaded &&
+            sandbox.impl_->session &&
+            sandbox.impl_->session->
+                    StageCudaPreCollisionForTesting(dt);
+}
+
+std::string cuda_test::PhysicsSandboxCudaTestAccess::Diagnostic(
+        const PhysicsSandbox &sandbox) {
+    if (!sandbox.impl_ || !sandbox.impl_->session) {
+        return "sandbox has no simulation session";
+    }
+    return sandbox.impl_->session->CudaInitializationDiagnostic();
 }
 
 }  // namespace experimental

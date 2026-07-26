@@ -22,6 +22,9 @@ struct CHmsCorpus {
     void SetDynamics(CHmsDyna *newDyna) { dyna = newDyna; }
     CHmsDyna *Dynamics(void) const { return dyna; }
     const GmIso4 &LocalLocation(void) const { return localIso; }
+    void RestoreLocalLocation(const GmIso4 &location) noexcept {
+        localIso = location;
+    }
     void DetachFromWorld(void);
     CHmsZone *OwningZone(void) const;
     void BindCollisionManagerRegistration(

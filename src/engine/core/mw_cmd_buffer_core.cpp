@@ -6,7 +6,7 @@ constexpr long long MinHighFrequencyRunIntervalNanoseconds = 10000000ll;
 
 }  // namespace
 
-CMwCmdBufferCore *CMwCmdBufferCore::TheCoreCmdBuffer = nullptr;
+thread_local CMwCmdBufferCore *CMwCmdBufferCore::TheCoreCmdBuffer = nullptr;
 
 void CMwCmdBufferCore::HighFrequencyState::Reset(void) {
     lastRunStamp.reset();

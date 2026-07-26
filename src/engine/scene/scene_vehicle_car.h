@@ -22,6 +22,7 @@ void OrderWindowedValues(float &first, float &second, float period);
 
 class CSceneVehicleCarWheelSurfaceObserver;
 struct OptimizedCpuVehicleForceAccess;
+struct CudaVehicleCpuReferenceAccess;
 
 class CSceneVehicleCar : public CSceneVehicle {
 public:
@@ -242,6 +243,7 @@ private:
   friend struct CSceneVehicleCarLegacyEngineTestPeer;
   friend struct CSceneVehicleCarGearedEngineTestPeer;
   friend struct OptimizedCpuVehicleForceAccess;
+  friend struct CudaVehicleCpuReferenceAccess;
 
   std::optional<std::reference_wrapper<CSceneVehicleStruct>> vehicleStruct;
   std::optional<std::reference_wrapper<CSceneSoundSource>> turboSoundSource;

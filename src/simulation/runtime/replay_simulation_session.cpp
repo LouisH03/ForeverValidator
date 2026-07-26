@@ -1,7 +1,10 @@
 #include "simulation/runtime/replay_simulation_session.h"
+
+#include "engine/game/game_random_sequence.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <map>
 #include <new>
@@ -20,6 +23,18 @@
 #include "format/archive/archive_class_ids.h"
 #include "simulation/replay/replay_map_scene.h"
 #include "simulation/backends/optimized_cpu/optimized_cpu_binary32_math.h"
+#include "simulation/backends/cuda/cuda_scene_layout.h"
+#include "simulation/backends/cuda/cuda_scene_storage.h"
+#include "simulation/backends/cuda/cuda_static_configuration.h"
+#include "simulation/backends/cuda/cuda_static_configuration_storage.h"
+#include "simulation/backends/cuda/cuda_backend.h"
+#include "simulation/backends/cuda/cuda_collision_certification.h"
+#include "simulation/backends/cuda/cuda_physics_step_certification.h"
+#include "simulation/backends/cuda/cuda_state_layout.h"
+#include "simulation/backends/cuda/cuda_stunt_certification.h"
+#include "simulation/backends/cuda/cuda_vehicle_prefix_certification.h"
+#include "simulation/backends/cuda/cuda_vehicle_force_certification.h"
+#include "simulation/backends/cuda/cuda_timeline_executor.h"
 #include "simulation/backends/speculative_ticking/speculative_ticking_backend.h"
 #include "simulation/runtime/replay_environment.h"
 #include "simulation/runtime/replay_physics_world.h"
@@ -777,6 +792,44 @@ ReplayTrajectoryObservation ObserveReplayTrajectory(
     return observation;
 }
 
+ReplayTrajectoryObservation ObserveCudaTrajectory(
+        const forevervalidator::simulation::
+                CudaTimelineObservation &source) {
+    ReplayTrajectoryObservation result;
+    result.simulatedPosition = source.simulatedPosition;
+    result.writePosition = source.writePosition;
+    if (source.hasComparison) {
+        result.comparison = ReplayTrajectoryDeviation{
+                source.comparisonTarget,
+                source.comparisonDelta,
+                source.comparisonDistance};
+    }
+    if (source.hasFinishTick) {
+        result.finishTickMs = source.finishTickMs;
+    }
+    return result;
+}
+
+#if FOREVERVALIDATOR_HAS_CUDA
+ReplayControlTick CandidateControlTick(
+        const ReplayControlTick &source,
+        std::uint32_t candidate,
+        bool mutateControls) {
+    ReplayControlTick result = source;
+    if (mutateControls && candidate != 0u) {
+        const float offset =
+                static_cast<float>(
+                        static_cast<std::int32_t>(candidate % 9u) - 4) *
+                0.015625f;
+        result.controls.steering =
+                std::clamp(
+                        result.controls.steering + offset,
+                        -1.0f, 1.0f);
+    }
+    return result;
+}
+#endif
+
 }  // namespace
 
 void ClassifyPhysicsSandboxRenderLayers(
@@ -804,8 +857,235 @@ struct ReplaySimulationSession::Impl {
     ReplaySimulationInstance instance;
     std::vector<ReplayStaticCollisionTriangle> staticCollisionTriangles;
     sandbox::PhysicsSandboxRenderSceneHandle staticRenderScene;
+    forevervalidator::simulation::CudaHostScene cudaHostScene;
+    forevervalidator::simulation::CudaDeviceScene cudaDeviceScene;
+    std::optional<
+            forevervalidator::simulation::CudaSceneTransferMetrics>
+            cudaSceneTransfer;
+    forevervalidator::simulation::CudaHostStaticConfiguration
+            cudaHostConfiguration;
+    forevervalidator::simulation::CudaDeviceStaticConfiguration
+            cudaDeviceConfiguration;
+    std::optional<forevervalidator::simulation::
+                          CudaStaticConfigurationTransferMetrics>
+            cudaConfigurationTransfer;
+    std::string cudaInitializationDiagnostic;
+    std::optional<forevervalidator::simulation::
+                          CudaTimelineExecutionMetrics>
+            cudaTimelineMetrics;
+    std::uint32_t incrementalValidationSeed = 0u;
 
     void ResetRuntime() { instance.ResetRuntime(); }
+
+    ReplaySimulationRunResult PrepareCudaConfiguration(
+            const ReplaySimulationDefinition &definition) {
+        if (backend != forevervalidator::SimulationBackend::Cuda) {
+            return ReplaySimulationRunResult::Success;
+        }
+        if (!forevervalidator::simulation::
+                    QueryCudaRuntimeDiagnostics().IsReady()) {
+            cudaInitializationDiagnostic =
+                    forevervalidator::simulation::
+                            QueryCudaRuntimeDiagnostics().diagnostic;
+            return ReplaySimulationRunResult::CudaUnavailable;
+        }
+        if (!cudaSceneTransfer.has_value() ||
+            !cudaSceneTransfer->success || !cudaDeviceScene.Ready()) {
+            cudaInitializationDiagnostic =
+                    cudaSceneTransfer.has_value()
+                    ? cudaSceneTransfer->diagnostic
+                    : "CUDA immutable scene was not uploaded";
+            return ReplaySimulationRunResult::CudaInitializationFailed;
+        }
+        forevervalidator::simulation::CudaHostStaticConfiguration built;
+        const auto buildResult = forevervalidator::simulation::
+                BuildCudaHostStaticConfiguration(definition, &built);
+        if (buildResult !=
+            forevervalidator::simulation::
+                    CudaStaticConfigurationBuildResult::Success) {
+            cudaInitializationDiagnostic =
+                    "CUDA vehicle/environment flattening failed with code " +
+                    std::to_string(
+                            static_cast<unsigned>(buildResult));
+            return ReplaySimulationRunResult::CudaInitializationFailed;
+        }
+        if (cudaDeviceConfiguration.Ready() &&
+            cudaDeviceConfiguration.ConfigurationHash() ==
+                    built.deterministicHash) {
+            cudaHostConfiguration = std::move(built);
+            return ReplaySimulationRunResult::Success;
+        }
+        cudaConfigurationTransfer =
+                cudaDeviceConfiguration.Upload(built);
+        if (!cudaConfigurationTransfer->success) {
+            cudaInitializationDiagnostic =
+                    cudaConfigurationTransfer->diagnostic;
+            cudaHostConfiguration.Clear();
+            return ReplaySimulationRunResult::CudaInitializationFailed;
+        }
+        cudaHostConfiguration = std::move(built);
+        cudaInitializationDiagnostic =
+                "CUDA immutable scene and configuration are ready";
+        return ReplaySimulationRunResult::Success;
+    }
+
+    ReplaySimulationTimelineResult ExecuteCudaTimeline(
+            const std::vector<ReplayControlTick> &controlTicks,
+            std::uint32_t validationSeed,
+            std::uint64_t controlCursor) {
+        ReplaySimulationTimelineResult result;
+        if (!instance.runtime || !cudaDeviceScene.Ready() ||
+            !cudaDeviceConfiguration.Ready()) {
+            cudaInitializationDiagnostic =
+                    "CUDA timeline prerequisites are not ready";
+            result.result =
+                    ReplaySimulationRunResult::CudaInitializationFailed;
+            return result;
+        }
+        std::optional<ReplaySimulationRuntime::RuntimeClone> runtime =
+                instance.runtime->CaptureRuntimeClone();
+        if (!runtime.has_value()) {
+            cudaInitializationDiagnostic =
+                    "CUDA initial runtime state capture failed";
+            result.result =
+                    ReplaySimulationRunResult::CudaInitializationFailed;
+            return result;
+        }
+        ReplaySimulationInstanceClone clone;
+        clone.race = instance.race.CaptureRuntimeClone();
+        clone.runtime = std::move(*runtime);
+        clone.incrementalRespawnCount =
+                instance.incrementalRespawnCount;
+
+        forevervalidator::simulation::CudaCandidateTimelineInput input;
+        const auto conversion = forevervalidator::simulation::
+                EncodeCudaCandidateState(
+                        clone, validationSeed, controlCursor, 0u,
+                        tmnf::simulation::CaptureGameRandomState(),
+                        &input.initialState);
+        if (conversion != forevervalidator::simulation::
+                                  CudaStateConversionResult::Success) {
+            cudaInitializationDiagnostic =
+                    "CUDA initial state conversion failed with code " +
+                    std::to_string(
+                            static_cast<unsigned>(conversion));
+            result.result =
+                    ReplaySimulationRunResult::CudaInitializationFailed;
+            return result;
+        }
+        try {
+            input.ticks.reserve(controlTicks.size());
+            for (const ReplayControlTick &tick : controlTicks) {
+                input.ticks.push_back(
+                        forevervalidator::simulation::
+                                FlattenCudaControlTick(tick));
+            }
+        } catch (const std::bad_alloc &) {
+            cudaInitializationDiagnostic =
+                    "CUDA control timeline allocation failed";
+            result.result =
+                    ReplaySimulationRunResult::CudaInitializationFailed;
+            return result;
+        }
+
+        forevervalidator::simulation::CudaTimelineBatchResult executed =
+                forevervalidator::simulation::ExecuteCudaTimelineBatch(
+                        cudaDeviceScene.DeviceData(),
+                        cudaDeviceConfiguration.DeviceData(),
+                        {std::move(input)});
+        cudaTimelineMetrics = executed.metrics;
+        cudaInitializationDiagnostic = executed.diagnostic;
+        if (executed.status != forevervalidator::simulation::
+                                       CudaTimelineStatus::Success ||
+            executed.candidates.size() != 1u ||
+            executed.candidates[0].status !=
+                    forevervalidator::simulation::
+                            CudaTimelineStatus::Success) {
+            if (executed.candidates.size() == 1u) {
+                cudaInitializationDiagnostic +=
+                        " candidate_status=" +
+                        std::string(
+                                forevervalidator::simulation::
+                                        CudaTimelineStatusName(
+                                                executed.candidates[0].
+                                                        status)) +
+                        " failure_tick=" +
+                        std::to_string(
+                                executed.candidates[0].failureTick) +
+                        " executed_ticks=" +
+                        std::to_string(
+                                executed.candidates[0].
+                                        executedTickCount) +
+                        " failure_detail=" +
+                        std::to_string(
+                                executed.candidates[0].
+                                        failureDetail);
+                const std::uint32_t failure =
+                        executed.candidates[0].failureTick;
+                if (failure < controlTicks.size()) {
+                    const auto flattened =
+                            forevervalidator::simulation::
+                                    FlattenCudaControlTick(
+                                            controlTicks[failure]);
+                    cudaInitializationDiagnostic +=
+                            " action_flags=" +
+                            std::to_string(
+                                    flattened.actionFlags) +
+                            " respawns=" +
+                            std::to_string(
+                                    flattened.
+                                            respawnAtCheckpointCount);
+                }
+            }
+            result.result =
+                    ReplaySimulationRunResult::CudaExecutionFailed;
+            return result;
+        }
+
+        ReplaySimulationInstanceClone restored;
+        const auto decode = forevervalidator::simulation::
+                DecodeCudaCandidateState(
+                        executed.candidates[0].finalState, &restored);
+        if (decode != forevervalidator::simulation::
+                              CudaStateConversionResult::Success ||
+            !instance.race.PrepareRuntimeCloneRestore(restored.race) ||
+            !instance.runtime->PrepareRuntimeCloneRestore(
+                    restored.runtime)) {
+            cudaInitializationDiagnostic =
+                    "CUDA final state restoration validation failed";
+            result.result =
+                    ReplaySimulationRunResult::CudaExecutionFailed;
+            return result;
+        }
+        instance.race.RestoreRuntimeClone(std::move(restored.race));
+        instance.runtime->RestoreRuntimeClone(
+                std::move(restored.runtime));
+        instance.incrementalRespawnCount =
+                restored.incrementalRespawnCount;
+        tmnf::simulation::RestoreGameRandomState(
+                executed.candidates[0].finalState.randomState);
+        try {
+            result.observations.reserve(
+                    executed.candidates[0].observations.size());
+            for (const auto &observation :
+                 executed.candidates[0].observations) {
+                result.observations.push_back(
+                        ObserveCudaTrajectory(observation));
+            }
+        } catch (const std::bad_alloc &) {
+            result.result =
+                    ReplaySimulationRunResult::
+                            ObservationAllocationFailed;
+            return result;
+        }
+        result.executedRespawnCount =
+                executed.candidates[0].executedRespawnCount;
+        result.finishTimeMs = instance.runtime->FinishTimeMs();
+        result.stuntsScore = instance.runtime->StuntsScore();
+        result.raceCompleted = result.finishTimeMs.has_value();
+        result.result = ReplaySimulationRunResult::Success;
+        return result;
+    }
 };
 
 ReplaySimulationSession::ReplaySimulationSession(
@@ -819,6 +1099,15 @@ void ReplaySimulationSession::Reset() {
     impl->mapScene.Reset(impl->instance.race);
     impl->staticCollisionTriangles.clear();
     impl->staticRenderScene.reset();
+    impl->cudaHostScene.Clear();
+    impl->cudaDeviceScene.Reset();
+    impl->cudaSceneTransfer.reset();
+    impl->cudaHostConfiguration.Clear();
+    impl->cudaDeviceConfiguration.Reset();
+    impl->cudaConfigurationTransfer.reset();
+    impl->cudaInitializationDiagnostic.clear();
+    impl->cudaTimelineMetrics.reset();
+    impl->incrementalValidationSeed = 0u;
 }
 
 bool ReplaySimulationSession::PreloadChallenge(
@@ -832,6 +1121,20 @@ bool ReplaySimulationSession::InstallStaticScene(
     std::vector<ReplayStaticCollisionTriangle> triangles;
     sandbox::PhysicsSandboxRenderSceneHandle renderScene =
             BuildStaticRenderScene(models);
+    forevervalidator::simulation::CudaHostScene cudaScene;
+    if (impl->backend == forevervalidator::SimulationBackend::Cuda) {
+        const auto cudaBuild =
+                forevervalidator::simulation::BuildCudaHostScene(
+                        models, &cudaScene);
+        if (cudaBuild != forevervalidator::simulation::
+                                 CudaSceneBuildResult::Success) {
+            impl->cudaInitializationDiagnostic =
+                    std::string("CUDA scene flattening failed: ") +
+                    forevervalidator::simulation::
+                            CudaSceneBuildResultName(cudaBuild);
+            return false;
+        }
+    }
     if (!renderScene ||
         !BuildStaticCollisionTriangles(models, triangles) ||
         impl->mapScene.InstallModels(std::move(models)) !=
@@ -840,11 +1143,18 @@ bool ReplaySimulationSession::InstallStaticScene(
     }
     impl->staticCollisionTriangles = std::move(triangles);
     impl->staticRenderScene = std::move(renderScene);
+    impl->cudaHostScene = std::move(cudaScene);
     return true;
 }
 
 void ReplaySimulationSession::ActivateStaticScene() {
     impl->mapScene.Activate();
+    if (impl->backend == forevervalidator::SimulationBackend::Cuda) {
+        impl->cudaSceneTransfer =
+                impl->cudaDeviceScene.Upload(impl->cudaHostScene);
+        impl->cudaInitializationDiagnostic =
+                impl->cudaSceneTransfer->diagnostic;
+    }
 }
 
 void ReplaySimulationSession::ConfigureReplayRace(
@@ -898,6 +1208,11 @@ ReplaySimulationTimelineResult ReplaySimulationSession::SimulateTimeline(
     }
     impl->ResetRuntime();
 
+    result.result = impl->PrepareCudaConfiguration(simulationDefinition);
+    if (result.result != ReplaySimulationRunResult::Success) {
+        return result;
+    }
+
     const ReplayMapSceneResult readyResult =
             impl->mapScene.EnsureReady(impl->instance.race);
     if (readyResult != ReplayMapSceneResult::Ready) {
@@ -922,7 +1237,11 @@ ReplaySimulationTimelineResult ReplaySimulationSession::SimulateTimeline(
         return result;
     }
 
-    if (impl->backend == forevervalidator::SimulationBackend::OptimizedCpu) {
+    if (impl->backend == forevervalidator::SimulationBackend::Cuda) {
+        return impl->ExecuteCudaTimeline(
+                controlTicks, validationSeed, 0u);
+    } else if (impl->backend ==
+               forevervalidator::SimulationBackend::OptimizedCpu) {
         impl->instance.runtime->PrepareOptimizedCpuStaticTransforms();
         impl->instance.runtime->
                 CertifyOptimizedCpuStaticTransformsForAdvance();
@@ -1041,6 +1360,11 @@ ReplaySimulationRunResult ReplaySimulationSession::StartIncremental(
         return ReplaySimulationRunResult::DeterministicExecutionUnavailable;
     }
     impl->ResetRuntime();
+    const ReplaySimulationRunResult cudaPreparation =
+            impl->PrepareCudaConfiguration(simulationDefinition);
+    if (cudaPreparation != ReplaySimulationRunResult::Success) {
+        return cudaPreparation;
+    }
     const ReplayMapSceneResult readyResult =
             impl->mapScene.EnsureReady(impl->instance.race);
     if (readyResult != ReplayMapSceneResult::Ready) {
@@ -1059,6 +1383,7 @@ ReplaySimulationRunResult ReplaySimulationSession::StartIncremental(
             firstTick,
             validationSeed);
     if (result == ReplaySimulationRunResult::Success) {
+        impl->incrementalValidationSeed = validationSeed;
         if (impl->backend ==
             forevervalidator::SimulationBackend::SpeculativeTicking) {
             forevervalidator::simulation::PrepareSpeculativeTicking(
@@ -1113,6 +1438,20 @@ ReplaySimulationTimelineResult ReplaySimulationSession::AdvanceIncremental(
                         execution.respawnExecutedCount;
             }
         }
+    } else if (impl->backend == forevervalidator::SimulationBackend::Cuda) {
+        std::vector<ReplayControlTick> cudaTicks;
+        try {
+            cudaTicks.assign(
+                    controlTicks.begin() + begin,
+                    controlTicks.begin() + begin + count);
+        } catch (const std::bad_alloc &) {
+            result.result =
+                    ReplaySimulationRunResult::
+                            ObservationAllocationFailed;
+            return result;
+        }
+        return impl->ExecuteCudaTimeline(
+                cudaTicks, impl->incrementalValidationSeed, begin);
     } else if (impl->backend ==
                forevervalidator::SimulationBackend::SpeculativeTicking) {
         forevervalidator::simulation::CertifySpeculativeTickingForAdvance(
@@ -1165,11 +1504,58 @@ ReplaySimulationSession::CurrentState() const {
     return result;
 }
 
+
 std::optional<std::uint32_t>
 ReplaySimulationSession::ApplyReplayStuntTimePenalty(
         std::uint32_t overtimeMs) {
     if (!impl->instance.runtime) {
         return std::nullopt;
+    }
+    if (impl->backend == forevervalidator::SimulationBackend::Cuda) {
+#if !FOREVERVALIDATOR_HAS_CUDA
+        impl->cudaInitializationDiagnostic =
+                "CUDA support is not compiled into this build";
+        return std::nullopt;
+#else
+        if (!impl->instance.runtime->StuntsScore().has_value()) {
+            return std::nullopt;
+        }
+        forevervalidator::simulation::CudaRaceState encoded;
+        const auto encode = forevervalidator::simulation::
+                EncodeCudaRaceState(
+                        impl->instance.race.CaptureRuntimeClone(),
+                        &encoded);
+        if (encode != forevervalidator::simulation::
+                              CudaStateConversionResult::Success) {
+            impl->cudaInitializationDiagnostic =
+                    "CUDA stunt penalty state conversion failed";
+            return std::nullopt;
+        }
+        forevervalidator::simulation::CudaStuntCommand command;
+        command.kind = forevervalidator::simulation::
+                CudaStuntCommandKind::TimePenalty;
+        command.overtimeMs = overtimeMs;
+        const auto executed = forevervalidator::simulation::
+                ExecuteCudaStuntCommandsForCertification(
+                        encoded, {command});
+        if (!executed.success) {
+            impl->cudaInitializationDiagnostic =
+                    executed.diagnostic;
+            return std::nullopt;
+        }
+        CTrackManiaRace::RuntimeClone restored;
+        const auto decode = forevervalidator::simulation::
+                DecodeCudaRaceState(executed.finalState, &restored);
+        if (decode != forevervalidator::simulation::
+                              CudaStateConversionResult::Success ||
+            !impl->instance.race.PrepareRuntimeCloneRestore(restored)) {
+            impl->cudaInitializationDiagnostic =
+                    "CUDA stunt penalty restoration failed";
+            return std::nullopt;
+        }
+        impl->instance.race.RestoreRuntimeClone(std::move(restored));
+        return impl->instance.runtime->StuntsScore();
+#endif
     }
     return impl->instance.runtime->ApplyReplayStuntTimePenalty(overtimeMs);
 }
@@ -1191,6 +1577,8 @@ ReplaySimulationSession::CaptureRuntimeClone() const {
     clone->runtime = std::move(*runtime);
     clone->incrementalRespawnCount =
             impl->instance.incrementalRespawnCount;
+    clone->randomState =
+            tmnf::simulation::CaptureGameRandomState();
     return clone;
 }
 
@@ -1206,6 +1594,7 @@ void ReplaySimulationSession::RestoreRuntimeClone(
     impl->instance.race.RestoreRuntimeClone(std::move(clone.race));
     impl->instance.runtime->RestoreRuntimeClone(std::move(clone.runtime));
     impl->instance.incrementalRespawnCount = clone.incrementalRespawnCount;
+    tmnf::simulation::RestoreGameRandomState(clone.randomState);
 }
 
 std::optional<OptimizedCpuStaticSceneFingerprint>
@@ -1218,4 +1607,1933 @@ ReplaySimulationSession::
     return impl->instance.runtime->
             CaptureOptimizedCpuStaticSceneFingerprintForTesting(
                     impl->mapScene.PersistentCollisionZoneForTesting());
+}
+
+std::optional<forevervalidator::simulation::CudaSceneTransferMetrics>
+ReplaySimulationSession::CudaSceneTransferMetricsForTesting(void) const {
+    return impl->cudaSceneTransfer;
+}
+
+std::optional<forevervalidator::simulation::
+                      CudaStaticConfigurationTransferMetrics>
+ReplaySimulationSession::
+        CudaStaticConfigurationTransferMetricsForTesting(void) const {
+    return impl->cudaConfigurationTransfer;
+}
+
+const std::string &
+ReplaySimulationSession::CudaInitializationDiagnostic() const noexcept {
+    return impl->cudaInitializationDiagnostic;
+}
+
+std::optional<forevervalidator::simulation::CudaTimelineExecutionMetrics>
+ReplaySimulationSession::CudaTimelineMetricsForTesting(void) const {
+    return impl->cudaTimelineMetrics;
+}
+
+forevervalidator::simulation::CudaTimelineBatchResult
+ReplaySimulationSession::ExecuteCudaCandidateBatchForTesting(
+        const std::vector<ReplayControlTick> &ticks,
+        std::uint32_t candidateCount,
+        bool mutateControls,
+        std::uint64_t initialControlCursor,
+        bool cancellationRequested) {
+    forevervalidator::simulation::CudaTimelineBatchResult result;
+#if !FOREVERVALIDATOR_HAS_CUDA
+    (void)ticks;
+    (void)candidateCount;
+    (void)mutateControls;
+    (void)initialControlCursor;
+    (void)cancellationRequested;
+    result.status =
+            forevervalidator::simulation::CudaTimelineStatus::DeviceFailure;
+    result.diagnostic =
+            "CUDA support is not compiled into this build";
+    return result;
+#else
+    if (impl->backend != forevervalidator::SimulationBackend::Cuda ||
+        !impl->instance.runtime || ticks.empty() ||
+        candidateCount == 0u ||
+        !impl->cudaDeviceScene.Ready() ||
+        !impl->cudaDeviceConfiguration.Ready()) {
+        result.status =
+                forevervalidator::simulation::
+                        CudaTimelineStatus::InvalidArgument;
+        result.diagnostic =
+                "CUDA candidate batch prerequisites are not ready";
+        return result;
+    }
+    const auto runtime =
+            impl->instance.runtime->CaptureRuntimeClone();
+    if (!runtime.has_value()) {
+        result.status =
+                forevervalidator::simulation::
+                        CudaTimelineStatus::InvalidArgument;
+        result.diagnostic =
+                "CUDA candidate batch state capture failed";
+        return result;
+    }
+    ReplaySimulationInstanceClone initial;
+    initial.race = impl->instance.race.CaptureRuntimeClone();
+    initial.runtime = *runtime;
+    initial.incrementalRespawnCount =
+            impl->instance.incrementalRespawnCount;
+    try {
+        std::vector<forevervalidator::simulation::
+                            CudaCandidateTimelineInput>
+                candidates(candidateCount);
+        const std::uint32_t randomState =
+                tmnf::simulation::CaptureGameRandomState();
+        for (std::uint32_t candidate = 0u;
+             candidate < candidateCount; ++candidate) {
+            auto &destination = candidates[candidate];
+            const auto conversion = forevervalidator::simulation::
+                    EncodeCudaCandidateState(
+                            initial, impl->incrementalValidationSeed,
+                            initialControlCursor, candidate, randomState,
+                            &destination.initialState);
+            if (conversion != forevervalidator::simulation::
+                                      CudaStateConversionResult::Success) {
+                result.status =
+                        forevervalidator::simulation::
+                                CudaTimelineStatus::InvalidArgument;
+                result.diagnostic =
+                        "CUDA candidate batch state conversion failed";
+                return result;
+            }
+            destination.ticks.reserve(ticks.size());
+            for (const ReplayControlTick &tick : ticks) {
+                const ReplayControlTick candidateTick =
+                        CandidateControlTick(
+                                tick, candidate, mutateControls);
+                auto flattened = forevervalidator::simulation::
+                        FlattenCudaControlTick(candidateTick);
+                destination.ticks.push_back(flattened);
+            }
+        }
+        return forevervalidator::simulation::ExecuteCudaTimelineBatch(
+                impl->cudaDeviceScene.DeviceData(),
+                impl->cudaDeviceConfiguration.DeviceData(),
+                candidates, cancellationRequested);
+    } catch (const std::bad_alloc &) {
+        result.status =
+                forevervalidator::simulation::
+                        CudaTimelineStatus::CapacityExceeded;
+        result.diagnostic =
+                "CUDA candidate batch host allocation failed";
+        return result;
+    }
+#endif
+}
+
+ReplayCudaVehiclePrefixDifferential
+ReplaySimulationSession::
+        RunCudaCandidateBatchDifferentialForTesting(
+                const std::vector<ReplayControlTick> &ticks,
+                std::uint32_t candidateCount,
+                bool mutateControls,
+                std::uint64_t initialControlCursor) {
+    ReplayCudaVehiclePrefixDifferential result;
+#if !FOREVERVALIDATOR_HAS_CUDA
+    (void)ticks;
+    (void)candidateCount;
+    (void)mutateControls;
+    (void)initialControlCursor;
+    result.diagnostic =
+            "CUDA support is not compiled into this build";
+    return result;
+#else
+    if (!impl->instance.runtime || ticks.empty() ||
+        candidateCount == 0u) {
+        result.diagnostic =
+                "CUDA candidate batch differential prerequisites are not ready";
+        return result;
+    }
+    const auto capturedRuntime =
+            impl->instance.runtime->CaptureRuntimeClone();
+    if (!capturedRuntime.has_value()) {
+        result.diagnostic =
+                "CUDA candidate batch initial state capture failed";
+        return result;
+    }
+    ReplaySimulationInstanceClone initial;
+    initial.race = impl->instance.race.CaptureRuntimeClone();
+    initial.runtime = *capturedRuntime;
+    initial.incrementalRespawnCount =
+            impl->instance.incrementalRespawnCount;
+    const std::uint32_t initialRandomState =
+            tmnf::simulation::CaptureGameRandomState();
+    const auto restoreInitial = [&]() {
+        if (!impl->instance.race.PrepareRuntimeCloneRestore(
+                    initial.race) ||
+            !impl->instance.runtime->PrepareRuntimeCloneRestore(
+                    initial.runtime)) {
+            return false;
+        }
+        impl->instance.race.RestoreRuntimeClone(initial.race);
+        impl->instance.runtime->RestoreRuntimeClone(initial.runtime);
+        impl->instance.incrementalRespawnCount =
+                initial.incrementalRespawnCount;
+        tmnf::simulation::RestoreGameRandomState(initialRandomState);
+        return true;
+    };
+    const auto gpu = ExecuteCudaCandidateBatchForTesting(
+            ticks, candidateCount, mutateControls,
+            initialControlCursor, false);
+    if (gpu.status != forevervalidator::simulation::
+                              CudaTimelineStatus::Success ||
+        gpu.candidates.size() != candidateCount) {
+        result.diagnostic =
+                "CUDA candidate batch differential launch failed: " +
+                gpu.diagnostic;
+        return result;
+    }
+    std::vector<forevervalidator::simulation::
+                        CudaCandidateTimelineOutput>
+            cpuCandidates;
+    try {
+        cpuCandidates.resize(candidateCount);
+        for (std::uint32_t candidate = 0u;
+             candidate < candidateCount; ++candidate) {
+            if (!restoreInitial()) {
+                result.diagnostic =
+                        "CUDA candidate batch reference restoration failed";
+                return result;
+            }
+            auto &cpuOutput = cpuCandidates[candidate];
+            cpuOutput.status = forevervalidator::simulation::
+                    CudaTimelineStatus::Success;
+            for (const ReplayControlTick &sourceTick : ticks) {
+                const ReplayControlTick tick = CandidateControlTick(
+                        sourceTick, candidate, mutateControls);
+                const ReplaySimulationStepExecution execution =
+                        impl->instance.runtime->
+                                StepOptimizedCpuNativeBinary32(tick);
+                if (execution.result !=
+                    ReplaySimulationRunResult::Success) {
+                    restoreInitial();
+                    result.diagnostic =
+                            "CPU candidate batch reference transition failed";
+                    return result;
+                }
+                impl->instance.incrementalRespawnCount +=
+                        execution.respawnExecutedCount;
+                cpuOutput.executedRespawnCount +=
+                        execution.respawnExecutedCount;
+                ++cpuOutput.executedTickCount;
+                if (tick.observe) {
+                    forevervalidator::simulation::
+                            CudaTimelineObservation observation;
+                    observation.simulatedPosition =
+                            execution.simulatedFrame.position;
+                    observation.writePosition =
+                            execution.writeFrame.position;
+                    observation.hasComparison =
+                            tick.comparisonTarget.has_value();
+                    if (tick.comparisonTarget.has_value()) {
+                        observation.comparisonTarget =
+                                *tick.comparisonTarget;
+                        observation.comparisonDelta = {
+                                execution.writeFrame.position.x -
+                                        tick.comparisonTarget->x,
+                                execution.writeFrame.position.y -
+                                        tick.comparisonTarget->y,
+                                execution.writeFrame.position.z -
+                                        tick.comparisonTarget->z,
+                        };
+                        const GmVec3 &delta =
+                                observation.comparisonDelta;
+                        observation.comparisonDistance = CIsqrt(
+                                (delta.x * delta.x +
+                                 delta.y * delta.y) +
+                                delta.z * delta.z);
+                    }
+                    const auto race =
+                            impl->instance.race.CaptureRuntimeClone();
+                    observation.hasFinishTick =
+                            race.progress.raceCompleted;
+                    observation.finishTickMs =
+                            race.progress.lastPrepareTimeMs;
+                    cpuOutput.observations.push_back(observation);
+                }
+            }
+            const auto finalRuntime =
+                    impl->instance.runtime->CaptureRuntimeClone();
+            if (!finalRuntime.has_value()) {
+                restoreInitial();
+                result.diagnostic =
+                        "CPU candidate batch final state capture failed";
+                return result;
+            }
+            ReplaySimulationInstanceClone final;
+            final.race = impl->instance.race.CaptureRuntimeClone();
+            final.runtime = *finalRuntime;
+            final.incrementalRespawnCount =
+                    impl->instance.incrementalRespawnCount;
+            const auto conversion = forevervalidator::simulation::
+                    EncodeCudaCandidateState(
+                            final, impl->incrementalValidationSeed,
+                            initialControlCursor + ticks.size(),
+                            candidate,
+                            tmnf::simulation::CaptureGameRandomState(),
+                            &cpuOutput.finalState);
+            if (conversion != forevervalidator::simulation::
+                                      CudaStateConversionResult::Success) {
+                restoreInitial();
+                result.diagnostic =
+                        "CPU candidate batch final state conversion failed";
+                return result;
+            }
+            const auto &gpuOutput = gpu.candidates[candidate];
+            const auto *cpuBytes =
+                    reinterpret_cast<const std::uint8_t *>(
+                            &cpuOutput.finalState);
+            const auto *gpuBytes =
+                    reinterpret_cast<const std::uint8_t *>(
+                            &gpuOutput.finalState);
+            std::size_t mismatch = 0u;
+            while (mismatch < sizeof(cpuOutput.finalState) &&
+                   cpuBytes[mismatch] == gpuBytes[mismatch]) {
+                ++mismatch;
+            }
+            result.checkedBytes += sizeof(cpuOutput.finalState);
+            if (mismatch != sizeof(cpuOutput.finalState)) {
+                restoreInitial();
+                result.firstMismatchByte = mismatch;
+                result.cpuByte = cpuBytes[mismatch];
+                result.gpuByte = gpuBytes[mismatch];
+                result.diagnostic =
+                        "CUDA candidate batch final state diverged for candidate " +
+                        std::to_string(candidate) + " at byte " +
+                        std::to_string(mismatch);
+                return result;
+            }
+            if (cpuOutput.observations.size() !=
+                gpuOutput.observations.size()) {
+                restoreInitial();
+                result.diagnostic =
+                        "CUDA candidate batch observation count diverged";
+                return result;
+            }
+            for (std::size_t observation = 0u;
+                 observation < cpuOutput.observations.size();
+                 ++observation) {
+                if (std::memcmp(
+                            &cpuOutput.observations[observation],
+                            &gpuOutput.observations[observation],
+                            sizeof(forevervalidator::simulation::
+                                           CudaTimelineObservation)) != 0) {
+                    restoreInitial();
+                    result.diagnostic =
+                            "CUDA candidate batch observation diverged";
+                    return result;
+                }
+                result.checkedBytes +=
+                        sizeof(forevervalidator::simulation::
+                                       CudaTimelineObservation);
+            }
+        }
+    } catch (const std::bad_alloc &) {
+        restoreInitial();
+        result.diagnostic =
+                "CUDA candidate batch differential allocation failed";
+        return result;
+    }
+    const auto cpuWinner =
+            forevervalidator::simulation::SelectCudaTimelineWinner(
+                    cpuCandidates);
+    if (cpuWinner != gpu.winnerCandidateIndex ||
+        (cpuWinner.has_value() &&
+         gpu.winnerCandidateId !=
+                 std::optional<std::uint32_t>(
+                         cpuCandidates[*cpuWinner].
+                                 finalState.candidateId))) {
+        restoreInitial();
+        result.diagnostic =
+                "CUDA candidate batch winner diverged";
+        return result;
+    }
+    if (!restoreInitial()) {
+        result.diagnostic =
+                "CUDA candidate batch final restoration failed";
+        return result;
+    }
+    result.success = true;
+    result.firstMismatchByte = SIZE_MAX;
+    result.diagnostic =
+            "CUDA candidate batch states, observations, and winner are bit-exact";
+    return result;
+#endif
+}
+
+ReplayCudaVehiclePrefixDifferential
+ReplaySimulationSession::RunCudaVehiclePrefixDifferentialForTesting(
+        float dt) {
+    ReplayCudaVehiclePrefixDifferential result;
+#if !FOREVERVALIDATOR_HAS_CUDA
+    (void)dt;
+    result.diagnostic =
+            "CUDA support is not compiled into this build";
+    return result;
+#else
+    if (impl->backend != forevervalidator::SimulationBackend::Cuda ||
+        !impl->instance.runtime ||
+        !impl->cudaDeviceConfiguration.Ready() ||
+        !(dt > 0.0f)) {
+        result.diagnostic =
+                "CUDA vehicle-prefix differential prerequisites are not ready";
+        return result;
+    }
+    std::optional<ReplaySimulationRuntime::RuntimeClone> initialRuntime =
+            impl->instance.runtime->CaptureRuntimeClone();
+    std::optional<ReplaySimulationRuntime::RuntimeClone> cpuRuntime =
+            impl->instance.runtime->
+                    CaptureVehiclePrefixReferenceForTesting(dt);
+    if (!initialRuntime.has_value() || !cpuRuntime.has_value()) {
+        result.diagnostic =
+                "CPU vehicle-prefix reference capture failed";
+        return result;
+    }
+    ReplaySimulationInstanceClone initial;
+    initial.race = impl->instance.race.CaptureRuntimeClone();
+    initial.runtime = std::move(*initialRuntime);
+    initial.incrementalRespawnCount =
+            impl->instance.incrementalRespawnCount;
+    ReplaySimulationInstanceClone cpu = initial;
+    cpu.runtime = std::move(*cpuRuntime);
+
+    forevervalidator::simulation::CudaCandidateState encoded;
+    const auto conversion = forevervalidator::simulation::
+            EncodeCudaCandidateState(
+                    initial, impl->incrementalValidationSeed, 0u, 0u,
+                    1u, &encoded);
+    if (conversion != forevervalidator::simulation::
+                              CudaStateConversionResult::Success) {
+        result.diagnostic =
+                "CUDA vehicle-prefix initial-state conversion failed";
+        return result;
+    }
+    const auto gpu = forevervalidator::simulation::
+            ExecuteCudaVehiclePrefixForCertification(
+                    impl->cudaDeviceConfiguration.DeviceData(),
+                    encoded, dt);
+    if (!gpu.success) {
+        result.diagnostic = gpu.diagnostic;
+        return result;
+    }
+    ReplaySimulationInstanceClone decoded;
+    if (forevervalidator::simulation::DecodeCudaCandidateState(
+                gpu.finalState, &decoded) !=
+        forevervalidator::simulation::
+                CudaStateConversionResult::Success) {
+        result.diagnostic =
+                "CUDA vehicle-prefix final-state conversion failed";
+        return result;
+    }
+    forevervalidator::simulation::CudaCandidateState cpuEncoded;
+    if (forevervalidator::simulation::EncodeCudaCandidateState(
+                cpu, impl->incrementalValidationSeed, 0u, 0u, 1u,
+                &cpuEncoded) !=
+        forevervalidator::simulation::
+                CudaStateConversionResult::Success) {
+        result.diagnostic =
+                "CPU vehicle-prefix result conversion failed";
+        return result;
+    }
+    const auto *cpuCandidateBytes =
+            reinterpret_cast<const std::uint8_t *>(&cpuEncoded);
+    const auto *gpuCandidateBytes =
+            reinterpret_cast<const std::uint8_t *>(&gpu.finalState);
+    std::size_t candidateMismatch = 0u;
+    while (candidateMismatch < sizeof(cpuEncoded) &&
+           cpuCandidateBytes[candidateMismatch] ==
+                   gpuCandidateBytes[candidateMismatch]) {
+        ++candidateMismatch;
+    }
+    const std::uint64_t cpuRaceHash =
+            ReplayRaceRuntimeSemanticHash(cpu.race);
+    const std::uint64_t gpuRaceHash =
+            ReplayRaceRuntimeSemanticHash(decoded.race);
+    const std::uint64_t cpuRuntimeHash =
+            ReplaySimulationInstanceSemanticHash(cpu);
+    const std::uint64_t gpuRuntimeHash =
+            ReplaySimulationInstanceSemanticHash(decoded);
+    constexpr std::size_t CandidateSemanticExtent =
+            offsetof(
+                    forevervalidator::simulation::CudaCandidateState,
+                    stuntsEnabled) +
+            sizeof(bool);
+    if (candidateMismatch >= CandidateSemanticExtent &&
+        cpuRaceHash == gpuRaceHash &&
+        cpuRuntimeHash == gpuRuntimeHash) {
+        result.success = true;
+        result.checkedBytes = CandidateSemanticExtent;
+        result.firstMismatchByte = SIZE_MAX;
+        result.diagnostic =
+                "CUDA vehicle-prefix state is bit-exact";
+        return result;
+    }
+
+    result.checkedBytes = CandidateSemanticExtent;
+    result.firstMismatchByte = candidateMismatch;
+    if (candidateMismatch < sizeof(cpuEncoded)) {
+        result.cpuByte = cpuCandidateBytes[candidateMismatch];
+        result.gpuByte = gpuCandidateBytes[candidateMismatch];
+    }
+    result.diagnostic =
+            "CUDA vehicle-prefix state diverged at candidate byte " +
+            std::to_string(candidateMismatch) +
+            " race_hashes=" + std::to_string(cpuRaceHash) +
+            "/" + std::to_string(gpuRaceHash) +
+            " state_hashes=" + std::to_string(cpuRuntimeHash) +
+            "/" + std::to_string(gpuRuntimeHash) +
+            " input_speed_z=" +
+            std::to_string(encoded.body.current.linearSpeed.z) +
+            " cpu_wheel0_speed=" +
+            std::to_string(
+                    cpuEncoded.vehicle.wheels.values[0].
+                            realTime.wheelAngularSpeed) +
+            " gpu_wheel0_speed=" +
+            std::to_string(
+                    gpu.finalState.vehicle.wheels.values[0].
+                            realTime.wheelAngularSpeed) +
+            " cpu_wheel0_contact=" +
+            std::to_string(
+                    cpuEncoded.vehicle.wheels.values[0].
+                            realTime.contactPresent) +
+            " gpu_wheel0_contact=" +
+            std::to_string(
+                    gpu.finalState.vehicle.wheels.values[0].
+                            realTime.contactPresent) +
+            " cpu_radius=" +
+            std::to_string(
+                    cpuEncoded.vehicle.wheels.values[0].rollingRadius) +
+            " gpu_radius=" +
+            std::to_string(
+                    gpu.finalState.vehicle.wheels.values[0].rollingRadius);
+    return result;
+#endif
+}
+
+ReplayCudaVehiclePrefixDifferential
+ReplaySimulationSession::RunCudaVehicleForceDifferentialForTesting(
+        float dt) {
+    ReplayCudaVehiclePrefixDifferential result;
+#if !FOREVERVALIDATOR_HAS_CUDA
+    (void)dt;
+    result.diagnostic =
+            "CUDA support is not compiled into this build";
+    return result;
+#else
+    if (impl->backend != forevervalidator::SimulationBackend::Cuda ||
+        !impl->instance.runtime ||
+        !impl->cudaDeviceConfiguration.Ready() ||
+        !(dt > 0.0f)) {
+        result.diagnostic =
+                "CUDA vehicle-force differential prerequisites are not ready";
+        return result;
+    }
+    auto initialRuntime =
+            impl->instance.runtime->CaptureRuntimeClone();
+    auto cpuRuntime = impl->instance.runtime->
+            CaptureVehicleForceReferenceForTesting(dt);
+    if (!initialRuntime.has_value() || !cpuRuntime.has_value()) {
+        result.diagnostic =
+                "CPU vehicle-force reference capture failed";
+        return result;
+    }
+    ReplaySimulationInstanceClone initial;
+    initial.race = impl->instance.race.CaptureRuntimeClone();
+    initial.runtime = std::move(*initialRuntime);
+    initial.incrementalRespawnCount =
+            impl->instance.incrementalRespawnCount;
+    ReplaySimulationInstanceClone cpu = initial;
+    cpu.runtime = std::move(*cpuRuntime);
+    forevervalidator::simulation::CudaCandidateState encoded;
+    if (forevervalidator::simulation::EncodeCudaCandidateState(
+                initial, impl->incrementalValidationSeed, 0u, 0u,
+                1u, &encoded) !=
+        forevervalidator::simulation::
+                CudaStateConversionResult::Success) {
+        result.diagnostic =
+                "CUDA vehicle-force initial-state conversion failed";
+        return result;
+    }
+    const auto gpu = forevervalidator::simulation::
+            ExecuteCudaVehicleForceForCertification(
+                    impl->cudaDeviceConfiguration.DeviceData(),
+                    encoded, dt);
+    if (!gpu.success || !gpu.supported) {
+        result.diagnostic = gpu.diagnostic;
+        return result;
+    }
+    ReplaySimulationInstanceClone decoded;
+    if (forevervalidator::simulation::DecodeCudaCandidateState(
+                gpu.finalState, &decoded) !=
+        forevervalidator::simulation::
+                CudaStateConversionResult::Success) {
+        result.diagnostic =
+                "CUDA vehicle-force final-state conversion failed";
+        return result;
+    }
+    forevervalidator::simulation::CudaCandidateState cpuEncoded;
+    if (forevervalidator::simulation::EncodeCudaCandidateState(
+                cpu, impl->incrementalValidationSeed, 0u, 0u, 1u,
+                &cpuEncoded) !=
+        forevervalidator::simulation::
+                CudaStateConversionResult::Success) {
+        result.diagnostic =
+                "CPU vehicle-force result conversion failed";
+        return result;
+    }
+    const auto *cpuBytes =
+            reinterpret_cast<const std::uint8_t *>(&cpuEncoded);
+    const auto *gpuBytes =
+            reinterpret_cast<const std::uint8_t *>(&gpu.finalState);
+    std::size_t mismatch = 0u;
+    while (mismatch < sizeof(cpuEncoded) &&
+           cpuBytes[mismatch] == gpuBytes[mismatch]) {
+        ++mismatch;
+    }
+    constexpr std::size_t SemanticExtent =
+            offsetof(
+                    forevervalidator::simulation::CudaCandidateState,
+                    stuntsEnabled) +
+            sizeof(bool);
+    result.checkedBytes = SemanticExtent;
+    if (mismatch >= SemanticExtent &&
+        ReplayRaceRuntimeSemanticHash(cpu.race) ==
+                ReplayRaceRuntimeSemanticHash(decoded.race) &&
+        ReplaySimulationInstanceSemanticHash(cpu) ==
+                ReplaySimulationInstanceSemanticHash(decoded)) {
+        result.success = true;
+        result.firstMismatchByte = SIZE_MAX;
+        result.diagnostic =
+                "CUDA vehicle-force state is bit-exact";
+        return result;
+    }
+    result.firstMismatchByte = mismatch;
+    if (mismatch < sizeof(cpuEncoded)) {
+        result.cpuByte = cpuBytes[mismatch];
+        result.gpuByte = gpuBytes[mismatch];
+    }
+    result.diagnostic =
+            "CUDA vehicle-force state diverged at candidate byte " +
+            std::to_string(mismatch) +
+            " cpu_torque=(" +
+            std::to_string(cpuEncoded.body.current.torque.x) + "," +
+            std::to_string(cpuEncoded.body.current.torque.y) + "," +
+            std::to_string(cpuEncoded.body.current.torque.z) + ")" +
+            " gpu_torque=(" +
+            std::to_string(gpu.finalState.body.current.torque.x) + "," +
+            std::to_string(gpu.finalState.body.current.torque.y) + "," +
+            std::to_string(gpu.finalState.body.current.torque.z) + ")" +
+            " cpu_force=(" +
+            std::to_string(cpuEncoded.body.current.force.x) + "," +
+            std::to_string(cpuEncoded.body.current.force.y) + "," +
+            std::to_string(cpuEncoded.body.current.force.z) + ")" +
+            " gpu_force=(" +
+            std::to_string(gpu.finalState.body.current.force.x) + "," +
+            std::to_string(gpu.finalState.body.current.force.y) + "," +
+            std::to_string(gpu.finalState.body.current.force.z) + ")";
+    return result;
+#endif
+}
+
+ReplayCudaVehiclePrefixDifferential
+ReplaySimulationSession::RunCudaCollisionDifferentialForTesting(void) {
+    ReplayCudaVehiclePrefixDifferential result;
+#if !FOREVERVALIDATOR_HAS_CUDA
+    result.diagnostic =
+            "CUDA support is not compiled into this build";
+    return result;
+#else
+    if (impl->backend != forevervalidator::SimulationBackend::Cuda ||
+        !impl->instance.runtime ||
+        !impl->cudaDeviceConfiguration.Ready() ||
+        !impl->cudaDeviceScene.Ready()) {
+        result.diagnostic =
+                "CUDA collision differential prerequisites are not ready";
+        return result;
+    }
+    const auto runtime =
+            impl->instance.runtime->CaptureRuntimeClone();
+    const auto cpu =
+            impl->instance.runtime->
+                    CaptureCollisionReferenceForTesting();
+    if (!runtime.has_value() || !cpu.has_value()) {
+        result.diagnostic =
+                "CPU collision reference capture failed";
+        return result;
+    }
+    ReplaySimulationInstanceClone initial;
+    initial.race = impl->instance.race.CaptureRuntimeClone();
+    initial.runtime = *runtime;
+    initial.incrementalRespawnCount =
+            impl->instance.incrementalRespawnCount;
+    if (!impl->instance.runtime->
+                ApplyCollisionResponseReferenceForTesting()) {
+        result.diagnostic =
+                "CPU collision-response reference failed";
+        return result;
+    }
+    ReplaySimulationInstanceClone cpuResponse;
+    cpuResponse.race =
+            impl->instance.race.CaptureRuntimeClone();
+    const auto cpuResponseRuntime =
+            impl->instance.runtime->CaptureRuntimeClone();
+    cpuResponse.incrementalRespawnCount =
+            impl->instance.incrementalRespawnCount;
+    if (!cpuResponseRuntime.has_value() ||
+        !impl->instance.race.PrepareRuntimeCloneRestore(
+                initial.race) ||
+        !impl->instance.runtime->PrepareRuntimeCloneRestore(
+                initial.runtime)) {
+        result.diagnostic =
+                "CPU collision-response capture or restoration failed";
+        return result;
+    }
+    cpuResponse.runtime = *cpuResponseRuntime;
+    impl->instance.race.RestoreRuntimeClone(initial.race);
+    impl->instance.runtime->RestoreRuntimeClone(initial.runtime);
+    impl->instance.incrementalRespawnCount =
+            initial.incrementalRespawnCount;
+    forevervalidator::simulation::CudaCandidateState encoded;
+    if (forevervalidator::simulation::EncodeCudaCandidateState(
+                initial, impl->incrementalValidationSeed, 0u, 0u,
+                tmnf::simulation::CaptureGameRandomState(), &encoded) !=
+        forevervalidator::simulation::
+                CudaStateConversionResult::Success) {
+        result.diagnostic =
+                "CUDA collision initial-state conversion failed";
+        return result;
+    }
+    const auto gpu = forevervalidator::simulation::
+            ExecuteCudaCollisionForCertification(
+                    impl->cudaDeviceScene.DeviceData(),
+                    impl->cudaDeviceConfiguration.DeviceData(),
+                    encoded);
+    if (!gpu.success) {
+        result.diagnostic = gpu.diagnostic;
+        return result;
+    }
+    constexpr std::size_t CollisionSemanticBytes =
+            sizeof(GmVec3) * 4u +
+            sizeof(std::uint32_t) * 2u +
+            sizeof(bool);
+    result.checkedBytes =
+            std::min(cpu->size(), gpu.collisions.size()) *
+            CollisionSemanticBytes;
+    if (cpu->size() != gpu.collisions.size()) {
+        result.firstMismatchByte = result.checkedBytes;
+        result.diagnostic =
+                "CUDA collision count diverged cpu=" +
+                std::to_string(cpu->size()) + " gpu=" +
+                std::to_string(gpu.collisions.size()) +
+                " accel_cells=" +
+                std::to_string(gpu.accelerationCellVisits) +
+                " accel_surfaces=" +
+                std::to_string(gpu.accelerationSurfaceVisits) +
+                " mesh_cells=" +
+                std::to_string(gpu.meshCellVisits) +
+                " mesh_intersections=" +
+                std::to_string(gpu.meshCellIntersections) +
+                " mesh_triangle_cells=" +
+                std::to_string(gpu.meshTriangleCells) +
+                " triangles=" +
+                std::to_string(gpu.triangleTests) +
+                " hits=" +
+                std::to_string(gpu.triangleHits) +
+                " shape=" +
+                std::to_string(gpu.firstVisitedShape) +
+                " surface=" +
+                std::to_string(gpu.firstVisitedSurface) +
+                " shape_pos=(" +
+                std::to_string(
+                        gpu.firstShapeWorld.translation.x) + "," +
+                std::to_string(
+                        gpu.firstShapeWorld.translation.y) + "," +
+                std::to_string(
+                        gpu.firstShapeWorld.translation.z) + ")" +
+                " unit_box=(" +
+                std::to_string(gpu.firstEllipsoidBox.center.x) + "," +
+                std::to_string(gpu.firstEllipsoidBox.center.y) + "," +
+                std::to_string(gpu.firstEllipsoidBox.center.z) +
+                "; " +
+                std::to_string(
+                        gpu.firstEllipsoidBox.halfExtents.x) + "," +
+                std::to_string(
+                        gpu.firstEllipsoidBox.halfExtents.y) + "," +
+                std::to_string(
+                        gpu.firstEllipsoidBox.halfExtents.z) + ")" +
+                " mesh_root=(" +
+                std::to_string(gpu.firstMeshRootBounds.center.x) + "," +
+                std::to_string(gpu.firstMeshRootBounds.center.y) + "," +
+                std::to_string(gpu.firstMeshRootBounds.center.z) +
+                "; " +
+                std::to_string(
+                        gpu.firstMeshRootBounds.halfExtents.x) + "," +
+                std::to_string(
+                        gpu.firstMeshRootBounds.halfExtents.y) + "," +
+                std::to_string(
+                        gpu.firstMeshRootBounds.halfExtents.z) + ")";
+        if (!cpu->empty()) {
+            const GmCollision &first = cpu->front();
+            result.diagnostic +=
+                    " cpu_first=(" +
+                    std::to_string(first.contactPoint.x) + "," +
+                    std::to_string(first.contactPoint.y) + "," +
+                    std::to_string(first.contactPoint.z) +
+                    ") cpu_materials=" +
+                    std::to_string(static_cast<std::uint32_t>(
+                            first.materialA)) + "," +
+                    std::to_string(static_cast<std::uint32_t>(
+                            first.materialB));
+        }
+        result.diagnostic += " cpu_contacts=[";
+        for (std::size_t index = 0u; index < cpu->size(); ++index) {
+            const GmCollision &collision = (*cpu)[index];
+            if (index != 0u) result.diagnostic += ";";
+            result.diagnostic +=
+                    std::to_string(collision.contactPoint.x) + "," +
+                    std::to_string(collision.contactPoint.y) + "," +
+                    std::to_string(collision.contactPoint.z) + "|" +
+                    std::to_string(collision.impulseNormal.x) + "," +
+                    std::to_string(collision.impulseNormal.y) + "," +
+                    std::to_string(collision.impulseNormal.z) + "|" +
+                    std::to_string(collision.sphereMergePrimary) + "|" +
+                    std::to_string(static_cast<std::uint32_t>(
+                            collision.materialA)) + "," +
+                    std::to_string(static_cast<std::uint32_t>(
+                            collision.materialB));
+        }
+        result.diagnostic += "] gpu_contacts=[";
+        for (std::size_t index = 0u;
+             index < gpu.collisions.size(); ++index) {
+            const auto &collision = gpu.collisions[index];
+            if (index != 0u) result.diagnostic += ";";
+            result.diagnostic +=
+                    std::to_string(collision.contactPoint.x) + "," +
+                    std::to_string(collision.contactPoint.y) + "," +
+                    std::to_string(collision.contactPoint.z) + "|" +
+                    std::to_string(collision.impulseNormal.x) + "," +
+                    std::to_string(collision.impulseNormal.y) + "," +
+                    std::to_string(collision.impulseNormal.z) + "|" +
+                    std::to_string(collision.sphereMergePrimary) + "|" +
+                    std::to_string(collision.materialA) + "," +
+                    std::to_string(collision.materialB) + "|" +
+                    std::to_string(collision.movingShapeIndex) + "," +
+                    std::to_string(collision.staticSurfaceIndex) + "," +
+                    std::to_string(collision.staticActorIndex);
+        }
+        result.diagnostic += "]";
+        if (!gpu.collisions.empty()) {
+            result.diagnostic += " gpu_actor_purposes=[";
+            for (std::size_t index = 0u;
+                 index < gpu.collisions.size(); ++index) {
+                if (index != 0u) result.diagnostic += ";";
+                const std::uint32_t actorIndex =
+                        gpu.collisions[index].staticActorIndex;
+                if (actorIndex >= impl->cudaHostScene.actors.size()) {
+                    result.diagnostic += "invalid";
+                    continue;
+                }
+                const auto &actor =
+                        impl->cudaHostScene.actors[actorIndex];
+                result.diagnostic +=
+                        std::to_string(actor.purpose) + "," +
+                        std::to_string(static_cast<std::uint32_t>(
+                                actor.itemProperties.collisionGroup)) + "," +
+                        std::to_string(
+                                actor.itemProperties.collisionStatic) + "," +
+                        std::to_string(actor.itemProperties.active) + "," +
+                        std::to_string(actor.itemProperties.zombie);
+            }
+            result.diagnostic += "]";
+        }
+        return result;
+    }
+    const auto sameVector = [](const GmVec3 &left,
+                               const GmVec3 &right) {
+        return std::memcmp(
+                       &left, &right, sizeof(GmVec3)) == 0;
+    };
+    for (std::size_t index = 0u; index < cpu->size(); ++index) {
+        const GmCollision &left = (*cpu)[index];
+        const auto &right = gpu.collisions[index];
+        if (!sameVector(left.separation, right.separation) ||
+            !sameVector(left.impulseNormal, right.impulseNormal) ||
+            !sameVector(left.contactPoint, right.contactPoint) ||
+            static_cast<std::uint32_t>(left.materialA) !=
+                    right.materialA ||
+            static_cast<std::uint32_t>(left.materialB) !=
+                    right.materialB ||
+            left.sphereMergePrimary !=
+                    right.sphereMergePrimary ||
+            !sameVector(left.extraNegated, right.extraNegated)) {
+            result.firstMismatchByte =
+                    index * CollisionSemanticBytes;
+            result.diagnostic =
+                    "CUDA collision diverged at record " +
+                    std::to_string(index) +
+                    " cpu_point=(" +
+                    std::to_string(left.contactPoint.x) + "," +
+                    std::to_string(left.contactPoint.y) + "," +
+                    std::to_string(left.contactPoint.z) + ")" +
+                    " gpu_point=(" +
+                    std::to_string(right.contactPoint.x) + "," +
+                    std::to_string(right.contactPoint.y) + "," +
+                    std::to_string(right.contactPoint.z) + ")" +
+                    " cpu_separation=(" +
+                    std::to_string(left.separation.x) + "," +
+                    std::to_string(left.separation.y) + "," +
+                    std::to_string(left.separation.z) + ")" +
+                    " gpu_separation=(" +
+                    std::to_string(right.separation.x) + "," +
+                    std::to_string(right.separation.y) + "," +
+                    std::to_string(right.separation.z) + ")" +
+                    " cpu_normal=(" +
+                    std::to_string(left.impulseNormal.x) + "," +
+                    std::to_string(left.impulseNormal.y) + "," +
+                    std::to_string(left.impulseNormal.z) + ")" +
+                    " gpu_normal=(" +
+                    std::to_string(right.impulseNormal.x) + "," +
+                    std::to_string(right.impulseNormal.y) + "," +
+                    std::to_string(right.impulseNormal.z) + ")" +
+                    " cpu_extra=(" +
+                    std::to_string(left.extraNegated.x) + "," +
+                    std::to_string(left.extraNegated.y) + "," +
+                    std::to_string(left.extraNegated.z) + ")" +
+                    " gpu_extra=(" +
+                    std::to_string(right.extraNegated.x) + "," +
+                    std::to_string(right.extraNegated.y) + "," +
+                    std::to_string(right.extraNegated.z) + ")" +
+                    " cpu_materials=" +
+                    std::to_string(static_cast<std::uint32_t>(
+                            left.materialA)) + "," +
+                    std::to_string(static_cast<std::uint32_t>(
+                            left.materialB)) +
+                    " gpu_materials=" +
+                    std::to_string(right.materialA) + "," +
+                    std::to_string(right.materialB) +
+                    " cpu_primary=" +
+                    std::to_string(left.sphereMergePrimary) +
+                    " gpu_primary=" +
+                    std::to_string(right.sphereMergePrimary);
+            return result;
+        }
+    }
+    forevervalidator::simulation::CudaCandidateState
+            cpuResponseEncoded;
+    if (forevervalidator::simulation::EncodeCudaCandidateState(
+                cpuResponse, impl->incrementalValidationSeed,
+                0u, 0u,
+                tmnf::simulation::CaptureGameRandomState(),
+                &cpuResponseEncoded) !=
+        forevervalidator::simulation::
+                CudaStateConversionResult::Success) {
+        result.diagnostic =
+                "CPU collision-response state conversion failed";
+        return result;
+    }
+    const auto *cpuResponseBytes =
+            reinterpret_cast<const std::uint8_t *>(
+                    &cpuResponseEncoded);
+    const auto *gpuResponseBytes =
+            reinterpret_cast<const std::uint8_t *>(
+                    &gpu.finalState);
+    std::size_t responseMismatch = 0u;
+    while (responseMismatch < sizeof(cpuResponseEncoded) &&
+           cpuResponseBytes[responseMismatch] ==
+                   gpuResponseBytes[responseMismatch]) {
+        ++responseMismatch;
+    }
+    result.checkedBytes += sizeof(cpuResponseEncoded);
+    if (responseMismatch != sizeof(cpuResponseEncoded)) {
+        result.firstMismatchByte =
+                responseMismatch;
+        result.cpuByte =
+                cpuResponseBytes[responseMismatch];
+        result.gpuByte =
+                gpuResponseBytes[responseMismatch];
+        result.diagnostic =
+                "CUDA collision response diverged at candidate byte " +
+                std::to_string(responseMismatch) +
+                " cpu_replacements=" +
+                std::to_string(
+                        cpuResponseEncoded.body.
+                                collisionReplacements.count) +
+                    " gpu_replacements=" +
+                    std::to_string(
+                            gpu.finalState.body.
+                                    collisionReplacements.count) +
+                    " cpu_prepared_time=" +
+                    std::to_string(
+                            cpuResponseEncoded.race.preparedEventTimeMs) +
+                    " gpu_prepared_time=" +
+                    std::to_string(
+                            gpu.finalState.race.preparedEventTimeMs) +
+                    " cpu_prepared_count=" +
+                    std::to_string(
+                            cpuResponseEncoded.race.progress.
+                                    preparedEventCount) +
+                    " gpu_prepared_count=" +
+                    std::to_string(
+                            gpu.finalState.race.progress.
+                                    preparedEventCount) +
+                    " wheel_force_mode=" +
+                    std::to_string(
+                            impl->cudaHostConfiguration.tuning.
+                                    wheelForceMode) +
+                    " damper_max=" +
+                    std::to_string(
+                            impl->cudaHostConfiguration.tuning.
+                                    suspension.
+                                    damperModulationMaxAbsorb) +
+                    " gpu_response_wheel=" +
+                    std::to_string(
+                            gpu.firstResponseWheelIndex) +
+                    " gpu_local_before=(" +
+                    std::to_string(
+                            gpu.firstResponseReplacementBefore.x) + "," +
+                    std::to_string(
+                            gpu.firstResponseReplacementBefore.y) + "," +
+                    std::to_string(
+                            gpu.firstResponseReplacementBefore.z) + ")" +
+                    " gpu_local_after=(" +
+                    std::to_string(
+                            gpu.firstResponseReplacementAfter.x) + "," +
+                    std::to_string(
+                            gpu.firstResponseReplacementAfter.y) + "," +
+                    std::to_string(
+                            gpu.firstResponseReplacementAfter.z) + ")";
+        if (!gpu.collisions.empty()) {
+            result.diagnostic +=
+                    " first_shape=" +
+                    std::to_string(
+                            gpu.collisions[0].movingShapeIndex);
+        }
+        for (std::uint32_t wheel = 0u;
+             wheel < encoded.vehicle.wheels.count; ++wheel) {
+            result.diagnostic +=
+                    " wheel" + std::to_string(wheel) +
+                    "_damper=" +
+                    std::to_string(
+                            encoded.vehicle.wheels.values[wheel].
+                                    realTime.damperAbsorb);
+        }
+        result.diagnostic +=
+                " cpu_wheel_contacts=" +
+                std::to_string(
+                        cpuResponseEncoded.vehicle.contacts.
+                                wheelContactCount) +
+                " gpu_wheel_contacts=" +
+                std::to_string(
+                        gpu.finalState.vehicle.contacts.
+                                wheelContactCount) +
+                " cpu_w3_max_replacement=" +
+                std::to_string(
+                        cpuResponseEncoded.vehicle.wheels.values[3].
+                                realTime.maxReplacementY) +
+                " gpu_w3_max_replacement=" +
+                std::to_string(
+                        gpu.finalState.vehicle.wheels.values[3].
+                                realTime.maxReplacementY);
+        if (cpuResponseEncoded.body.collisionReplacements.count !=
+                    0u &&
+            gpu.finalState.body.collisionReplacements.count !=
+                    0u) {
+            const GmVec3 &cpuReplacement =
+                    cpuResponseEncoded.body.
+                            collisionReplacements.values[0];
+            const GmVec3 &gpuReplacement =
+                    gpu.finalState.body.
+                            collisionReplacements.values[0];
+            result.diagnostic +=
+                    " cpu_first=(" +
+                    std::to_string(cpuReplacement.x) + "," +
+                    std::to_string(cpuReplacement.y) + "," +
+                    std::to_string(cpuReplacement.z) + ")" +
+                    " gpu_first=(" +
+                    std::to_string(gpuReplacement.x) + "," +
+                    std::to_string(gpuReplacement.y) + "," +
+                    std::to_string(gpuReplacement.z) + ")";
+        }
+        return result;
+    }
+    result.success = true;
+    result.firstMismatchByte = SIZE_MAX;
+    result.diagnostic =
+            "CUDA collision sequence and response are bit-exact count=" +
+            std::to_string(cpu->size());
+    return result;
+#endif
+}
+
+ReplayCudaVehiclePrefixDifferential
+ReplaySimulationSession::RunCudaPhysicsStepDifferentialForTesting(void) {
+    ReplayCudaVehiclePrefixDifferential result;
+#if !FOREVERVALIDATOR_HAS_CUDA
+    result.diagnostic =
+            "CUDA support is not compiled into this build";
+    return result;
+#else
+    if (impl->backend != forevervalidator::SimulationBackend::Cuda ||
+        !impl->instance.runtime ||
+        !impl->cudaDeviceConfiguration.Ready() ||
+        !impl->cudaDeviceScene.Ready()) {
+        result.diagnostic =
+                "CUDA physics-step differential prerequisites are not ready";
+        return result;
+    }
+    const auto initialRuntime =
+            impl->instance.runtime->CaptureRuntimeClone();
+    if (!initialRuntime.has_value()) {
+        result.diagnostic =
+                "CPU physics-step initial capture failed";
+        return result;
+    }
+    ReplaySimulationInstanceClone initial;
+    initial.race = impl->instance.race.CaptureRuntimeClone();
+    initial.runtime = *initialRuntime;
+    initial.incrementalRespawnCount =
+            impl->instance.incrementalRespawnCount;
+    ReplayControlTick tick;
+    tick.periodMs = initial.runtime.world.schemePeriodMs != 0u
+            ? initial.runtime.world.schemePeriodMs
+            : 10u;
+    tick.timeMs = initial.runtime.world.tickTimeMs;
+    tick.controls =
+            impl->instance.runtime->CurrentControls();
+    const std::uint32_t randomState =
+            tmnf::simulation::CaptureGameRandomState();
+    if (!impl->instance.runtime->
+                StepPhysicsKernelReferenceForTesting(tick)) {
+        result.diagnostic =
+                "CPU physics-step reference execution failed";
+        return result;
+    }
+    const auto cpuRuntime =
+            impl->instance.runtime->CaptureRuntimeClone();
+    ReplaySimulationInstanceClone cpu;
+    cpu.race = impl->instance.race.CaptureRuntimeClone();
+    cpu.incrementalRespawnCount =
+            impl->instance.incrementalRespawnCount;
+    if (!cpuRuntime.has_value() ||
+        !impl->instance.race.PrepareRuntimeCloneRestore(
+                initial.race) ||
+        !impl->instance.runtime->PrepareRuntimeCloneRestore(
+                initial.runtime)) {
+        result.diagnostic =
+                "CPU physics-step final capture or restoration failed";
+        return result;
+    }
+    cpu.runtime = *cpuRuntime;
+    impl->instance.race.RestoreRuntimeClone(initial.race);
+    impl->instance.runtime->RestoreRuntimeClone(initial.runtime);
+    impl->instance.incrementalRespawnCount =
+            initial.incrementalRespawnCount;
+
+    forevervalidator::simulation::CudaCandidateState
+            initialEncoded;
+    forevervalidator::simulation::CudaCandidateState cpuEncoded;
+    if (forevervalidator::simulation::EncodeCudaCandidateState(
+                initial, impl->incrementalValidationSeed,
+                0u, 0u, randomState, &initialEncoded) !=
+                forevervalidator::simulation::
+                        CudaStateConversionResult::Success ||
+        forevervalidator::simulation::EncodeCudaCandidateState(
+                cpu, impl->incrementalValidationSeed,
+                0u, 0u, randomState, &cpuEncoded) !=
+                forevervalidator::simulation::
+                        CudaStateConversionResult::Success) {
+        result.diagnostic =
+                "CUDA physics-step state conversion failed";
+        return result;
+    }
+    initialEncoded.world.schemePeriodMs = tick.periodMs;
+    initialEncoded.world.tickTimeMs = tick.timeMs;
+    const auto gpu = forevervalidator::simulation::
+            ExecuteCudaPhysicsStepForCertification(
+                    impl->cudaDeviceScene.DeviceData(),
+                    impl->cudaDeviceConfiguration.DeviceData(),
+                    initialEncoded);
+    if (!gpu.success) {
+        result.diagnostic = gpu.diagnostic;
+        return result;
+    }
+    const auto *cpuBytes =
+            reinterpret_cast<const std::uint8_t *>(&cpuEncoded);
+    const auto *gpuBytes =
+            reinterpret_cast<const std::uint8_t *>(
+                    &gpu.finalState);
+    std::size_t mismatch = 0u;
+    while (mismatch < sizeof(cpuEncoded) &&
+           cpuBytes[mismatch] == gpuBytes[mismatch]) {
+        ++mismatch;
+    }
+    result.checkedBytes = sizeof(cpuEncoded);
+    if (mismatch != sizeof(cpuEncoded)) {
+        result.firstMismatchByte = mismatch;
+        result.cpuByte = cpuBytes[mismatch];
+        result.gpuByte = gpuBytes[mismatch];
+        result.diagnostic =
+                "CUDA complete physics step diverged at candidate byte " +
+                std::to_string(mismatch) +
+                " cpu_position=(" +
+                std::to_string(cpuEncoded.body.current.position.x) + "," +
+                std::to_string(cpuEncoded.body.current.position.y) + "," +
+                std::to_string(cpuEncoded.body.current.position.z) + ")" +
+                " gpu_position=(" +
+                std::to_string(
+                        gpu.finalState.body.current.position.x) + "," +
+                std::to_string(
+                        gpu.finalState.body.current.position.y) + "," +
+                std::to_string(
+                        gpu.finalState.body.current.position.z) + ")" +
+                " cpu_speed=(" +
+                std::to_string(
+                        cpuEncoded.body.current.linearSpeed.x) + "," +
+                std::to_string(
+                        cpuEncoded.body.current.linearSpeed.y) + "," +
+                std::to_string(
+                        cpuEncoded.body.current.linearSpeed.z) + ")" +
+                " gpu_speed=(" +
+                std::to_string(
+                        gpu.finalState.body.current.linearSpeed.x) + "," +
+                std::to_string(
+                        gpu.finalState.body.current.linearSpeed.y) + "," +
+                std::to_string(
+                        gpu.finalState.body.current.linearSpeed.z) + ")" +
+                " cpu_temp_force=(" +
+                std::to_string(
+                        cpuEncoded.body.temporary.force.x) + "," +
+                std::to_string(
+                        cpuEncoded.body.temporary.force.y) + "," +
+                std::to_string(
+                        cpuEncoded.body.temporary.force.z) + ")" +
+                " gpu_temp_force=(" +
+                std::to_string(
+                        gpu.finalState.body.temporary.force.x) + "," +
+                std::to_string(
+                        gpu.finalState.body.temporary.force.y) + "," +
+                std::to_string(
+                        gpu.finalState.body.temporary.force.z) + ")" +
+                " cpu_current_force=(" +
+                std::to_string(
+                        cpuEncoded.body.current.force.x) + "," +
+                std::to_string(
+                        cpuEncoded.body.current.force.y) + "," +
+                std::to_string(
+                        cpuEncoded.body.current.force.z) + ")" +
+                " gpu_current_force=(" +
+                std::to_string(
+                        gpu.finalState.body.current.force.x) + "," +
+                std::to_string(
+                        gpu.finalState.body.current.force.y) + "," +
+                std::to_string(
+                        gpu.finalState.body.current.force.z) + ")" +
+                " initial_active=" +
+                std::to_string(initialEncoded.body.dynamicActive) +
+                " cpu_active=" +
+                std::to_string(cpuEncoded.body.dynamicActive) +
+                " gpu_active=" +
+                std::to_string(
+                        gpu.finalState.body.dynamicActive) +
+                " cpu_dynamic_group_count=" +
+                std::to_string(
+                        impl->instance.runtime->
+                                DynamicCollisionCorpusCountForTesting());
+        return result;
+    }
+    result.success = true;
+    result.firstMismatchByte = SIZE_MAX;
+    result.diagnostic =
+            "CUDA complete physics step is bit-exact";
+    return result;
+#endif
+}
+
+ReplayCudaVehiclePrefixDifferential
+ReplaySimulationSession::
+RunCudaCollisionSubstepDifferentialForTesting(float dt) {
+    ReplayCudaVehiclePrefixDifferential result;
+#if !FOREVERVALIDATOR_HAS_CUDA
+    static_cast<void>(dt);
+    result.diagnostic =
+            "CUDA support is not compiled into this build";
+    return result;
+#else
+    if (impl->backend != forevervalidator::SimulationBackend::Cuda ||
+        !impl->instance.runtime ||
+        !impl->cudaDeviceConfiguration.Ready() ||
+        !impl->cudaDeviceScene.Ready() || !(dt > 0.0f)) {
+        result.diagnostic =
+                "CUDA collision-substep differential prerequisites are not ready";
+        return result;
+    }
+    const auto initialRuntime =
+            impl->instance.runtime->CaptureRuntimeClone();
+    const auto cpuRuntime =
+            impl->instance.runtime->
+                    CaptureCollisionSubstepReferenceForTesting(dt);
+    if (!initialRuntime.has_value() || !cpuRuntime.has_value()) {
+        result.diagnostic =
+                "CPU collision-substep reference failed";
+        return result;
+    }
+    ReplaySimulationInstanceClone initial;
+    initial.race = impl->instance.race.CaptureRuntimeClone();
+    initial.runtime = *initialRuntime;
+    initial.incrementalRespawnCount =
+            impl->instance.incrementalRespawnCount;
+    ReplaySimulationInstanceClone cpu = initial;
+    cpu.runtime = *cpuRuntime;
+    const std::uint32_t randomState =
+            tmnf::simulation::CaptureGameRandomState();
+    forevervalidator::simulation::CudaCandidateState
+            initialEncoded;
+    forevervalidator::simulation::CudaCandidateState cpuEncoded;
+    if (forevervalidator::simulation::EncodeCudaCandidateState(
+                initial, impl->incrementalValidationSeed,
+                0u, 0u, randomState, &initialEncoded) !=
+                        forevervalidator::simulation::
+                                CudaStateConversionResult::Success ||
+        forevervalidator::simulation::EncodeCudaCandidateState(
+                cpu, impl->incrementalValidationSeed,
+                0u, 0u, randomState, &cpuEncoded) !=
+                        forevervalidator::simulation::
+                                CudaStateConversionResult::Success) {
+        result.diagnostic =
+                "CUDA collision-substep state conversion failed";
+        return result;
+    }
+    const auto gpu = forevervalidator::simulation::
+            ExecuteCudaCollisionSubstepForCertification(
+                    impl->cudaDeviceScene.DeviceData(),
+                    impl->cudaDeviceConfiguration.DeviceData(),
+                    initialEncoded, dt);
+    if (!gpu.success) {
+        result.diagnostic = gpu.diagnostic;
+        return result;
+    }
+    const auto *cpuBytes =
+            reinterpret_cast<const std::uint8_t *>(&cpuEncoded);
+    const auto *gpuBytes =
+            reinterpret_cast<const std::uint8_t *>(
+                    &gpu.finalState);
+    std::size_t mismatch = 0u;
+    while (mismatch < sizeof(cpuEncoded) &&
+           cpuBytes[mismatch] == gpuBytes[mismatch]) {
+        ++mismatch;
+    }
+    result.checkedBytes = sizeof(cpuEncoded);
+    if (mismatch != sizeof(cpuEncoded)) {
+        result.firstMismatchByte = mismatch;
+        result.cpuByte = cpuBytes[mismatch];
+        result.gpuByte = gpuBytes[mismatch];
+        result.diagnostic =
+                "CUDA collision substep diverged at candidate byte " +
+                std::to_string(mismatch) + " dt=" +
+                std::to_string(dt) +
+                " cpu_position=(" +
+                std::to_string(cpuEncoded.body.current.position.x) + "," +
+                std::to_string(cpuEncoded.body.current.position.y) + "," +
+                std::to_string(cpuEncoded.body.current.position.z) + ")" +
+                " gpu_position=(" +
+                std::to_string(gpu.finalState.body.current.position.x) + "," +
+                std::to_string(gpu.finalState.body.current.position.y) + "," +
+                std::to_string(gpu.finalState.body.current.position.z) + ")" +
+                " cpu_replacements=" +
+                std::to_string(
+                        cpuEncoded.body.collisionReplacements.count) +
+                " gpu_replacements=" +
+                std::to_string(
+                        gpu.finalState.body.
+                                collisionReplacements.count);
+        return result;
+    }
+    result.success = true;
+    result.firstMismatchByte = SIZE_MAX;
+    result.diagnostic =
+            "CUDA collision substep is bit-exact";
+    return result;
+#endif
+}
+
+ReplayCudaVehiclePrefixDifferential
+ReplaySimulationSession::RunCudaPreCollisionDifferentialForTesting(
+        float dt) {
+    ReplayCudaVehiclePrefixDifferential result;
+#if !FOREVERVALIDATOR_HAS_CUDA
+    static_cast<void>(dt);
+    result.diagnostic =
+            "CUDA support is not compiled into this build";
+    return result;
+#else
+    if (impl->backend != forevervalidator::SimulationBackend::Cuda ||
+        !impl->instance.runtime ||
+        !impl->cudaDeviceConfiguration.Ready() || !(dt > 0.0f)) {
+        result.diagnostic =
+                "CUDA pre-collision differential prerequisites are not ready";
+        return result;
+    }
+    const auto initialRuntime =
+            impl->instance.runtime->CaptureRuntimeClone();
+    const auto cpuRuntime =
+            impl->instance.runtime->
+                    CapturePreCollisionReferenceForTesting(dt);
+    const auto cpuForceRuntime =
+            impl->instance.runtime->
+                    CaptureForcePassReferenceForTesting(dt);
+    if (!initialRuntime.has_value() || !cpuRuntime.has_value() ||
+        !cpuForceRuntime.has_value()) {
+        result.diagnostic =
+                "CPU pre-collision reference failed";
+        return result;
+    }
+    ReplaySimulationInstanceClone initial;
+    initial.race = impl->instance.race.CaptureRuntimeClone();
+    initial.runtime = *initialRuntime;
+    initial.incrementalRespawnCount =
+            impl->instance.incrementalRespawnCount;
+    ReplaySimulationInstanceClone cpu = initial;
+    cpu.runtime = *cpuRuntime;
+    ReplaySimulationInstanceClone cpuForce = initial;
+    cpuForce.runtime = *cpuForceRuntime;
+    const std::uint32_t randomState =
+            tmnf::simulation::CaptureGameRandomState();
+    forevervalidator::simulation::CudaCandidateState initialEncoded;
+    forevervalidator::simulation::CudaCandidateState cpuEncoded;
+    forevervalidator::simulation::CudaCandidateState cpuForceEncoded;
+    if (forevervalidator::simulation::EncodeCudaCandidateState(
+                initial, impl->incrementalValidationSeed,
+                0u, 0u, randomState, &initialEncoded) !=
+                        forevervalidator::simulation::
+                                CudaStateConversionResult::Success ||
+        forevervalidator::simulation::EncodeCudaCandidateState(
+                cpu, impl->incrementalValidationSeed,
+                0u, 0u, randomState, &cpuEncoded) !=
+                        forevervalidator::simulation::
+                                CudaStateConversionResult::Success ||
+        forevervalidator::simulation::EncodeCudaCandidateState(
+                cpuForce, impl->incrementalValidationSeed,
+                0u, 0u, randomState, &cpuForceEncoded) !=
+                        forevervalidator::simulation::
+                                CudaStateConversionResult::Success) {
+        result.diagnostic =
+                "CUDA pre-collision state conversion failed";
+        return result;
+    }
+    initialEncoded.vehicle.mobil.absorbContactEnabled = true;
+    initialEncoded.vehicle.mobil.physicsUpdatesEnabled = true;
+    const auto gpuForce = forevervalidator::simulation::
+            ExecuteCudaVehicleForcePassForCertification(
+                    impl->cudaDeviceConfiguration.DeviceData(),
+                    initialEncoded, dt);
+    const auto gpu = forevervalidator::simulation::
+            ExecuteCudaPreCollisionForCertification(
+                    impl->cudaDeviceConfiguration.DeviceData(),
+                    initialEncoded, dt);
+    if (!gpu.success) {
+        result.diagnostic = gpu.diagnostic;
+        return result;
+    }
+    const auto *cpuBytes =
+            reinterpret_cast<const std::uint8_t *>(&cpuEncoded);
+    const auto *gpuBytes =
+            reinterpret_cast<const std::uint8_t *>(&gpu.finalState);
+    std::size_t mismatch = 0u;
+    while (mismatch < sizeof(cpuEncoded) &&
+           cpuBytes[mismatch] == gpuBytes[mismatch]) {
+        ++mismatch;
+    }
+    result.checkedBytes = sizeof(cpuEncoded);
+    if (mismatch != sizeof(cpuEncoded)) {
+        result.firstMismatchByte = mismatch;
+        result.cpuByte = cpuBytes[mismatch];
+        result.gpuByte = gpuBytes[mismatch];
+        const auto localSpeed = [](
+                const forevervalidator::simulation::
+                        CudaCandidateState &state) {
+            const GmMat3 &rotation = state.body.current.rotation;
+            const GmVec3 &speed = state.body.current.linearSpeed;
+            return GmVec3{
+                    rotation.basisX.x * speed.x +
+                            rotation.basisX.y * speed.y +
+                            rotation.basisX.z * speed.z,
+                    rotation.basisY.x * speed.x +
+                            rotation.basisY.y * speed.y +
+                            rotation.basisY.z * speed.z,
+                    rotation.basisZ.x * speed.x +
+                            rotation.basisZ.y * speed.y +
+                            rotation.basisZ.z * speed.z};
+        };
+        const GmVec3 cpuForceLocal = localSpeed(cpuForceEncoded);
+        const GmVec3 gpuForceLocal = localSpeed(gpuForce.finalState);
+        const GmVec3 initialLocal = localSpeed(initialEncoded);
+        result.diagnostic =
+                "CUDA pre-collision state diverged at candidate byte " +
+                std::to_string(mismatch) + " dt=" +
+                std::to_string(dt) +
+                " cpu_position=(" +
+                std::to_string(cpuEncoded.body.current.position.x) + "," +
+                std::to_string(cpuEncoded.body.current.position.y) + "," +
+                std::to_string(cpuEncoded.body.current.position.z) + ")" +
+                " gpu_position=(" +
+                std::to_string(gpu.finalState.body.current.position.x) + "," +
+                std::to_string(gpu.finalState.body.current.position.y) + "," +
+                std::to_string(gpu.finalState.body.current.position.z) + ")" +
+                " initial_linear=(" +
+                std::to_string(
+                        initialEncoded.body.current.linearSpeed.x) + "," +
+                std::to_string(
+                        initialEncoded.body.current.linearSpeed.y) + "," +
+                std::to_string(
+                        initialEncoded.body.current.linearSpeed.z) + ")" +
+                " cpu_forcepass_linear=(" +
+                std::to_string(
+                        cpuForceEncoded.body.current.linearSpeed.x) + "," +
+                std::to_string(
+                        cpuForceEncoded.body.current.linearSpeed.y) + "," +
+                std::to_string(
+                        cpuForceEncoded.body.current.linearSpeed.z) + ")" +
+                " cpu_forcepass_angular=(" +
+                std::to_string(
+                        cpuForceEncoded.body.current.angularSpeed.x) + "," +
+                std::to_string(
+                        cpuForceEncoded.body.current.angularSpeed.y) + "," +
+                std::to_string(
+                        cpuForceEncoded.body.current.angularSpeed.z) + ")" +
+                " cpu_linear=(" +
+                std::to_string(
+                        cpuEncoded.body.current.linearSpeed.x) + "," +
+                std::to_string(
+                        cpuEncoded.body.current.linearSpeed.y) + "," +
+                std::to_string(
+                        cpuEncoded.body.current.linearSpeed.z) + ")" +
+                " gpu_linear=(" +
+                std::to_string(
+                        gpu.finalState.body.current.linearSpeed.x) + "," +
+                std::to_string(
+                        gpu.finalState.body.current.linearSpeed.y) + "," +
+                std::to_string(
+                        gpu.finalState.body.current.linearSpeed.z) + ")" +
+                " cpu_force=(" +
+                std::to_string(cpuEncoded.body.current.force.x) + "," +
+                std::to_string(cpuEncoded.body.current.force.y) + "," +
+                std::to_string(cpuEncoded.body.current.force.z) + ")" +
+                " gpu_force=(" +
+                std::to_string(
+                        gpu.finalState.body.current.force.x) + "," +
+                std::to_string(
+                        gpu.finalState.body.current.force.y) + "," +
+                std::to_string(
+                        gpu.finalState.body.current.force.z) + ")" +
+                " gpu_forcepass_linear=(" +
+                std::to_string(
+                        gpuForce.finalState.body.current.linearSpeed.x) + "," +
+                std::to_string(
+                        gpuForce.finalState.body.current.linearSpeed.y) + "," +
+                std::to_string(
+                        gpuForce.finalState.body.current.linearSpeed.z) + ")" +
+                " gpu_forcepass_angular=(" +
+                std::to_string(
+                        gpuForce.finalState.body.current.angularSpeed.x) + "," +
+                std::to_string(
+                        gpuForce.finalState.body.current.angularSpeed.y) + "," +
+                std::to_string(
+                        gpuForce.finalState.body.current.angularSpeed.z) + ")" +
+                " cpu_forcepass_local=(" +
+                std::to_string(cpuForceLocal.x) + "," +
+                std::to_string(cpuForceLocal.y) + "," +
+                std::to_string(cpuForceLocal.z) + ")" +
+                " gpu_forcepass_local=(" +
+                std::to_string(gpuForceLocal.x) + "," +
+                std::to_string(gpuForceLocal.y) + "," +
+                std::to_string(gpuForceLocal.z) + ")" +
+                " initial_local=(" +
+                std::to_string(initialLocal.x) + "," +
+                std::to_string(initialLocal.y) + "," +
+                std::to_string(initialLocal.z) + ")" +
+                " speed_cap=" +
+                std::to_string(initialEncoded.vehicle.linearSpeedCap) +
+                " cpu_mass=" +
+                std::to_string(cpuForceEncoded.body.parameters.mass) +
+                " gpu_mass=" +
+                std::to_string(
+                        gpuForce.finalState.body.parameters.mass) +
+                " cpu_accum_impulse=(" +
+                std::to_string(
+                        cpuForceEncoded.vehicle.forceAccumulators.
+                                impulse.x) + "," +
+                std::to_string(
+                        cpuForceEncoded.vehicle.forceAccumulators.
+                                impulse.y) + "," +
+                std::to_string(
+                        cpuForceEncoded.vehicle.forceAccumulators.
+                                impulse.z) + ")" +
+                " gpu_accum_impulse=(" +
+                std::to_string(
+                        gpuForce.finalState.vehicle.forceAccumulators.
+                                impulse.x) + "," +
+                std::to_string(
+                        gpuForce.finalState.vehicle.forceAccumulators.
+                                impulse.y) + "," +
+                std::to_string(
+                        gpuForce.finalState.vehicle.forceAccumulators.
+                                impulse.z) + ")" +
+                " special=(" +
+                std::to_string(
+                        initialEncoded.vehicle.controls.
+                                specialContactResponseGate) + "," +
+                std::to_string(static_cast<unsigned>(
+                        initialEncoded.vehicle.controls.
+                                specialContactResponseMode)) + ")" +
+                " cpu_splash=(" +
+                std::to_string(
+                        cpuForceEncoded.vehicle.water.splashPending) + "," +
+                std::to_string(
+                        cpuForceEncoded.vehicle.water.
+                                splashLocalSpeed.x) + "," +
+                std::to_string(
+                        cpuForceEncoded.vehicle.water.
+                                splashLocalSpeed.y) + "," +
+                std::to_string(
+                        cpuForceEncoded.vehicle.water.
+                                splashLocalSpeed.z) + ")" +
+                " gpu_splash=(" +
+                std::to_string(
+                        gpuForce.finalState.vehicle.water.
+                                splashPending) + "," +
+                std::to_string(
+                        gpuForce.finalState.vehicle.water.
+                                splashLocalSpeed.x) + "," +
+                std::to_string(
+                        gpuForce.finalState.vehicle.water.
+                                splashLocalSpeed.y) + "," +
+                std::to_string(
+                        gpuForce.finalState.vehicle.water.
+                                splashLocalSpeed.z) + ")";
+        return result;
+    }
+    result.success = true;
+    result.firstMismatchByte = SIZE_MAX;
+    result.diagnostic =
+            "CUDA pre-collision state is bit-exact";
+    return result;
+#endif
+}
+
+ReplayCudaVehiclePrefixDifferential
+ReplaySimulationSession::RunCudaTimelineTickDifferentialForTesting(
+        const ReplayControlTick &tick) {
+    ReplayCudaVehiclePrefixDifferential result;
+#if !FOREVERVALIDATOR_HAS_CUDA
+    static_cast<void>(tick);
+    result.diagnostic =
+            "CUDA support is not compiled into this build";
+    return result;
+#else
+    if (impl->backend != forevervalidator::SimulationBackend::Cuda ||
+        !impl->instance.runtime ||
+        !impl->cudaDeviceConfiguration.Ready() ||
+        !impl->cudaDeviceScene.Ready()) {
+        result.diagnostic =
+                "CUDA timeline-tick differential prerequisites are not ready";
+        return result;
+    }
+    const auto runtime =
+            impl->instance.runtime->CaptureRuntimeClone();
+    if (!runtime.has_value()) {
+        result.diagnostic =
+                "CPU timeline-tick initial capture failed";
+        return result;
+    }
+    ReplaySimulationInstanceClone initial;
+    initial.race = impl->instance.race.CaptureRuntimeClone();
+    initial.runtime = *runtime;
+    initial.incrementalRespawnCount =
+            impl->instance.incrementalRespawnCount;
+    const std::uint32_t initialRandomState =
+            tmnf::simulation::CaptureGameRandomState();
+
+    const ReplaySimulationStepExecution execution =
+            impl->instance.runtime->
+                    StepOptimizedCpuNativeBinary32(tick);
+    if (execution.result != ReplaySimulationRunResult::Success) {
+        impl->instance.race.RestoreRuntimeClone(initial.race);
+        impl->instance.runtime->RestoreRuntimeClone(initial.runtime);
+        tmnf::simulation::RestoreGameRandomState(
+                initialRandomState);
+        result.diagnostic =
+                "CPU timeline-tick reference execution failed";
+        return result;
+    }
+    impl->instance.incrementalRespawnCount +=
+            execution.respawnExecutedCount;
+    const auto cpuRuntime =
+            impl->instance.runtime->CaptureRuntimeClone();
+    ReplaySimulationInstanceClone cpu;
+    cpu.race = impl->instance.race.CaptureRuntimeClone();
+    cpu.incrementalRespawnCount =
+            impl->instance.incrementalRespawnCount;
+    const std::uint32_t finalRandomState =
+            tmnf::simulation::CaptureGameRandomState();
+    if (!cpuRuntime.has_value() ||
+        !impl->instance.race.PrepareRuntimeCloneRestore(
+                initial.race) ||
+        !impl->instance.runtime->PrepareRuntimeCloneRestore(
+                initial.runtime)) {
+        result.diagnostic =
+                "CPU timeline-tick final capture or restoration failed";
+        return result;
+    }
+    cpu.runtime = *cpuRuntime;
+    impl->instance.race.RestoreRuntimeClone(initial.race);
+    impl->instance.runtime->RestoreRuntimeClone(initial.runtime);
+    impl->instance.incrementalRespawnCount =
+            initial.incrementalRespawnCount;
+    tmnf::simulation::RestoreGameRandomState(initialRandomState);
+
+    forevervalidator::simulation::CudaCandidateState initialEncoded;
+    forevervalidator::simulation::CudaCandidateState cpuEncoded;
+    if (forevervalidator::simulation::EncodeCudaCandidateState(
+                initial, impl->incrementalValidationSeed,
+                0u, 0u, initialRandomState,
+                &initialEncoded) !=
+                        forevervalidator::simulation::
+                                CudaStateConversionResult::Success ||
+        forevervalidator::simulation::EncodeCudaCandidateState(
+                cpu, impl->incrementalValidationSeed,
+                1u, 0u, finalRandomState,
+                &cpuEncoded) !=
+                        forevervalidator::simulation::
+                                CudaStateConversionResult::Success) {
+        result.diagnostic =
+                "CUDA timeline-tick state conversion failed";
+        return result;
+    }
+    forevervalidator::simulation::CudaCandidateTimelineInput input;
+    input.initialState = initialEncoded;
+    input.ticks.push_back(
+            forevervalidator::simulation::
+                    FlattenCudaControlTick(tick));
+    const forevervalidator::simulation::CudaTimelineBatchResult gpu =
+            forevervalidator::simulation::ExecuteCudaTimelineBatch(
+                    impl->cudaDeviceScene.DeviceData(),
+                    impl->cudaDeviceConfiguration.DeviceData(),
+                    {input});
+    if (gpu.status !=
+                forevervalidator::simulation::
+                        CudaTimelineStatus::Success ||
+        gpu.candidates.size() != 1u ||
+        gpu.candidates[0].status !=
+                forevervalidator::simulation::
+                        CudaTimelineStatus::Success) {
+        result.diagnostic =
+                "CUDA timeline-tick execution failed: " +
+                gpu.diagnostic;
+        return result;
+    }
+    const forevervalidator::simulation::CudaCandidateState &gpuState =
+            gpu.candidates[0].finalState;
+    const auto *cpuBytes =
+            reinterpret_cast<const std::uint8_t *>(&cpuEncoded);
+    const auto *gpuBytes =
+            reinterpret_cast<const std::uint8_t *>(&gpuState);
+    std::size_t mismatch = 0u;
+    while (mismatch < sizeof(cpuEncoded) &&
+           cpuBytes[mismatch] == gpuBytes[mismatch]) {
+        ++mismatch;
+    }
+    result.checkedBytes = sizeof(cpuEncoded);
+    if (mismatch != sizeof(cpuEncoded)) {
+        result.firstMismatchByte = mismatch;
+        result.cpuByte = cpuBytes[mismatch];
+        result.gpuByte = gpuBytes[mismatch];
+        result.diagnostic =
+                "CUDA complete timeline tick diverged at candidate byte " +
+                std::to_string(mismatch) +
+                " time_ms=" + std::to_string(tick.timeMs) +
+                " controls=(" +
+                std::to_string(tick.controls.lowSpeedGateA) + "," +
+                std::to_string(tick.controls.lowSpeedGateB) + "," +
+                std::to_string(tick.controls.steering) + ")" +
+                " actions=" +
+                std::to_string(
+                        forevervalidator::simulation::
+                                FlattenCudaControlTick(tick).
+                                        actionFlags) +
+                " cpu_position=(" +
+                std::to_string(cpuEncoded.body.current.position.x) + "," +
+                std::to_string(cpuEncoded.body.current.position.y) + "," +
+                std::to_string(cpuEncoded.body.current.position.z) + ")" +
+                " gpu_position=(" +
+                std::to_string(gpuState.body.current.position.x) + "," +
+                std::to_string(gpuState.body.current.position.y) + "," +
+                std::to_string(gpuState.body.current.position.z) + ")" +
+                " cpu_burnout=(" +
+                std::to_string(
+                        static_cast<std::uint32_t>(
+                                cpuEncoded.vehicle.gearedDrive.
+                                        burnoutPhase)) + "," +
+                std::to_string(
+                        cpuEncoded.vehicle.gearedDrive.
+                                burnoutStartTick) + "," +
+                std::to_string(
+                        cpuEncoded.vehicle.gearedDrive.
+                                burnoutExitStartTick) + ")" +
+                " gpu_burnout=(" +
+                std::to_string(
+                        static_cast<std::uint32_t>(
+                                gpuState.vehicle.gearedDrive.
+                                        burnoutPhase)) + "," +
+                std::to_string(
+                        gpuState.vehicle.gearedDrive.
+                                burnoutStartTick) + "," +
+                std::to_string(
+                        gpuState.vehicle.gearedDrive.
+                                burnoutExitStartTick) + ")";
+        result.diagnostic +=
+                " cpu_splash=(" +
+                std::to_string(
+                        cpuEncoded.vehicle.frameHistory.physicsPrevious.
+                                waterSplashEventCounter) + "," +
+                std::to_string(
+                        cpuEncoded.vehicle.frameHistory.physicsCurrent.
+                                waterSplashEventCounter) + "," +
+                std::to_string(
+                        cpuEncoded.vehicle.frameHistory.asyncCurrent.
+                                waterSplashEventCounter) + "," +
+                std::to_string(
+                        cpuEncoded.vehicle.frameHistory.asyncPrevious.
+                                waterSplashEventCounter) + ")" +
+                " gpu_splash=(" +
+                std::to_string(
+                        gpuState.vehicle.frameHistory.physicsPrevious.
+                                waterSplashEventCounter) + "," +
+                std::to_string(
+                        gpuState.vehicle.frameHistory.physicsCurrent.
+                                waterSplashEventCounter) + "," +
+                std::to_string(
+                        gpuState.vehicle.frameHistory.asyncCurrent.
+                                waterSplashEventCounter) + "," +
+                std::to_string(
+                        gpuState.vehicle.frameHistory.asyncPrevious.
+                                waterSplashEventCounter) + ")";
+        return result;
+    }
+    result.success = true;
+    result.firstMismatchByte = SIZE_MAX;
+    result.diagnostic =
+            "CUDA complete timeline tick is bit-exact";
+    return result;
+#endif
+}
+
+bool ReplaySimulationSession::StageCudaTimelinePrefixForTesting(
+        const ReplayControlTick &tick) {
+    return impl->backend ==
+                    forevervalidator::SimulationBackend::Cuda &&
+            impl->instance.runtime &&
+            impl->instance.runtime->PrepareStepForTesting(tick);
+}
+
+bool ReplaySimulationSession::StageCollisionSubstepForTesting(
+        float dt) {
+    if (impl->backend !=
+                forevervalidator::SimulationBackend::Cuda ||
+        !impl->instance.runtime || !(dt > 0.0f)) {
+        return false;
+    }
+    const auto after =
+            impl->instance.runtime->
+                    CaptureCollisionSubstepReferenceForTesting(dt);
+    if (!after.has_value() ||
+        !impl->instance.runtime->PrepareRuntimeCloneRestore(*after)) {
+        return false;
+    }
+    impl->instance.runtime->RestoreRuntimeClone(*after);
+    return true;
+}
+
+bool ReplaySimulationSession::StageCudaPreCollisionForTesting(float dt) {
+#if !FOREVERVALIDATOR_HAS_CUDA
+    (void)dt;
+    return false;
+#else
+    if (impl->backend != forevervalidator::SimulationBackend::Cuda ||
+        !impl->instance.runtime ||
+        !impl->cudaDeviceConfiguration.Ready()) {
+        return false;
+    }
+    const auto runtime =
+            impl->instance.runtime->CaptureRuntimeClone();
+    if (!runtime.has_value()) return false;
+    ReplaySimulationInstanceClone initial;
+    initial.race = impl->instance.race.CaptureRuntimeClone();
+    initial.runtime = *runtime;
+    initial.incrementalRespawnCount =
+            impl->instance.incrementalRespawnCount;
+    forevervalidator::simulation::CudaCandidateState encoded;
+    if (forevervalidator::simulation::EncodeCudaCandidateState(
+                initial, impl->incrementalValidationSeed,
+                0u, 0u,
+                tmnf::simulation::CaptureGameRandomState(),
+                &encoded) != forevervalidator::simulation::
+                        CudaStateConversionResult::Success) {
+        return false;
+    }
+    encoded.vehicle.mobil.absorbContactEnabled = true;
+    encoded.vehicle.mobil.physicsUpdatesEnabled = true;
+    if (!(dt > 0.0f)) {
+        dt = static_cast<float>(
+                     encoded.world.schemePeriodMs) *
+                0.001f;
+    }
+    const forevervalidator::simulation::CudaPhysicsStepExecution
+            staged = forevervalidator::simulation::
+                    ExecuteCudaPreCollisionForCertification(
+                    impl->cudaDeviceConfiguration.DeviceData(),
+                    encoded, dt);
+    if (!staged.success) return false;
+    ReplaySimulationInstanceClone decoded;
+    if (forevervalidator::simulation::DecodeCudaCandidateState(
+                staged.finalState, &decoded) !=
+            forevervalidator::simulation::
+                    CudaStateConversionResult::Success ||
+        !PrepareRuntimeCloneRestore(decoded)) {
+        return false;
+    }
+    RestoreRuntimeClone(std::move(decoded));
+    return true;
+#endif
+}
+
+std::uint64_t ReplaySimulationInstanceSemanticHash(
+        const ReplaySimulationInstanceClone &clone) {
+    constexpr std::uint64_t Offset = 1469598103934665603ull;
+    constexpr std::uint64_t Prime = 1099511628211ull;
+    std::uint64_t hash = Offset;
+    const std::array<std::uint64_t, 2u> components = {
+            ReplayRaceRuntimeSemanticHash(clone.race),
+            ReplaySimulationRuntimeSemanticHash(clone.runtime)};
+    for (std::uint64_t component : components) {
+        for (unsigned shift = 0u; shift < 64u; shift += 8u) {
+            hash ^= static_cast<std::uint8_t>(component >> shift);
+            hash *= Prime;
+        }
+    }
+    std::uint32_t respawns = clone.incrementalRespawnCount;
+    for (unsigned shift = 0u; shift < 32u; shift += 8u) {
+        hash ^= static_cast<std::uint8_t>(respawns >> shift);
+        hash *= Prime;
+    }
+    for (unsigned shift = 0u; shift < 32u; shift += 8u) {
+        hash ^= static_cast<std::uint8_t>(
+                clone.randomState >> shift);
+        hash *= Prime;
+    }
+    return hash;
 }

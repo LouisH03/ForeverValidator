@@ -18,6 +18,7 @@ int main() {
                   2u);
     static_assert(static_cast<std::uint8_t>(
                           SimulationBackend::SpeculativeTicking) == 3u);
+    static_assert(static_cast<std::uint8_t>(SimulationBackend::Cuda) == 4u);
 
     if (ResolveLeafBackend(SimulationBackend::Reference) !=
         SimulationBackend::Reference) {
@@ -34,6 +35,29 @@ int main() {
         std::cerr << "SpeculativeTicking silently resolved to another backend\n";
         return 1;
     }
+    if (ResolveLeafBackend(SimulationBackend::Cuda) !=
+        SimulationBackend::Cuda) {
+        std::cerr << "Cuda silently resolved to a CPU backend\n";
+        return 1;
+    }
+    if (!IsSimulationBackendSupported(SimulationBackend::Cuda)) {
+        std::cerr << "Cuda was not registered as selectable\n";
+        return 1;
+    }
+    const forevervalidator::CudaBackendDiagnostics cuda =
+            forevervalidator::QueryCudaBackendDiagnostics();
+#if FOREVERVALIDATOR_HAS_CUDA
+    if (cuda.status == forevervalidator::CudaBackendStatus::NotCompiled) {
+        std::cerr << "CUDA-enabled build reported NotCompiled\n";
+        return 1;
+    }
+#else
+    if (cuda.status != forevervalidator::CudaBackendStatus::NotCompiled ||
+        cuda.diagnostic.empty()) {
+        std::cerr << "CPU-only CUDA diagnostics are not explicit\n";
+        return 1;
+    }
+#endif
     if (!IsSimulationBackendSupported(
                 SimulationBackend::SpeculativeTicking)) {
         std::cerr << "SpeculativeTicking was not registered as supported\n";

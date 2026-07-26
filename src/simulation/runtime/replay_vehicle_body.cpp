@@ -203,7 +203,13 @@ CHmsCorpus &ReplayVehicleBody::Corpus() {
 
 ReplayVehicleBody::RuntimeClone
 ReplayVehicleBody::CaptureRuntimeClone() const {
-    return dyna.CaptureRuntimeClone();
+    RuntimeClone clone;
+    static_cast<CHmsDyna::RuntimeClone &>(clone) =
+            dyna.CaptureRuntimeClone();
+    clone.physicalParameters =
+            item.Solid()->Physical().Parameters();
+    clone.corpusLocalIso = corpus.LocalLocation();
+    return clone;
 }
 
 bool ReplayVehicleBody::PrepareRuntimeCloneRestore(
@@ -212,5 +218,9 @@ bool ReplayVehicleBody::PrepareRuntimeCloneRestore(
 }
 
 void ReplayVehicleBody::RestoreRuntimeClone(RuntimeClone clone) noexcept {
-    dyna.RestoreRuntimeClone(std::move(clone));
+    item.Solid()->Physical().Parameters() =
+            clone.physicalParameters;
+    corpus.RestoreLocalLocation(clone.corpusLocalIso);
+    dyna.RestoreRuntimeClone(
+            std::move(static_cast<CHmsDyna::RuntimeClone &>(clone)));
 }

@@ -1,0 +1,90 @@
+#ifndef FOREVERVALIDATOR_CUDA_ENVIRONMENT_CUH
+#define FOREVERVALIDATOR_CUDA_ENVIRONMENT_CUH
+
+#include "simulation/backends/cuda/cuda_state_layout.h"
+#include "simulation/backends/cuda/cuda_static_configuration.h"
+#include "simulation/backends/cuda/cuda_tuning.cuh"
+
+namespace forevervalidator::simulation::cuda::environment {
+
+__device__ inline void AddScaled(
+        GmVec3 &accumulator,
+        GmVec3 value,
+        float scale) {
+    value.x = value.x * scale;
+    value.y = value.y * scale;
+    value.z = scale * value.z;
+    accumulator.x = value.x + accumulator.x;
+    accumulator.y = value.y + accumulator.y;
+    accumulator.z = value.z + accumulator.z;
+}
+
+__device__ inline bool ForceFieldValue(
+        const CudaForceField &field,
+        const GmVec3 &position,
+        GmVec3 &value) {
+    if (field.type == CudaForceFieldType::Uniform) {
+        value = field.vector;
+        return true;
+    }
+    const GmVec3 delta = {
+            field.vector.x - position.x,
+            field.vector.y - position.y,
+            field.vector.z - position.z,
+    };
+    const float distanceSquared =
+            (delta.z * delta.z + delta.x * delta.x) +
+            delta.y * delta.y;
+    const float radiusSquared = field.radius * field.radius;
+    if (!(radiusSquared > distanceSquared) ||
+        !(distanceSquared > 1.0e-10f)) {
+        return false;
+    }
+    const float scale = -field.strength / distanceSquared;
+    value.x = delta.x * scale;
+    value.y = delta.y * scale;
+    value.z = scale * delta.z;
+    return true;
+}
+
+__device__ inline void BeginForcePass(
+        CudaDynamicBodyState &body,
+        const CudaPackedStaticConfigurationHeader *configuration) {
+    body.write = body.current;
+    GmVec3 accumulatedForce{};
+    const CudaForceField *fields =
+            tuning::Section<CudaForceField>(
+                    configuration, configuration->forceFields);
+    const float fieldScale =
+            body.parameters.forceScale * body.parameters.mass;
+    for (std::uint32_t index = 0u;
+         index < configuration->forceFields.count; ++index) {
+        GmVec3 value;
+        if (ForceFieldValue(
+                    fields[index], body.current.position, value)) {
+            AddScaled(accumulatedForce, value, fieldScale);
+        }
+    }
+    AddScaled(
+            accumulatedForce, body.current.linearSpeed,
+            -configuration->zoneLinearDampingCoefficient *
+                    body.parameters.linearDampingScale);
+    body.current.force = accumulatedForce;
+
+    if (body.dynamicType ==
+        static_cast<std::uint32_t>(
+                CHmsDyna::EDynamicType_FullAngularDynamics)) {
+        GmVec3 dampingTorque = body.current.angularSpeed;
+        const float scale =
+                -configuration->zoneAngularDampingCoefficient *
+                body.parameters.angularDampingScale;
+        dampingTorque.x = dampingTorque.x * scale;
+        dampingTorque.y = dampingTorque.y * scale;
+        dampingTorque.z = scale * dampingTorque.z;
+        body.current.torque = dampingTorque;
+    }
+}
+
+}  // namespace forevervalidator::simulation::cuda::environment
+
+#endif

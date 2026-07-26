@@ -77,6 +77,9 @@ enum class ReplayValidationExecutionResult {
     MapStartUnavailable,
     ObservationAllocationFailed,
     DeterministicExecutionUnavailable,
+    CudaUnavailable,
+    CudaInitializationFailed,
+    CudaExecutionFailed,
 };
 
 ReplayValidationExecutionResult ExecuteReplayValidation(

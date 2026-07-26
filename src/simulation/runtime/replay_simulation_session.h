@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include <forevervalidator/experimental/physics_sandbox.h>
@@ -15,6 +16,9 @@
 #include "simulation/runtime/replay_simulation_runtime.h"
 #include "simulation/runtime/replay_trajectory_observation.h"
 #include "simulation/runtime/replay_dyna_frame_state.h"
+#include "simulation/backends/cuda/cuda_scene_storage.h"
+#include "simulation/backends/cuda/cuda_static_configuration_storage.h"
+#include "simulation/backends/cuda/cuda_timeline_executor.h"
 #include "engine/scene/static_scene_model.h"
 #include "engine/game/trackmania_race.h"
 struct ReplaySimulationTimelineResult {
@@ -36,6 +40,15 @@ struct ReplaySimulationStateView {
     std::uint32_t respawnCount = 0u;
 };
 
+struct ReplayCudaVehiclePrefixDifferential {
+    bool success = false;
+    std::size_t checkedBytes = 0u;
+    std::size_t firstMismatchByte = SIZE_MAX;
+    std::uint8_t cpuByte = 0u;
+    std::uint8_t gpuByte = 0u;
+    std::string diagnostic;
+};
+
 struct ReplayStaticCollisionTriangle {
     GmVec3 a{};
     GmVec3 b{};
@@ -46,7 +59,11 @@ struct ReplaySimulationInstanceClone {
     CTrackManiaRace::RuntimeClone race;
     ReplaySimulationRuntime::RuntimeClone runtime;
     std::uint32_t incrementalRespawnCount = 0u;
+    std::uint32_t randomState = 1u;
 };
+
+std::uint64_t ReplaySimulationInstanceSemanticHash(
+        const ReplaySimulationInstanceClone &clone);
 
 void ClassifyPhysicsSandboxRenderLayers(
         forevervalidator::experimental::PhysicsSandboxRenderScene &scene);
@@ -84,6 +101,48 @@ public:
     std::optional<OptimizedCpuStaticSceneFingerprint>
             CaptureOptimizedCpuStaticSceneFingerprintForTesting(
                     void) const noexcept;
+    std::optional<
+            forevervalidator::simulation::CudaSceneTransferMetrics>
+            CudaSceneTransferMetricsForTesting(void) const;
+    std::optional<forevervalidator::simulation::
+                          CudaStaticConfigurationTransferMetrics>
+            CudaStaticConfigurationTransferMetricsForTesting(void) const;
+    const std::string &CudaInitializationDiagnostic() const noexcept;
+    std::optional<forevervalidator::simulation::
+                          CudaTimelineExecutionMetrics>
+            CudaTimelineMetricsForTesting(void) const;
+    forevervalidator::simulation::CudaTimelineBatchResult
+            ExecuteCudaCandidateBatchForTesting(
+                    const std::vector<ReplayControlTick> &ticks,
+                    std::uint32_t candidateCount,
+                    bool mutateControls,
+                    std::uint64_t initialControlCursor,
+                    bool cancellationRequested = false);
+    ReplayCudaVehiclePrefixDifferential
+            RunCudaCandidateBatchDifferentialForTesting(
+                    const std::vector<ReplayControlTick> &ticks,
+                    std::uint32_t candidateCount,
+                    bool mutateControls,
+                    std::uint64_t initialControlCursor);
+    ReplayCudaVehiclePrefixDifferential
+            RunCudaVehiclePrefixDifferentialForTesting(float dt);
+    ReplayCudaVehiclePrefixDifferential
+            RunCudaVehicleForceDifferentialForTesting(float dt);
+    ReplayCudaVehiclePrefixDifferential
+            RunCudaCollisionDifferentialForTesting(void);
+    ReplayCudaVehiclePrefixDifferential
+            RunCudaPhysicsStepDifferentialForTesting(void);
+    ReplayCudaVehiclePrefixDifferential
+            RunCudaCollisionSubstepDifferentialForTesting(float dt);
+    ReplayCudaVehiclePrefixDifferential
+            RunCudaPreCollisionDifferentialForTesting(float dt);
+    ReplayCudaVehiclePrefixDifferential
+            RunCudaTimelineTickDifferentialForTesting(
+                    const ReplayControlTick &tick);
+    bool StageCudaTimelinePrefixForTesting(
+            const ReplayControlTick &tick);
+    bool StageCollisionSubstepForTesting(float dt);
+    bool StageCudaPreCollisionForTesting(float dt = 0.0f);
     const std::vector<ReplayStaticCollisionTriangle> &
             StaticCollisionTriangles() const noexcept;
     forevervalidator::experimental::PhysicsSandboxRenderSceneHandle

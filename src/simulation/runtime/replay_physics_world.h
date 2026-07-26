@@ -34,6 +34,9 @@ public:
             bool vehicleForceCallbacksEnabled);
     void AddVehicleBody(CHmsCorpus &corpus);
     void SetSimulationTime(const ReplayControlTick &tick);
+    void InstallSimulationTimeAsCurrent() {
+        commandBuffer_.InstallAsCurrent();
+    }
     void Step();
     void StepOptimizedCpu();
     void StepOptimizedCpuNativeBinary32(

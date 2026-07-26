@@ -1,10 +1,14 @@
 #include "simulation/runtime/replay_simulation_runtime.h"
 
 #include "simulation/backends/optimized_cpu/optimized_cpu_vehicle_forces.h"
+#include "simulation/backends/cuda/cuda_backend.h"
+#include "simulation/backends/cuda/cuda_vehicle_cpu_reference.h"
+#include <cstring>
 #include <new>
 #include <utility>
 
 #include "engine/physics/dynamics/hms_item.h"
+#include "engine/physics/collision/gm_collision_buffer.h"
 #include "simulation/backends/simulation_backend.h"
 #include "simulation/backends/optimized_cpu/optimized_cpu_static_surface_transform_cache.h"
 #include "simulation/runtime/replay_environment.h"
@@ -15,6 +19,254 @@
 #include "simulation/runtime/replay_validation_spawn.h"
 #include "engine/game/trackmania_race.h"
 namespace {
+
+class ProjectionHash {
+public:
+    template<typename T>
+    void Add(const T &value) noexcept {
+        AddBytes(&value, sizeof(value));
+    }
+
+    template<typename T>
+    void AddOptional(const std::optional<T> &value) noexcept {
+        const bool present = value.has_value();
+        Add(present);
+        if (present) {
+            Add(*value);
+        }
+    }
+
+    template<typename T>
+    void AddVector(const std::vector<T> &values) noexcept {
+        Add(values.size());
+        for (const T &value : values) {
+            Add(value);
+        }
+    }
+
+    void AddBoolVector(const std::vector<bool> &values) noexcept {
+        Add(values.size());
+        for (bool value : values) {
+            Add(value);
+        }
+    }
+
+    std::uint64_t Value() const noexcept { return value_; }
+
+private:
+    void AddBytes(const void *data, std::size_t size) noexcept {
+        const auto *bytes = static_cast<const unsigned char *>(data);
+        for (std::size_t index = 0u; index < size; ++index) {
+            value_ ^= bytes[index];
+            value_ *= 1099511628211ull;
+        }
+    }
+
+    std::uint64_t value_ = 1469598103934665603ull;
+};
+
+std::uint64_t HashDynamicBody(
+        const ReplayVehicleBody::RuntimeClone &body) {
+    ProjectionHash hash;
+    hash.AddOptional(body.maxAngularSpeed);
+    hash.Add(body.dynaParams);
+    hash.Add(body.physicalParameters);
+    hash.Add(body.tempState);
+    hash.Add(body.writeState);
+    hash.Add(body.currentState);
+    hash.AddVector(body.pendingCollisionReplacements);
+    hash.Add(body.isDynamicActive);
+    hash.Add(body.dynamicType);
+    hash.Add(body.corpusLocalIso);
+    return hash.Value();
+}
+
+void AddRaceProgress(ProjectionHash &hash,
+                     const ReplayRaceProgress &progress) {
+    hash.Add(progress.installedTriggerCount);
+    hash.Add(progress.preparedEventCount);
+    hash.Add(progress.checkpointCount);
+    hash.Add(progress.finishCount);
+    hash.Add(progress.freewheelClearCount);
+    hash.Add(progress.lastBlockRole);
+    hash.Add(progress.lastPrepareTimeMs);
+    hash.Add(progress.lastAcceptedBlockId);
+    hash.Add(progress.lastContactBlockId);
+    hash.Add(progress.currentLapCheckpointCount);
+    hash.Add(progress.totalCheckpointEventCount);
+    hash.Add(progress.completedLapCount);
+    hash.Add(progress.requiredLapCount);
+    hash.Add(progress.requiredCheckpointCount);
+    hash.Add(progress.raceCompleted);
+}
+
+void AddStuntState(ProjectionHash &hash,
+                   const ReplayStuntSimulationState &state) {
+    hash.Add(state.tickTimeMs);
+    hash.Add(state.inputQueryTimeOffsetMs);
+    hash.Add(state.raceStart);
+    hash.Add(state.finishRace);
+    hash.Add(state.vehicleLocation);
+    hash.Add(state.forwardSpeed);
+    hash.Add(state.sideSpeed);
+    hash.Add(state.hasWheelContact);
+    hash.Add(state.hasBodyContact);
+    hash.Add(state.bodyContactVerticalAngle);
+    hash.Add(state.bodyContactHorizontalAngle);
+    hash.Add(state.noGroundFrictionGuard);
+    hash.Add(state.inputLastChangeTimeMs);
+}
+
+void AddStuntEvent(ProjectionHash &hash,
+                   const ReplayStuntEvent &event) {
+    hash.Add(event.figure);
+    hash.Add(event.degree);
+    hash.Add(event.score);
+    hash.Add(event.bonus);
+    hash.Add(event.straightLanding);
+    hash.Add(event.reverseLanding);
+    hash.Add(event.masterJump);
+    hash.Add(event.chain);
+}
+
+void AddStuntEvents(
+        ProjectionHash &hash,
+        const std::vector<ReplayStuntEvent> &events) {
+    hash.Add(events.size());
+    for (const ReplayStuntEvent &event : events) {
+        AddStuntEvent(hash, event);
+    }
+}
+
+void AddWheel(ProjectionHash &hash,
+              const CSceneVehicleCar::SSimulationWheel &wheel) {
+    hash.Add(wheel.killsLateralSpeedOnContact);
+    hash.Add(wheel.axle);
+    hash.Add(wheel.rollingRadius);
+    hash.Add(wheel.surfaceHandler.RestPose());
+    hash.Add(wheel.surfaceHandler.CurrentPose());
+    hash.Add(wheel.forceApplicationPoint);
+    hash.Add(wheel.realTimeState);
+    hash.Add(wheel.previousPhysicsState);
+    hash.Add(wheel.currentPhysicsState);
+    hash.Add(wheel.previousAsyncState);
+    hash.Add(wheel.asyncState);
+}
+
+
+void AddAirControl(ProjectionHash &hash,
+                   const CSceneVehicleCar::SAirControl &air) {
+    hash.Add(air.refreshMemory);
+    hash.Add(air.memoryTick);
+    hash.Add(air.memoryAngular);
+}
+
+void AddRadiusSteering(
+        ProjectionHash &hash,
+        const CSceneVehicleCar::SRadiusSteeringState &radius) {
+    hash.Add(radius.steerAngle);
+    hash.Add(radius.previousSteerSign);
+    hash.Add(radius.phase);
+}
+
+void AddSlipMemory(
+        ProjectionHash &hash,
+        const CSceneVehicleCar::SSlipMemoryState &slip) {
+    hash.Add(slip.active);
+    hash.Add(slip.lastTick);
+    hash.Add(slip.startTick);
+    hash.Add(slip.elapsedTicks);
+    hash.Add(slip.steeringMemoryTick);
+    hash.Add(slip.steeringMemorySlip);
+}
+
+std::uint64_t HashPowertrain(
+        const CSceneVehicleCar::RuntimeClone &car) {
+    ProjectionHash hash;
+    hash.Add(car.controls);
+    hash.Add(car.feedback);
+    hash.Add(car.integration);
+    hash.Add(car.engine);
+    hash.Add(car.turbo);
+    AddAirControl(hash, car.airControl);
+    AddRadiusSteering(hash, car.radiusSteering);
+    AddSlipMemory(hash, car.slipMemory);
+    hash.Add(car.gearedDrive);
+    hash.Add(car.lastComputeForcesTick);
+    hash.Add(car.dynaPartSprings);
+    hash.Add(car.forceAccumulators);
+    return hash.Value();
+}
+
+
+std::uint64_t HashVehicle(
+        const ReplayVehicleSimulation::RuntimeClone &vehicle) {
+    const CSceneVehicleCar::RuntimeClone &car = vehicle.car;
+    ProjectionHash hash;
+    hash.Add(car.vehicle.mobil);
+    hash.Add(car.vehicle.vehicleEvents);
+    hash.Add(car.vehicle.water);
+    hash.Add(car.vehicle.updateAsync);
+    hash.Add(car.vehicle.networked);
+    hash.Add(car.vehicle.predictionDelayTicks);
+    hash.AddOptional(car.vehicle.stateSampleWindow);
+    hash.Add(car.vehicle.asyncPeriodSeconds);
+    hash.Add(car.wheels.size());
+    for (const CSceneVehicleCar::SSimulationWheel &wheel : car.wheels) {
+        AddWheel(hash, wheel);
+    }
+    hash.Add(HashPowertrain(car));
+    hash.Add(car.linearSpeedCap);
+    hash.Add(car.frameHistory);
+    hash.Add(car.reverseGearSpeedThreshold);
+    hash.Add(car.contacts);
+    hash.AddBoolVector(vehicle.wheelSurfaces.movedByUpdateSurface);
+    return hash.Value();
+}
+
+
+std::uint64_t HashRace(const CTrackManiaRace::RuntimeClone &race) {
+    ProjectionHash hash;
+    hash.Add(race.player);
+    hash.AddVector(race.checkpointSlotsPassed);
+    hash.AddOptional(race.playerSpawnLocation);
+    hash.AddOptional(race.lastAcceptedSpawnLocation);
+    hash.Add(race.currentSpawnLocationInitialized);
+    hash.Add(race.preparedEventTimeMs);
+    hash.Add(race.replayPlayMode);
+    hash.Add(race.replayNbLaps);
+    AddRaceProgress(hash, race.progress);
+    hash.Add(race.replayStuntsEnabled);
+    hash.Add(race.replayStuntStateAvailable);
+    hash.Add(race.replayStuntsTimeLimitMs);
+    hash.Add(race.replayStuntsRaceStartTimeMs);
+    AddStuntState(hash, race.replayStuntState);
+    for (const CTrackManiaRace::ReplayStuntInputSnapshot &snapshot :
+         race.replayStuntInputHistory) {
+        hash.Add(snapshot.tickTimeMs);
+        hash.Add(snapshot.lastChangeTimeMs);
+    }
+    hash.Add(race.replayStuntInputHistorySize);
+    hash.Add(race.replayStuntLocationHistory);
+    hash.Add(race.replayStuntLocationHistorySize);
+    hash.Add(race.replayStuntPreviousLocation);
+    hash.Add(race.replayStuntTakeoffLocation);
+    hash.Add(race.replayStuntRotation);
+    hash.Add(race.replayStuntLandingDirection);
+    hash.Add(race.replayStuntTakeoffTick);
+    hash.Add(race.replayStuntLandingTick);
+    hash.Add(race.replayStuntPreviousLandingTick);
+    hash.Add(race.replayStuntChain);
+    hash.Add(race.replayStuntComboWindowMs);
+    hash.Add(race.replayStuntInProgress);
+    hash.Add(race.replayStuntMasterJump);
+    hash.Add(race.replayStuntBadLanding);
+    hash.AddOptional(race.replayStuntScoreAtTimeLimit);
+    hash.Add(race.replayStuntFigureScores);
+    hash.Add(race.stuntsScore);
+    AddStuntEvents(hash, race.stuntEvents);
+    return hash.Value();
+}
 
 CHmsItem::Properties ReplayVehicleItemProperties() {
     CHmsItem::Properties properties;
@@ -170,6 +422,11 @@ ReplaySimulationStepExecution ReplaySimulationRuntime::Step(
         const ReplayControlTick &tick) {
     State &state = *state_;
     ReplaySimulationStepExecution execution;
+    if (state.backend == forevervalidator::SimulationBackend::Cuda) {
+        execution.result =
+                ReplaySimulationRunResult::CudaExecutionFailed;
+        return execution;
+    }
     if (state.definition == nullptr || state.phase != Phase::Idle) {
         execution.result = ReplaySimulationRunResult::InvalidControlTimeline;
         return execution;
@@ -355,6 +612,44 @@ std::optional<std::uint32_t> ReplaySimulationRuntime::StuntsScore() const {
     return state_->race.StuntsScore();
 }
 
+std::uint32_t
+ReplaySimulationRuntime::DynamicCollisionCorpusCountForTesting(void) const {
+    const CHmsCollisionManager::SGroup *group =
+            state_->world.CollisionZone().GroupAtOrNull(
+                    static_cast<std::uint32_t>(
+                            CHmsItem::ECollisionGroup_Dynamic) -
+                    1u);
+    return group != nullptr ? group->NonStaticCorpusCount() : 0u;
+}
+
+bool ReplaySimulationRuntime::StepPhysicsKernelReferenceForTesting(
+        const ReplayControlTick &tick) {
+    State &state = *state_;
+    if (state.definition == nullptr || state.phase != Phase::Idle) {
+        return false;
+    }
+    CSceneVehicleCar &car = state.vehicle.Car();
+    car.EnableAbsorbContactCallback(1);
+    car.EnablePhysicsUpdates(true);
+    CHmsItem *item = car.HmsItem();
+    CHmsItem::CCallback *computeForcesCallback =
+            item != nullptr
+                    ? item->CallbackGet(
+                              CHmsItem::ECallback_ComputeForces)
+                    : nullptr;
+    state.world.InstallEnvironment(
+            state.environment, state.definition->environment, true);
+    state.world.SetSimulationTime(tick);
+    state.optimizedCpuVehicleForces.BeginTick(
+            car,
+            forevervalidator::simulation::
+                    OptimizedCpuBinary32MathPath::X86Sse2,
+            computeForcesCallback);
+    state.world.StepOptimizedCpuNativeBinary32(
+            state.optimizedCpuVehicleForces);
+    return true;
+}
+
 ReplayDynaFrameState ReplaySimulationRuntime::CurrentFrame() const {
     return state_->body.CaptureCurrentFrame();
 }
@@ -363,6 +658,23 @@ ReplayVehicleControlState ReplaySimulationRuntime::CurrentControls() const {
     const CSceneVehicleCar::SControlInput input =
             state_->vehicle.Car().ControlInput();
     return {input.lowSpeedGateA, input.lowSpeedGateB, input.steering};
+}
+
+
+std::uint64_t ReplaySimulationRuntimeSemanticHash(
+        const ReplaySimulationRuntime::RuntimeClone &clone) {
+    ProjectionHash hash;
+    hash.Add(clone.world);
+    hash.Add(HashDynamicBody(clone.body));
+    hash.Add(HashVehicle(clone.vehicle));
+    hash.Add(clone.firstStep);
+    hash.Add(clone.stuntsEnabled);
+    return hash.Value();
+}
+
+std::uint64_t ReplayRaceRuntimeSemanticHash(
+        const CTrackManiaRace::RuntimeClone &clone) {
+    return HashRace(clone);
 }
 
 const ReplayRaceProgress &ReplaySimulationRuntime::RaceProgress() const {
@@ -391,6 +703,213 @@ ReplaySimulationRuntime::CaptureRuntimeClone() const {
     clone.firstStep = state_->firstStep;
     clone.stuntsEnabled = state_->stuntsEnabled;
     return clone;
+}
+
+std::optional<ReplaySimulationRuntime::RuntimeClone>
+ReplaySimulationRuntime::CaptureVehiclePrefixReferenceForTesting(
+        float dt) {
+    State &state = *state_;
+    if (state.phase != Phase::Idle || state.definition == nullptr ||
+        !(dt > 0.0f)) {
+        return std::nullopt;
+    }
+    std::optional<RuntimeClone> before = CaptureRuntimeClone();
+    if (!before.has_value()) {
+        return std::nullopt;
+    }
+    CudaVehicleCpuReferenceAccess::IntegrateVehicle(
+            state.vehicle.Car(), dt);
+    std::optional<RuntimeClone> after = CaptureRuntimeClone();
+    RestoreRuntimeClone(std::move(*before));
+    return after;
+}
+
+std::optional<ReplaySimulationRuntime::RuntimeClone>
+ReplaySimulationRuntime::CaptureVehicleForceReferenceForTesting(
+        float dt) {
+    State &state = *state_;
+    if (state.phase != Phase::Idle || state.definition == nullptr ||
+        !(dt > 0.0f)) {
+        return std::nullopt;
+    }
+    std::optional<RuntimeClone> before = CaptureRuntimeClone();
+    if (!before.has_value()) {
+        return std::nullopt;
+    }
+    ReplayControlTick tick;
+    tick.periodMs = before->world.schemePeriodMs;
+    tick.timeMs = before->world.tickTimeMs;
+    state.world.SetSimulationTime(tick);
+    CudaVehicleCpuReferenceAccess::ComputeForces(
+            state.vehicle.Car(), dt);
+    std::optional<RuntimeClone> after = CaptureRuntimeClone();
+    RestoreRuntimeClone(std::move(*before));
+    return after;
+}
+
+std::optional<ReplaySimulationRuntime::RuntimeClone>
+ReplaySimulationRuntime::CaptureCollisionSubstepReferenceForTesting(
+        float dt) {
+    State &state = *state_;
+    if (state.phase != Phase::Idle || state.definition == nullptr ||
+        !(dt > 0.0f)) {
+        return std::nullopt;
+    }
+    std::optional<RuntimeClone> before = CaptureRuntimeClone();
+    if (!before.has_value()) {
+        return std::nullopt;
+    }
+    CSceneVehicleCar &car = state.vehicle.Car();
+    CHmsItem *item = car.HmsItem();
+    CHmsItem::CCallback *callback =
+            item != nullptr
+                    ? item->CallbackGet(
+                              CHmsItem::ECallback_ComputeForces)
+                    : nullptr;
+    state.world.InstallEnvironment(
+            state.environment, state.definition->environment, true);
+    state.optimizedCpuVehicleForces.BeginTick(
+            car,
+            forevervalidator::simulation::
+                    OptimizedCpuBinary32MathPath::X86Sse2,
+            callback);
+    state.world.Zone().ComputeCorpusForcesOptimizedCpuVehicle(
+            &state.body.Corpus(), dt,
+            state.optimizedCpuVehicleForces);
+    state.body.Dyna().DoPreCollisionDynamic(dt);
+    CHmsCollisionBuffer buffer;
+    state.world.CollisionZone().
+            DetectCollisionsCorpusOptimizedCpuNativeBinary32(
+                    buffer, &state.body.Corpus());
+    state.world.Zone().ComputeCollisionResponse(buffer);
+    state.body.Dyna().DoPostCollisionDynamic();
+    std::optional<RuntimeClone> after = CaptureRuntimeClone();
+    RestoreRuntimeClone(std::move(*before));
+    return after;
+}
+
+std::optional<ReplaySimulationRuntime::RuntimeClone>
+ReplaySimulationRuntime::CapturePreCollisionReferenceForTesting(
+        float dt) {
+    State &state = *state_;
+    if (state.phase != Phase::Idle || state.definition == nullptr ||
+        !(dt > 0.0f)) {
+        return std::nullopt;
+    }
+    std::optional<RuntimeClone> before = CaptureRuntimeClone();
+    if (!before.has_value()) return std::nullopt;
+    CSceneVehicleCar &car = state.vehicle.Car();
+    CHmsItem *item = car.HmsItem();
+    CHmsItem::CCallback *callback =
+            item != nullptr
+                    ? item->CallbackGet(
+                              CHmsItem::ECallback_ComputeForces)
+                    : nullptr;
+    state.world.InstallEnvironment(
+            state.environment, state.definition->environment, true);
+    state.optimizedCpuVehicleForces.BeginTick(
+            car,
+            forevervalidator::simulation::
+                    OptimizedCpuBinary32MathPath::X86Sse2,
+            callback);
+    state.world.Zone().ComputeCorpusForcesOptimizedCpuVehicle(
+            &state.body.Corpus(), dt,
+            state.optimizedCpuVehicleForces);
+    state.body.Dyna().DoPreCollisionDynamic(dt);
+    std::optional<RuntimeClone> after = CaptureRuntimeClone();
+    RestoreRuntimeClone(std::move(*before));
+    return after;
+}
+
+std::optional<ReplaySimulationRuntime::RuntimeClone>
+ReplaySimulationRuntime::CaptureForcePassReferenceForTesting(float dt) {
+    State &state = *state_;
+    if (state.phase != Phase::Idle || state.definition == nullptr ||
+        !(dt > 0.0f)) {
+        return std::nullopt;
+    }
+    std::optional<RuntimeClone> before = CaptureRuntimeClone();
+    if (!before.has_value()) return std::nullopt;
+    CSceneVehicleCar &car = state.vehicle.Car();
+    CHmsItem *item = car.HmsItem();
+    CHmsItem::CCallback *callback =
+            item != nullptr
+                    ? item->CallbackGet(
+                              CHmsItem::ECallback_ComputeForces)
+                    : nullptr;
+    state.world.InstallEnvironment(
+            state.environment, state.definition->environment, true);
+    state.optimizedCpuVehicleForces.BeginTick(
+            car,
+            forevervalidator::simulation::
+                    OptimizedCpuBinary32MathPath::X86Sse2,
+            callback);
+    state.world.Zone().ComputeCorpusForcesOptimizedCpuVehicle(
+            &state.body.Corpus(), dt,
+            state.optimizedCpuVehicleForces);
+    std::optional<RuntimeClone> after = CaptureRuntimeClone();
+    RestoreRuntimeClone(std::move(*before));
+    return after;
+}
+
+std::optional<std::vector<GmCollision>>
+ReplaySimulationRuntime::CaptureCollisionReferenceForTesting(void) {
+    State &state = *state_;
+    if (state.phase != Phase::Idle || state.definition == nullptr) {
+        return std::nullopt;
+    }
+    try {
+        CHmsCollisionBuffer buffer;
+        state.world.CollisionZone().
+                DetectCollisionsCorpusOptimizedCpuNativeBinary32(
+                        buffer, &state.body.Corpus());
+        buffer.SortForCollisionResponse();
+        std::vector<GmCollision> collisions;
+        collisions.reserve(buffer.PhysicalCollisionCount());
+        for (std::uint32_t index = 0u;
+             index < buffer.PhysicalCollisionCount(); ++index) {
+            const SHmsPhysicalCollision *collision =
+                    buffer.PhysicalCollisionAtOrNull(index);
+            if (collision != nullptr) {
+                collisions.push_back(
+                        static_cast<const GmCollision &>(*collision));
+            }
+        }
+        return collisions;
+    } catch (const std::bad_alloc &) {
+        return std::nullopt;
+    }
+}
+
+bool ReplaySimulationRuntime::
+ApplyCollisionResponseReferenceForTesting(void) {
+    State &state = *state_;
+    if (state.phase != Phase::Idle || state.definition == nullptr) {
+        return false;
+    }
+    state.world.InstallSimulationTimeAsCurrent();
+    CHmsCollisionBuffer buffer;
+    state.world.CollisionZone().
+            DetectCollisionsCorpusOptimizedCpuNativeBinary32(
+                    buffer, &state.body.Corpus());
+    state.world.Zone().ComputeCollisionResponse(buffer);
+    return true;
+}
+
+bool ReplaySimulationRuntime::PrepareStepForTesting(
+        const ReplayControlTick &tick) {
+    State &state = *state_;
+    if (state.phase != Phase::Idle || state.definition == nullptr) {
+        return false;
+    }
+    if (!state.firstStep) {
+        state.vehicle.PrepareStep(tick, state.body);
+    }
+    state.vehicle.Car().EnableAbsorbContactCallback(1);
+    state.vehicle.Car().EnablePhysicsUpdates(
+            !tick.actions.suppressVehicleForceCallbacks);
+    state.world.SetSimulationTime(tick);
+    return true;
 }
 
 bool ReplaySimulationRuntime::PrepareRuntimeCloneRestore(

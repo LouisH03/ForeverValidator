@@ -39,6 +39,11 @@ const char *ValidationErrorCodeName(ValidationErrorCode code) noexcept {
     case ValidationErrorCode::SerializationFailed:
         return "serialization_failed";
     case ValidationErrorCode::UnexpectedFailure: return "unexpected_failure";
+    case ValidationErrorCode::CudaUnavailable: return "cuda_unavailable";
+    case ValidationErrorCode::CudaInitializationFailed:
+        return "cuda_initialization_failed";
+    case ValidationErrorCode::CudaExecutionFailed:
+        return "cuda_execution_failed";
     }
     return "unexpected_failure";
 }
@@ -165,6 +170,14 @@ const char *ValidationFailureReasonName(
                 "deterministic_execution_unavailable");
     REASON_NAME(DeterministicStateRestoreFailed,
                 "deterministic_state_restore_failed");
+    REASON_NAME(CudaNotCompiled, "cuda_not_compiled");
+    REASON_NAME(CudaRuntimeUnavailable, "cuda_runtime_unavailable");
+    REASON_NAME(CudaDeviceUnavailable, "cuda_device_unavailable");
+    REASON_NAME(CudaDeviceUnsupported, "cuda_device_unsupported");
+    REASON_NAME(CudaInitializationFailed, "cuda_initialization_failed");
+    REASON_NAME(CudaExecutionFailed, "cuda_execution_failed");
+    REASON_NAME(CudaUnsupportedSimulationScope,
+                "cuda_unsupported_simulation_scope");
     REASON_NAME(SerializationFailed, "serialization_failed");
     REASON_NAME(UnexpectedFailure, "unexpected_failure");
     }
@@ -314,6 +327,9 @@ int ValidationErrorExitCode(const ValidationError &error) noexcept {
         default: return 3;
         }
     case ValidationErrorCode::DeterministicExecutionUnavailable: return 5;
+    case ValidationErrorCode::CudaUnavailable: return 69;
+    case ValidationErrorCode::CudaInitializationFailed: return 70;
+    case ValidationErrorCode::CudaExecutionFailed: return 71;
     case ValidationErrorCode::SerializationFailed: return 22;
     case ValidationErrorCode::AllocationFailed:
         return error.stage == ValidationStage::Serialization ? 22 : 5;

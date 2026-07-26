@@ -14,6 +14,7 @@ public:
 
 private:
     friend class CTrackManiaRace;
+    friend class CTrackManiaPlayer;
 
     GmIso4 previousSpawnIso_{};
     GmIso4 currentSpawnIso_{};
@@ -22,8 +23,25 @@ private:
 
 class CTrackManiaPlayer {
 public:
+    struct RuntimeClone {
+        GmIso4 previousSpawnLocation{};
+        GmIso4 currentSpawnLocation{};
+        bool eventPrepared = false;
+    };
+
     CTrackManiaPlayerInfo &Info() { return info_; }
     const CTrackManiaPlayerInfo &Info() const { return info_; }
+    RuntimeClone CaptureRuntimeClone() const {
+        return {
+                info_.previousSpawnIso_,
+                info_.currentSpawnIso_,
+                info_.preparedEvent_};
+    }
+    void RestoreRuntimeClone(const RuntimeClone &clone) {
+        info_.previousSpawnIso_ = clone.previousSpawnLocation;
+        info_.currentSpawnIso_ = clone.currentSpawnLocation;
+        info_.preparedEvent_ = clone.eventPrepared;
+    }
 
 private:
     CTrackManiaPlayerInfo info_{};

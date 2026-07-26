@@ -3,6 +3,7 @@
 
 #include <memory>
 #include <optional>
+#include <vector>
 
 #include <forevervalidator/validation.h>
 
@@ -26,6 +27,7 @@ struct ReplaySimulationStepExecution {
     std::optional<std::uint32_t> finishTickMs;
     std::uint32_t respawnExecutedCount = 0u;
 };
+
 
 ReplayStuntSimulationState BuildReplayStuntSimulationState(
         const ReplaySimulationStepExecution &execution,
@@ -81,6 +83,23 @@ public:
     std::optional<std::uint32_t> ApplyReplayStuntTimePenalty(
             std::uint32_t overtimeMs);
     std::optional<RuntimeClone> CaptureRuntimeClone() const;
+    std::optional<RuntimeClone>
+            CaptureVehiclePrefixReferenceForTesting(float dt);
+    std::optional<RuntimeClone>
+            CaptureVehicleForceReferenceForTesting(float dt);
+    std::optional<RuntimeClone>
+            CaptureCollisionSubstepReferenceForTesting(float dt);
+    std::optional<RuntimeClone>
+            CapturePreCollisionReferenceForTesting(float dt);
+    std::optional<RuntimeClone>
+            CaptureForcePassReferenceForTesting(float dt);
+    std::optional<std::vector<GmCollision>>
+            CaptureCollisionReferenceForTesting(void);
+    bool ApplyCollisionResponseReferenceForTesting(void);
+    std::uint32_t DynamicCollisionCorpusCountForTesting(void) const;
+    bool StepPhysicsKernelReferenceForTesting(
+            const ReplayControlTick &tick);
+    bool PrepareStepForTesting(const ReplayControlTick &tick);
     bool PrepareRuntimeCloneRestore(const RuntimeClone &clone);
     void RestoreRuntimeClone(RuntimeClone clone) noexcept;
     Phase CurrentPhase() const noexcept;
@@ -89,5 +108,10 @@ private:
     struct State;
     std::unique_ptr<State> state_;
 };
+
+std::uint64_t ReplaySimulationRuntimeSemanticHash(
+        const ReplaySimulationRuntime::RuntimeClone &clone);
+std::uint64_t ReplayRaceRuntimeSemanticHash(
+        const CTrackManiaRace::RuntimeClone &clone);
 
 #endif

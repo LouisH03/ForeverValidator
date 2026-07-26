@@ -14,6 +14,9 @@ enum class ReplaySimulationRunResult {
     VehicleCollisionModelFailed,
     ObservationAllocationFailed,
     DeterministicExecutionUnavailable,
+    CudaUnavailable,
+    CudaInitializationFailed,
+    CudaExecutionFailed,
 };
 
 ReplaySimulationRunResult MapReplaySceneResult(

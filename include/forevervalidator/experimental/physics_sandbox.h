@@ -18,6 +18,9 @@ namespace forevervalidator::experimental {
 namespace static_scene_test {
 struct PhysicsSandboxStaticSceneTestAccess;
 }
+namespace cuda_test {
+struct PhysicsSandboxCudaTestAccess;
+}
 
 enum class PhysicsSandboxErrorCode : std::uint8_t {
     InvalidSandbox,
@@ -336,6 +339,7 @@ private:
                     const std::vector<PhysicsSandbox *> &sandboxes,
                     std::uint32_t count) noexcept;
     friend struct static_scene_test::PhysicsSandboxStaticSceneTestAccess;
+    friend struct cuda_test::PhysicsSandboxCudaTestAccess;
 };
 
 PhysicsSandboxResult<PhysicsSandbox> CreatePhysicsSandbox(

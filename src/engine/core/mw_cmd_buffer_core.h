@@ -39,7 +39,7 @@ private:
         void Reset(void);
     };
 
-    static CMwCmdBufferCore *TheCoreCmdBuffer;
+    static thread_local CMwCmdBufferCore *TheCoreCmdBuffer;
 
     CMwTimerAdapter timer_;
     std::map<unsigned long, std::unique_ptr<CMwCmdBuffer>> schemeBuffers_;

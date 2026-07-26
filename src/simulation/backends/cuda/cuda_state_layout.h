@@ -1,0 +1,216 @@
+#ifndef FOREVERVALIDATOR_CUDA_STATE_LAYOUT_H
+#define FOREVERVALIDATOR_CUDA_STATE_LAYOUT_H
+
+#include <cstddef>
+#include <cstdint>
+#include <type_traits>
+
+#include "engine/game/trackmania_race.h"
+#include "simulation/control/replay_control_timeline.h"
+#include "simulation/runtime/replay_physics_world.h"
+
+struct ReplaySimulationInstanceClone;
+
+namespace forevervalidator::simulation {
+
+enum class CudaStateConversionResult : std::uint8_t {
+    Success,
+    InvalidArgument,
+    SchemaMismatch,
+    WheelOverflow,
+    CollisionReplacementOverflow,
+    CheckpointOverflow,
+    StuntEventOverflow,
+    AllocationFailed,
+};
+
+template<typename T, std::size_t Capacity>
+struct CudaFixedArray {
+    std::uint32_t count = 0u;
+    T values[Capacity]{};
+};
+
+template<typename T>
+struct CudaOptional {
+    bool present = false;
+    T value{};
+};
+
+struct CudaWheelState {
+    bool killsLateralSpeedOnContact = false;
+    std::uint32_t axle = 0u;
+    float rollingRadius = 0.0f;
+    GmIso4 restPose{};
+    GmIso4 currentPose{};
+    GmVec3 forceApplicationPoint{};
+    CSceneVehicleCar::SSimulationWheel::SRealTimeState realTime{};
+    CSceneVehicleCar::SSimulationWheel::SState previousPhysics{};
+    CSceneVehicleCar::SSimulationWheel::SState currentPhysics{};
+    CSceneVehicleCar::SSimulationWheel::SState previousAsync{};
+    CSceneVehicleCar::SSimulationWheel::SState currentAsync{};
+    bool surfaceMovedByUpdate = false;
+};
+
+struct CudaVehicleCarFrameState {
+    float forwardSpeed = 0.0f;
+    float sideSpeed = 0.0f;
+    float steeringControl = 0.0f;
+    float lowSpeedGateA = 0.0f;
+    float lowSpeedGateB = 0.0f;
+    std::uint32_t turboActive = 0u;
+    float turboProgressRatio = 0.0f;
+    std::uint32_t wheelSpeedOverrideActive = 0u;
+    float surfaceFeedbackAccumulator = 0.0f;
+    float feedbackSideSpringValue = 0.0f;
+    float feedbackForwardSpringValue = 0.0f;
+    float feedbackRamp1 = 0.0f;
+    float feedbackRamp0 = 0.0f;
+    GmIso4 corpusIso{};
+    std::uint32_t vehicleEvent0Value = 1u;
+    std::uint32_t waterSplashEventCounter = 1u;
+    GmVec3 localLinearSpeed{};
+    float materialFeedbackSpeed = 0.0f;
+    float materialFeedbackIntensity = 0.0f;
+    float engineInputMemory = 0.0f;
+    bool airControlRefreshMemory = false;
+    std::uint32_t engineControlState = 0u;
+    std::uint32_t shiftDirection = 0u;
+    bool hasWheelContact = false;
+    bool hasBodyContact = false;
+    float bodyContactVerticalAngle = 0.0f;
+    bool bodyContactZPositive = false;
+    float bodyContactHorizontalAngle = 0.0f;
+    bool noGroundFrictionGuard = false;
+};
+
+struct CudaFrameHistory {
+    CudaVehicleCarFrameState physicsPrevious{};
+    CudaVehicleCarFrameState physicsCurrent{};
+    CudaVehicleCarFrameState asyncCurrent{};
+    CudaVehicleCarFrameState asyncPrevious{};
+};
+
+struct CudaVehicleState {
+    CSceneMobil::RuntimeClone mobil{};
+    CSceneVehicle::SEventSlot vehicleEvents[2]{};
+    CSceneVehicle::SWaterState water{};
+    bool updateAsync = true;
+    bool networked = false;
+    std::uint32_t predictionDelayTicks = 0u;
+    CudaOptional<CSceneVehicle::SStateSampleWindow> stateSampleWindow{};
+    float asyncPeriodSeconds = 0.0f;
+
+    CudaFixedArray<CudaWheelState, 4u> wheels{};
+    CSceneVehicleCar::SControls controls{};
+    CSceneVehicleCar::SFeedback feedback{};
+    float linearSpeedCap = 0.0f;
+    CSceneVehicleCar::SIntegration integration{};
+    CudaFrameHistory frameHistory{};
+    CSceneVehicleCar::SEngine engine{};
+    float reverseGearSpeedThreshold = 0.0f;
+    CSceneVehicleCar::STurbo turbo{};
+    CSceneVehicleCar::SAirControl airControl{};
+    CSceneVehicleCar::SContacts contacts{};
+    CSceneVehicleCar::SRadiusSteeringState radiusSteering{};
+    CSceneVehicleCar::SSlipMemoryState slipMemory{};
+    CSceneVehicleCar::SGearedDriveState gearedDrive{};
+    std::uint32_t lastComputeForcesTick = 0u;
+    GmSpring<float> dynaPartSprings[4]{};
+    CSceneVehicleCar::SForceAccumulators forceAccumulators{};
+};
+
+struct CudaDynamicBodyState {
+    CudaOptional<float> maxAngularSpeed{};
+    CHmsDynaParams parameters{};
+    CPlugPhysicalParameters physicalParameters{};
+    GmIso4 corpusLocalIso{};
+    CHmsDyna::CHmsStateDyna temporary{};
+    CHmsDyna::CHmsStateDyna write{};
+    CHmsDyna::CHmsStateDyna current{};
+    CudaFixedArray<GmVec3, 64u> collisionReplacements{};
+    bool dynamicActive = false;
+    std::uint32_t dynamicType = 0u;
+};
+
+struct CudaRaceState {
+    CTrackManiaPlayer::RuntimeClone player{};
+    CudaFixedArray<std::uint8_t, 1024u> checkpointSlotsPassed{};
+    CudaOptional<GmIso4> playerSpawnLocation{};
+    CudaOptional<GmIso4> lastAcceptedSpawnLocation{};
+    bool currentSpawnLocationInitialized = false;
+    std::uint32_t preparedEventTimeMs = 0u;
+    std::uint32_t replayPlayMode = 0u;
+    std::uint32_t replayNbLaps = 1u;
+    ReplayRaceProgress progress{};
+    bool replayStuntsEnabled = false;
+    bool replayStuntStateAvailable = false;
+    std::uint32_t replayStuntsTimeLimitMs = 0u;
+    std::uint32_t replayStuntsRaceStartTimeMs = 0u;
+    ReplayStuntSimulationState replayStuntState{};
+    CTrackManiaRace::ReplayStuntInputSnapshot stuntInputHistory[32]{};
+    std::uint32_t stuntInputHistorySize = 0u;
+    GmIso4 stuntLocationHistory[20]{};
+    std::uint32_t stuntLocationHistorySize = 0u;
+    GmIso4 stuntPreviousLocation{};
+    GmIso4 stuntTakeoffLocation{};
+    GmVec3 stuntRotation{};
+    float stuntLandingDirection = 0.0f;
+    std::uint32_t stuntTakeoffTick = UINT32_MAX;
+    std::uint32_t stuntLandingTick = UINT32_MAX;
+    std::uint32_t stuntPreviousLandingTick = UINT32_MAX;
+    std::uint32_t stuntChain = 0u;
+    std::uint32_t stuntComboWindowMs = 0u;
+    bool stuntInProgress = false;
+    bool stuntMasterJump = false;
+    bool stuntBadLanding = false;
+    CudaOptional<std::uint32_t> stuntScoreAtTimeLimit{};
+    std::uint32_t stuntFigureScores[39]{};
+    std::uint32_t stuntsScore = 0u;
+    CudaFixedArray<ReplayStuntEvent, 2048u> stuntEvents{};
+};
+
+struct CudaCandidateState {
+    static constexpr std::uint32_t SchemaVersion = 3u;
+
+    std::uint32_t schemaVersion = SchemaVersion;
+    std::uint32_t candidateId = 0u;
+    std::uint32_t validationSeed = 0u;
+    std::uint32_t randomState = 1u;
+    std::uint64_t controlCursor = 0u;
+    ReplayPhysicsWorld::RuntimeClone world{};
+    CudaDynamicBodyState body{};
+    CudaVehicleState vehicle{};
+    CudaRaceState race{};
+    std::uint32_t incrementalRespawnCount = 0u;
+    bool firstStep = true;
+    bool stuntsEnabled = false;
+    std::uint8_t reserved[10]{};
+};
+
+static_assert(std::is_standard_layout_v<CudaCandidateState>);
+static_assert(std::is_trivially_copyable_v<CudaCandidateState>);
+static_assert(sizeof(CudaCandidateState) < 192u * 1024u);
+
+CudaStateConversionResult EncodeCudaCandidateState(
+        const ReplaySimulationInstanceClone &source,
+        std::uint32_t validationSeed,
+        std::uint64_t controlCursor,
+        std::uint32_t candidateId,
+        std::uint32_t randomState,
+        CudaCandidateState *destination) noexcept;
+
+CudaStateConversionResult EncodeCudaRaceState(
+        const CTrackManiaRace::RuntimeClone &source,
+        CudaRaceState *destination) noexcept;
+
+CudaStateConversionResult DecodeCudaRaceState(
+        const CudaRaceState &source,
+        CTrackManiaRace::RuntimeClone *destination) noexcept;
+
+CudaStateConversionResult DecodeCudaCandidateState(
+        const CudaCandidateState &source,
+        ReplaySimulationInstanceClone *destination) noexcept;
+
+}  // namespace forevervalidator::simulation
+
+#endif

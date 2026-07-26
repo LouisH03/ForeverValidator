@@ -8,12 +8,17 @@
 #include "engine/physics/world/hms_zone.h"
 
 void CHmsZoneDynamic::ComputeCollisionResponse() {
-    collisionBuffer_.SortForCollisionResponse();
+    ComputeCollisionResponse(collisionBuffer_);
+}
 
-    u32 count = collisionBuffer_.PhysicalCollisionCount();
+void CHmsZoneDynamic::ComputeCollisionResponse(
+        CHmsCollisionBuffer &collisionBuffer) {
+    collisionBuffer.SortForCollisionResponse();
+
+    u32 count = collisionBuffer.PhysicalCollisionCount();
     for (u32 collisionIndex = 0; collisionIndex < count; collisionIndex++) {
         SHmsPhysicalCollision *collision =
-                collisionBuffer_.PhysicalCollisionAtOrNull(collisionIndex);
+                collisionBuffer.PhysicalCollisionAtOrNull(collisionIndex);
         if (collision == nullptr) {
             continue;
         }

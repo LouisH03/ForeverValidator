@@ -8,6 +8,7 @@ bool IsSimulationBackendSupported(SimulationBackend backend) noexcept {
     case SimulationBackend::OptimizedCpu:
     case SimulationBackend::SpeculativeTicking:
     case SimulationBackend::Batched:
+    case SimulationBackend::Cuda:
         return true;
     }
     return false;
