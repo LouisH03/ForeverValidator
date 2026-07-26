@@ -25,7 +25,7 @@ cmake -S . -B build/cuda -G Ninja \
 cmake --build build/cuda
 ```
 
-The runtime requires an NVIDIA device with compute capability 7.0 or newer.
+The runtime requires an NVIDIA device with compute capability 7.5 or newer.
 The default CMake configuration compiles for the build machine's native
 architecture; release builders can set `CMAKE_CUDA_ARCHITECTURES` explicitly.
 Device discovery reports the selected device, compute capability, driver and
