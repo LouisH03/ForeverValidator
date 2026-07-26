@@ -222,6 +222,19 @@ if(FOREVERVALIDATOR_BUILD_BENCHMARKS)
         forevervalidator_configure_target(
             cuda_backend_benchmark)
 
+        add_executable(cuda_search_benchmark
+            tools/cuda_search_benchmark.cpp)
+        target_include_directories(
+            cuda_search_benchmark PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/include"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src")
+        target_link_libraries(
+            cuda_search_benchmark PRIVATE
+            forevervalidator_native
+            forevervalidator_core)
+        forevervalidator_configure_target(
+            cuda_search_benchmark)
+
         add_executable(cuda_replay_parity
             tools/cuda_replay_parity.cpp)
         target_include_directories(

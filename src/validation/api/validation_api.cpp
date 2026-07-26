@@ -2317,6 +2317,20 @@ PhysicsSandboxCudaSearchSession::Impl::Convert(
     result.metrics.hostToDeviceBytes = execution.hostToDeviceBytes;
     result.metrics.deviceToHostBytes = execution.deviceToHostBytes;
     result.metrics.kernelMilliseconds = execution.kernelMilliseconds;
+    result.metrics.scoreInitializationKernelMilliseconds =
+            execution.scoreInitializationKernelMilliseconds;
+    result.metrics.mutationKernelMilliseconds =
+            execution.mutationKernelMilliseconds;
+    result.metrics.simulationKernelMilliseconds =
+            execution.simulationKernelMilliseconds;
+    result.metrics.winnerKernelMilliseconds =
+            execution.winnerKernelMilliseconds;
+    result.metrics.winnerReductionKernelMilliseconds =
+            execution.winnerReductionKernelMilliseconds;
+    result.metrics.winnerStateCaptureKernelMilliseconds =
+            execution.winnerStateCaptureKernelMilliseconds;
+    result.metrics.finalizationKernelMilliseconds =
+            execution.finalizationKernelMilliseconds;
     if (!execution.best.valid) {
         return PhysicsSandboxResult<
                 PhysicsSandboxCudaSearchBatch>::Success(

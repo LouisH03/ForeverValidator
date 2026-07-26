@@ -1452,7 +1452,6 @@ __global__ void SimulateSearchCandidatesKernel(
         std::uint32_t candidateCount,
         bool baseline,
         std::uint32_t eventCapacity,
-        CudaCandidateState *candidateBestStates,
         DeviceSample *candidateBestSamples,
         const CudaSearchInputEvent *candidateEvents,
         const std::uint32_t *eventCounts,
@@ -1585,18 +1584,130 @@ __global__ void SimulateSearchCandidatesKernel(
                evaluationIndex] = sample;
         if (StrictlyBetter(sample, localBest, maximize)) {
             localBest = sample;
-            candidateBestStates[slot] = state;
         }
         ++evaluationIndex;
     }
     candidateBestSamples[slot] = localBest;
 }
 
+__global__ void CaptureSearchWinnerStateKernel(
+        const void *sceneData,
+        const void *configurationData,
+        const CudaCandidateState *branchState,
+        const CudaControlTick *baselineTicks,
+        const DeviceSample *reducedBest,
+        std::uint32_t tickDurationMs,
+        std::uint32_t prestartDurationMs,
+        std::int64_t branchTimeMs,
+        std::int64_t evaluationStartTimeMs,
+        std::uint32_t eventCapacity,
+        const CudaSearchInputEvent *candidateEvents,
+        const std::uint32_t *eventCounts,
+        DeviceCandidateStatus *statuses,
+        cuda::collision::CudaCollisionScratch *scratch,
+        CudaCandidateState *capturedWinnerState) {
+    if (blockIdx.x != 0u || threadIdx.x != 0u) {
+        return;
+    }
+    const DeviceSample winner = *reducedBest;
+    if (!winner.valid ||
+        winner.candidateSlot == InvalidCandidateSlot) {
+        return;
+    }
+    const std::uint32_t slot = winner.candidateSlot;
+    const CudaSearchInputEvent *events =
+            candidateEvents +
+            static_cast<std::uint64_t>(slot) * eventCapacity;
+    const std::uint32_t eventCount = eventCounts[slot];
+    const std::uint32_t evaluationStartTick =
+            static_cast<std::uint32_t>(
+                    (evaluationStartTimeMs -
+                     (branchTimeMs + tickDurationMs)) /
+                    tickDurationMs);
+    const std::uint32_t targetTick =
+            evaluationStartTick + winner.evaluationTick;
+
+    CudaCandidateState state = *branchState;
+    state.candidateId =
+            static_cast<std::uint32_t>(winner.candidateId);
+    DeviceControlState controlState;
+    std::uint32_t eventCursor = 0u;
+    while (eventCursor < eventCount &&
+           events[eventCursor].timeMs <= branchTimeMs) {
+        ApplyControlEvent(controlState, events[eventCursor]);
+        ++eventCursor;
+    }
+    for (std::uint32_t tickIndex = 0u;
+         tickIndex <= targetTick; ++tickIndex) {
+        const std::int64_t publicTime =
+                branchTimeMs +
+                static_cast<std::int64_t>(tickIndex + 1u) *
+                        tickDurationMs;
+        while (eventCursor < eventCount &&
+               events[eventCursor].timeMs <= publicTime) {
+            ApplyControlEvent(controlState, events[eventCursor]);
+            ++eventCursor;
+        }
+        CudaControlTick tick = baselineTicks[tickIndex];
+        tick.controls = ControlsFromState(controlState);
+        tick.stuntsInput =
+                StuntsFromState(controlState, prestartDurationMs);
+        ApplyControlPrefix(state, tick);
+        if (!state.firstStep) {
+            cuda::transition::PrepareStep(
+                    state, tick,
+                    static_cast<const
+                            CudaPackedStaticConfigurationHeader *>(
+                            configurationData));
+        }
+        state.vehicle.mobil.absorbContactEnabled = true;
+        state.vehicle.mobil.physicsUpdatesEnabled =
+                (tick.actionFlags &
+                 CudaControlActionSuppressVehicleForceCallbacks) == 0u;
+        for (std::uint32_t respawn = 0u;
+             respawn < tick.respawnAtCheckpointCount; ++respawn) {
+            if (cuda::transition::Respawn(
+                        state,
+                        static_cast<const
+                                CudaPackedStaticConfigurationHeader *>(
+                                configurationData))) {
+                ++state.incrementalRespawnCount;
+                cuda::stunts::ApplyRespawnPenalty(state.race);
+            }
+        }
+        const cuda::physics::Status physicsStatus =
+                cuda::physics::Step(
+                        static_cast<const CudaPackedSceneHeader *>(
+                                sceneData),
+                        static_cast<const
+                                CudaPackedStaticConfigurationHeader *>(
+                                configurationData),
+                        state, scratch[slot]);
+        if (physicsStatus != cuda::physics::Status::Success) {
+            statuses[slot] =
+                    DeviceCandidateStatus::UnsupportedPhysicsTransition;
+            return;
+        }
+        if (state.stuntsEnabled) {
+            const cuda::stunts::Status stuntStatus =
+                    cuda::stunts::Update(state, tick);
+            if (stuntStatus != cuda::stunts::Status::Success) {
+                statuses[slot] =
+                        DeviceCandidateStatus::CapacityExceeded;
+                return;
+            }
+        }
+        state.firstStep = false;
+        ++state.controlCursor;
+    }
+    *capturedWinnerState = state;
+}
+
 __global__ void FinalizeSearchBatchKernel(
         const DeviceSample *scores,
         std::uint64_t scoreCount,
         const DeviceSample *reducedBest,
-        const CudaCandidateState *candidateBestStates,
+        const CudaCandidateState *capturedWinnerState,
         const DeviceSample *candidateBestSamples,
         const CudaSearchInputEvent *candidateEvents,
         const std::uint32_t *eventCounts,
@@ -1656,7 +1767,7 @@ __global__ void FinalizeSearchBatchKernel(
                 candidateBestSamples[slot];
         if (candidateBest.valid) {
             *globalBestSample = candidateBest;
-            *globalBestState = candidateBestStates[slot];
+            *globalBestState = *capturedWinnerState;
             *globalBestEventCount = eventCounts[slot];
             *globalBestMutationCount = mutationCounts[slot];
             for (std::uint32_t index = 0u;
@@ -1694,7 +1805,7 @@ struct CudaSearchExecutor::Impl {
     DeviceAllocation<CudaSearchModifierConfiguration> modifiers;
     DeviceAllocation<double> smoothWeights;
     DeviceAllocation<CudaSearchEvaluatorConfiguration> evaluator;
-    DeviceAllocation<CudaCandidateState> candidateBestStates;
+    DeviceAllocation<CudaCandidateState> capturedWinnerState;
     DeviceAllocation<DeviceSample> candidateBestSamples;
     DeviceAllocation<DeviceMt19937> randomStates;
     DeviceAllocation<CudaSearchInputEvent> candidateEvents;
@@ -1726,7 +1837,7 @@ struct CudaSearchExecutor::Impl {
         ADD_BYTES(modifiers);
         ADD_BYTES(smoothWeights);
         ADD_BYTES(evaluator);
-        ADD_BYTES(candidateBestStates);
+        ADD_BYTES(capturedWinnerState);
         ADD_BYTES(candidateBestSamples);
         ADD_BYTES(randomStates);
         ADD_BYTES(candidateEvents);
@@ -1783,7 +1894,6 @@ struct CudaSearchExecutor::Impl {
                 static_cast<std::size_t>(eventSlots64);
         const std::size_t scoreSlots =
                 static_cast<std::size_t>(scoreSlots64);
-        DeviceAllocation<CudaCandidateState> nextCandidateBestStates;
         DeviceAllocation<DeviceSample> nextCandidateBestSamples;
         DeviceAllocation<DeviceMt19937> nextRandomStates;
         DeviceAllocation<CudaSearchInputEvent> nextCandidateEvents;
@@ -1797,8 +1907,7 @@ struct CudaSearchExecutor::Impl {
         DeviceAllocation<DeviceSample> nextScores;
         DeviceAllocation<std::byte> nextReductionTemporary;
         DeviceAllocation<cuda::collision::CudaCollisionScratch> nextScratch;
-        if (!nextCandidateBestStates.Allocate(candidates) ||
-            !nextCandidateBestSamples.Allocate(candidates) ||
+        if (!nextCandidateBestSamples.Allocate(candidates) ||
             !nextRandomStates.Allocate(candidates) ||
             !nextCandidateEvents.Allocate(eventSlots) ||
             !nextTemporaryEvents.Allocate(eventSlots) ||
@@ -1840,7 +1949,6 @@ struct CudaSearchExecutor::Impl {
             return false;
         }
 
-        candidateBestStates = std::move(nextCandidateBestStates);
         candidateBestSamples = std::move(nextCandidateBestSamples);
         randomStates = std::move(nextRandomStates);
         candidateEvents = std::move(nextCandidateEvents);
@@ -1897,8 +2005,17 @@ struct CudaSearchExecutor::Impl {
         cudaError_t error = cudaSuccess;
 
         Event started;
+        Event scoresInitialized;
+        Event mutationsGenerated;
+        Event simulationFinished;
+        Event winnerReduced;
+        Event winnerStateCaptured;
         Event finished;
-        if (!started.Valid() || !finished.Valid()) {
+        if (!started.Valid() || !scoresInitialized.Valid() ||
+            !mutationsGenerated.Valid() ||
+            !simulationFinished.Valid() ||
+            !winnerReduced.Valid() ||
+            !winnerStateCaptured.Valid() || !finished.Valid()) {
             result.status = CudaSearchStatus::DeviceFailure;
             result.diagnostic = "CUDA search event creation failed";
             return result;
@@ -1913,6 +2030,7 @@ struct CudaSearchExecutor::Impl {
                                 requiredScoreBlocks, 65535u));
         SeedScoresKernel<<<scoreBlocks, blockSize>>>(
                 scores.Get(), globalBestSample.Get(), scoreCount);
+        cudaEventRecord(scoresInitialized.Get());
         const std::uint32_t candidateBlocks =
                 (candidateCount - 1u) / blockSize + 1u;
         GenerateSearchCandidatesKernel<<<candidateBlocks, blockSize>>>(
@@ -1941,7 +2059,12 @@ struct CudaSearchExecutor::Impl {
                 statuses.Get(),
                 activeCandidates.Get(),
                 cancellation.Get());
-        SimulateSearchCandidatesKernel<<<candidateBlocks, blockSize>>>(
+        cudaEventRecord(mutationsGenerated.Get());
+        constexpr std::uint32_t simulationBlockSize = 32u;
+        const std::uint32_t simulationBlocks =
+                (candidateCount - 1u) / simulationBlockSize + 1u;
+        SimulateSearchCandidatesKernel
+                <<<simulationBlocks, simulationBlockSize>>>(
                 configuration.deviceScene,
                 configuration.deviceStaticConfiguration,
                 branchState.Get(),
@@ -1958,7 +2081,6 @@ struct CudaSearchExecutor::Impl {
                 baseline,
                 static_cast<std::uint32_t>(
                         configuration.maximumEventCount),
-                candidateBestStates.Get(),
                 candidateBestSamples.Get(),
                 candidateEvents.Get(),
                 eventCounts.Get(),
@@ -1967,6 +2089,7 @@ struct CudaSearchExecutor::Impl {
                 scores.Get(),
                 scratch.Get(),
                 cancellation.Get());
+        cudaEventRecord(simulationFinished.Get());
         std::size_t temporaryBytes = reductionTemporary.Bytes();
         error = cub::DeviceReduce::Reduce(
                 reductionTemporary.Get(), temporaryBytes,
@@ -1982,9 +2105,28 @@ struct CudaSearchExecutor::Impl {
                     CudaFailure("launching CUDA winner reduction", error);
             return result;
         }
+        cudaEventRecord(winnerReduced.Get());
+        CaptureSearchWinnerStateKernel<<<1u, 1u>>>(
+                configuration.deviceScene,
+                configuration.deviceStaticConfiguration,
+                branchState.Get(),
+                baselineTicks.Get(),
+                reducedBest.Get(),
+                configuration.tickDurationMs,
+                configuration.prestartDurationMs,
+                configuration.branchTimeMs,
+                configuration.evaluationStartTimeMs,
+                static_cast<std::uint32_t>(
+                        configuration.maximumEventCount),
+                candidateEvents.Get(),
+                eventCounts.Get(),
+                statuses.Get(),
+                scratch.Get(),
+                capturedWinnerState.Get());
+        cudaEventRecord(winnerStateCaptured.Get());
         FinalizeSearchBatchKernel<<<1u, 1u>>>(
                 scores.Get(), scoreCount, reducedBest.Get(),
-                candidateBestStates.Get(),
+                capturedWinnerState.Get(),
                 candidateBestSamples.Get(),
                 candidateEvents.Get(),
                 eventCounts.Get(),
@@ -2038,6 +2180,39 @@ struct CudaSearchExecutor::Impl {
         float milliseconds = 0.0f;
         cudaEventElapsedTime(&milliseconds, started.Get(), finished.Get());
         result.kernelMilliseconds = milliseconds;
+        cudaEventElapsedTime(
+                &milliseconds, started.Get(), scoresInitialized.Get());
+        result.scoreInitializationKernelMilliseconds = milliseconds;
+        cudaEventElapsedTime(
+                &milliseconds,
+                scoresInitialized.Get(),
+                mutationsGenerated.Get());
+        result.mutationKernelMilliseconds = milliseconds;
+        cudaEventElapsedTime(
+                &milliseconds,
+                mutationsGenerated.Get(),
+                simulationFinished.Get());
+        result.simulationKernelMilliseconds = milliseconds;
+        cudaEventElapsedTime(
+                &milliseconds,
+                simulationFinished.Get(),
+                finished.Get());
+        result.winnerKernelMilliseconds = milliseconds;
+        cudaEventElapsedTime(
+                &milliseconds,
+                simulationFinished.Get(),
+                winnerReduced.Get());
+        result.winnerReductionKernelMilliseconds = milliseconds;
+        cudaEventElapsedTime(
+                &milliseconds,
+                winnerReduced.Get(),
+                winnerStateCaptured.Get());
+        result.winnerStateCaptureKernelMilliseconds = milliseconds;
+        cudaEventElapsedTime(
+                &milliseconds,
+                winnerStateCaptured.Get(),
+                finished.Get());
+        result.finalizationKernelMilliseconds = milliseconds;
 
         DeviceBatchSummary hostSummary;
         error = cudaMemcpy(
@@ -2211,7 +2386,7 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
             !impl->smoothWeights.Allocate(
                     configuration.smoothWeights.size()) ||
             !impl->evaluator.Allocate(1u) ||
-            !impl->candidateBestStates.Allocate(candidates) ||
+            !impl->capturedWinnerState.Allocate(1u) ||
             !impl->candidateBestSamples.Allocate(candidates) ||
             !impl->randomStates.Allocate(candidates) ||
             !impl->candidateEvents.Allocate(eventSlots) ||

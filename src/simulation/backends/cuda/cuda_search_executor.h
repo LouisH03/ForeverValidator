@@ -128,6 +128,13 @@ struct CudaSearchBatchExecution {
     std::uint64_t hostToDeviceBytes = 0u;
     std::uint64_t deviceToHostBytes = 0u;
     double kernelMilliseconds = 0.0;
+    double scoreInitializationKernelMilliseconds = 0.0;
+    double mutationKernelMilliseconds = 0.0;
+    double simulationKernelMilliseconds = 0.0;
+    double winnerKernelMilliseconds = 0.0;
+    double winnerReductionKernelMilliseconds = 0.0;
+    double winnerStateCaptureKernelMilliseconds = 0.0;
+    double finalizationKernelMilliseconds = 0.0;
     std::string diagnostic;
 };
 
