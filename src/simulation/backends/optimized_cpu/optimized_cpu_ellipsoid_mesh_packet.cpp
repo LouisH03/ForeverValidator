@@ -850,7 +850,8 @@ FV_E031_AVX2 bool RunPacketAvx2(
         const OptimizedCpuStaticMeshTriangleSidecar &triangles,
         const OptimizedCpuStaticMeshTriangleHierarchyView &hierarchy,
         std::uint32_t *hitMask) noexcept {
-    if (hierarchy.cells == nullptr || hierarchy.count == 0u ||
+    if (hierarchy.cells == nullptr || hierarchy.depths == nullptr ||
+        hierarchy.count == 0u ||
         hierarchy.maximumTraversalDepth > PacketTraversalCapacity) {
         return false;
     }
@@ -888,20 +889,15 @@ FV_E031_AVX2 bool RunPacketAvx2(
     struct alignas(32) TraversalMask {
         __m256 value;
     };
-    // Entries below traversalDepth are written together before either array
-    // is read. Leaving the unused tail uninitialized avoids clearing the
-    // fixed traversal storage on every static-mesh packet.
-    std::array<u32, PacketTraversalCapacity> traversalEnds;
+    // The sidecar certifies each cell's DFS depth. Branch masks are written at
+    // their certified depth before any descendant reads them, eliminating the
+    // runtime subtree-end stack and pop loop.
     std::array<TraversalMask, PacketTraversalCapacity> traversalMasks;
-    std::size_t traversalDepth = 0u;
 
     for (u32 cellIndex = 0u;
          cellIndex < hierarchy.count;) {
-        while (traversalDepth != 0u &&
-               traversalEnds[traversalDepth - 1u] <= cellIndex) {
-            --traversalDepth;
-        }
         const GmMeshOctreeCell &cell = hierarchy.cells[cellIndex];
+        const std::size_t traversalDepth = hierarchy.depths[cellIndex];
         const __m256 parentMask = traversalDepth == 0u
                 ? execution.packetMask
                 : traversalMasks[traversalDepth - 1u].value;
@@ -915,13 +911,10 @@ FV_E031_AVX2 bool RunPacketAvx2(
             continue;
         }
         if (!cell.ContainsTriangle()) {
-            if (traversalDepth == traversalEnds.size()) {
+            if (traversalDepth == traversalMasks.size()) {
                 return false;
             }
-            traversalEnds[traversalDepth] =
-                    cellIndex + cell.SubtreeEntryCount();
             traversalMasks[traversalDepth].value = laneMask;
-            ++traversalDepth;
             ++cellIndex;
             continue;
         }

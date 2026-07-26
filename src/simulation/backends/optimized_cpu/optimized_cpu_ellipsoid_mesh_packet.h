@@ -49,7 +49,8 @@ struct OptimizedCpuCertifiedStaticMeshPacket {
 
     bool IsAvailable(void) const noexcept {
         return sourceMesh != nullptr && triangles != nullptr &&
-               hierarchy.cells != nullptr && hierarchy.count != 0u;
+               hierarchy.cells != nullptr && hierarchy.depths != nullptr &&
+               hierarchy.count != 0u;
     }
 };
 

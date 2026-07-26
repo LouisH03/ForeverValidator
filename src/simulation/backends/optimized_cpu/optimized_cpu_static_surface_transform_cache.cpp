@@ -652,6 +652,7 @@ bool OptimizedCpuStaticSurfaceTransformCache::CertifyForAdvance(
                             sizeof(GmIso4)) != 0 ||
                 !sidecar->TriangleHierarchyView(&hierarchy) ||
                 packet.hierarchy.cells != hierarchy.cells ||
+                packet.hierarchy.depths != hierarchy.depths ||
                 packet.hierarchy.count != hierarchy.count ||
                 packet.hierarchy.maximumTraversalDepth !=
                         hierarchy.maximumTraversalDepth) {

@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <type_traits>
 #include <vector>
 
@@ -27,6 +28,7 @@ struct OptimizedCpuStaticMeshDirectTrianglePosting {
 
 struct OptimizedCpuStaticMeshTriangleHierarchyView {
     const GmMeshOctreeCell *cells = nullptr;
+    const std::uint8_t *depths = nullptr;
     std::size_t count = 0u;
     std::size_t maximumTraversalDepth = 0u;
 };
@@ -68,10 +70,12 @@ public:
             OptimizedCpuStaticMeshTriangleHierarchyView *result) const
             noexcept {
         if (result == nullptr || sourceCells_ == nullptr ||
-            sourceCellCount_ == 0u) {
+            sourceCellCount_ == 0u ||
+            traversalDepths_.size() != sourceCellCount_) {
             return false;
         }
         result->cells = sourceCells_;
+        result->depths = traversalDepths_.data();
         result->count = sourceCellCount_;
         result->maximumTraversalDepth = maximumTraversalDepth_;
         return true;
@@ -101,6 +105,7 @@ private:
     std::size_t sourceTriangleCount_ = 0u;
     std::size_t sourceCellCount_ = 0u;
     std::size_t maximumTraversalDepth_ = 0u;
+    std::vector<std::uint8_t> traversalDepths_;
     std::vector<OptimizedCpuStaticMeshTriangleData> triangles_;
     std::vector<OptimizedCpuStaticMeshDirectTrianglePosting>
             directTrianglePostings_;

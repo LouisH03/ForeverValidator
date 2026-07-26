@@ -184,16 +184,18 @@ bool HasGridCompatibleHierarchy(
     return parents.empty();
 }
 
-}  // namespace
-
-bool MeasureOptimizedCpuStaticMeshTraversalDepth(
+bool BuildTraversalDepths(
         const GmMeshOctreeCell *cells,
         std::size_t count,
+        std::vector<std::uint8_t> *depths,
         std::size_t *maximumDepth) noexcept {
     if (maximumDepth == nullptr) {
         return false;
     }
     if (count == 0u) {
+        if (depths != nullptr) {
+            depths->clear();
+        }
         *maximumDepth = 0u;
         return true;
     }
@@ -205,6 +207,10 @@ bool MeasureOptimizedCpuStaticMeshTraversalDepth(
     try {
         std::vector<std::size_t> ends;
         ends.reserve(32u);
+        std::vector<std::uint8_t> candidateDepths;
+        if (depths != nullptr) {
+            candidateDepths.resize(count);
+        }
         std::size_t result = 0u;
         for (std::size_t cellIndex = 0u;
              cellIndex < count;
@@ -214,6 +220,14 @@ bool MeasureOptimizedCpuStaticMeshTraversalDepth(
             }
             if (!ends.empty() && ends.back() < cellIndex) {
                 return false;
+            }
+            if (ends.size() >
+                std::numeric_limits<std::uint8_t>::max()) {
+                return false;
+            }
+            if (depths != nullptr) {
+                candidateDepths[cellIndex] =
+                        static_cast<std::uint8_t>(ends.size());
             }
 
             const GmMeshOctreeCell &cell = cells[cellIndex];
@@ -243,11 +257,24 @@ bool MeasureOptimizedCpuStaticMeshTraversalDepth(
         if (!ends.empty()) {
             return false;
         }
+        if (depths != nullptr) {
+            *depths = std::move(candidateDepths);
+        }
         *maximumDepth = result;
         return true;
     } catch (const std::bad_alloc &) {
         return false;
     }
+}
+
+}  // namespace
+
+bool MeasureOptimizedCpuStaticMeshTraversalDepth(
+        const GmMeshOctreeCell *cells,
+        std::size_t count,
+        std::size_t *maximumDepth) noexcept {
+    return BuildTraversalDepths(
+            cells, count, nullptr, maximumDepth);
 }
 
 bool OptimizedCpuStaticMeshTriangleSidecar::TryBuild(
@@ -274,10 +301,12 @@ bool OptimizedCpuStaticMeshTriangleSidecar::TryBuild(
             Clear();
             return false;
         }
+        std::vector<std::uint8_t> traversalDepths;
         std::size_t maximumTraversalDepth = 0u;
-        if (!MeasureOptimizedCpuStaticMeshTraversalDepth(
+        if (!BuildTraversalDepths(
                     cells.data(),
                     cells.size(),
+                    &traversalDepths,
                     &maximumTraversalDepth)) {
             Clear();
             return false;
@@ -292,6 +321,7 @@ bool OptimizedCpuStaticMeshTriangleSidecar::TryBuild(
         rebuilt.sourceTriangleCount_ = triangles.size();
         rebuilt.sourceCellCount_ = cells.size();
         rebuilt.maximumTraversalDepth_ = maximumTraversalDepth;
+        rebuilt.traversalDepths_ = std::move(traversalDepths);
         if (triangles.size() > rebuilt.triangles_.max_size()) {
             Clear();
             return false;
@@ -397,6 +427,7 @@ void OptimizedCpuStaticMeshTriangleSidecar::Clear(void) noexcept {
     sourceTriangleCount_ = 0u;
     sourceCellCount_ = 0u;
     maximumTraversalDepth_ = 0u;
+    traversalDepths_.clear();
     triangles_.clear();
     directTrianglePostings_.clear();
     triangleGrid_.Clear();
@@ -418,5 +449,6 @@ bool OptimizedCpuStaticMeshTriangleSidecar::IsFor(
            sourceVertexCount_ == vertices.size() &&
            sourceTriangleCount_ == triangles.size() &&
            sourceCellCount_ == cells.size() &&
+           traversalDepths_.size() == cells.size() &&
            triangles_.size() == triangles.size();
 }

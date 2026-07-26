@@ -480,9 +480,21 @@ bool RunTraversalDepthCases(void) {
     if (!nestedSidecar.TryBuild(nestedMesh) ||
         nestedSidecar.MaximumTraversalDepth() != 3u ||
         !nestedSidecar.TriangleHierarchyView(&hierarchy) ||
+        hierarchy.depths == nullptr ||
         hierarchy.maximumTraversalDepth != 3u) {
         std::fprintf(stderr, "nested traversal certificate differs\n");
         return false;
+    }
+    const std::array<std::uint8_t, 4u> expectedDepths = {0u, 1u, 2u, 3u};
+    for (std::size_t cellIndex = 0u;
+         cellIndex < expectedDepths.size();
+         ++cellIndex) {
+        if (hierarchy.depths[cellIndex] != expectedDepths[cellIndex]) {
+            std::fprintf(stderr,
+                         "nested traversal cell %zu depth differs\n",
+                         cellIndex);
+            return false;
+        }
     }
 
     const auto rejected = [](const char *name,
