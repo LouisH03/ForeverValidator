@@ -192,14 +192,7 @@ bool OptimizedCpuCompiledTuningCurve::IsFor(
 bool OptimizedCpuCompiledTuningCurve::IsStorageFor(
         const CFuncKeysReal &curve) const noexcept {
     return source_ == &curve &&
-           sourceStorageRevision_ == curve.StorageRevision() &&
-           positions_.size() == curve.KeyCount() &&
-           values_.size() == positions_.size() &&
-           lowerBounds_.size() == positions_.size() &&
-           upperBounds_.size() == positions_.size() &&
-           lowerRaisesInexact_.size() == positions_.size() &&
-           upperRaisesInexact_.size() == positions_.size() &&
-           orderedLookupRaisesInexact_.size() == positions_.size();
+           sourceStorageRevision_ == curve.StorageRevision();
 }
 
 OptimizedCpuCompiledTuningCurve::Lookup
