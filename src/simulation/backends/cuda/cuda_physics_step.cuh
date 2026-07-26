@@ -28,13 +28,15 @@ __device__ inline vehicle::ForceStatus ForcePass(
             candidate, configuration, dt);
 }
 
-template <bool TrackCollisionDiagnostics = true>
+template <
+        bool TrackCollisionDiagnostics = true,
+        typename Scratch = collision::CudaCollisionScratch>
 __device__ inline Status CollisionSubstep(
         const CudaPackedSceneHeader *scene,
         const CudaPackedStaticConfigurationHeader *configuration,
         CudaCandidatePhysicsState &candidate,
         float dt,
-        collision::CudaCollisionScratch &scratch) {
+        Scratch &scratch) {
     const vehicle::ForceStatus forceStatus =
             ForcePass(candidate, configuration, dt);
     if (forceStatus != vehicle::ForceStatus::Success) {
@@ -59,12 +61,14 @@ __device__ inline Status CollisionSubstep(
     return Status::Success;
 }
 
-template <bool TrackCollisionDiagnostics = true>
+template <
+        bool TrackCollisionDiagnostics = true,
+        typename Scratch = collision::CudaCollisionScratch>
 __device__ inline Status Step(
         const CudaPackedSceneHeader *scene,
         const CudaPackedStaticConfigurationHeader *configuration,
         CudaCandidatePhysicsState &candidate,
-        collision::CudaCollisionScratch &scratch) {
+        Scratch &scratch) {
     const float dt =
             __int2float_rn(static_cast<std::int32_t>(
                     candidate.world.schemePeriodMs)) *

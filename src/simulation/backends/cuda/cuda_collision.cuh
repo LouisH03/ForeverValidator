@@ -18,8 +18,64 @@ constexpr float DirectionEpsilonSquared = 1.0e-10f;
 constexpr float CollisionDistance = 1.0e-5f;
 constexpr float SphereNormalAlignment = 0.8660254f;
 
-template <bool TrackDiagnostics>
-__device__ inline void Clear(CudaCollisionScratch &scratch) {
+__device__ inline CudaCollision &CollisionAt(
+        CudaCollisionScratch &scratch,
+        std::uint32_t index) {
+    return scratch.collisions[index];
+}
+
+__device__ inline const CudaCollision &CollisionAt(
+        const CudaCollisionScratch &scratch,
+        std::uint32_t index) {
+    return scratch.collisions[index];
+}
+
+__device__ inline CudaCollision &CollisionAt(
+        CudaCollisionSearchScratch &scratch,
+        std::uint32_t index) {
+    return scratch.collisionStorage[
+            static_cast<std::uint64_t>(index) * scratch.stride +
+            scratch.slot];
+}
+
+__device__ inline const CudaCollision &CollisionAt(
+        const CudaCollisionSearchScratch &scratch,
+        std::uint32_t index) {
+    return scratch.collisionStorage[
+            static_cast<std::uint64_t>(index) * scratch.stride +
+            scratch.slot];
+}
+
+__device__ inline CudaCollision &ShapeCollisionAt(
+        CudaCollisionScratch &scratch,
+        std::uint32_t index) {
+    return scratch.shapeCollisions[index];
+}
+
+__device__ inline const CudaCollision &ShapeCollisionAt(
+        const CudaCollisionScratch &scratch,
+        std::uint32_t index) {
+    return scratch.shapeCollisions[index];
+}
+
+__device__ inline CudaCollision &ShapeCollisionAt(
+        CudaCollisionSearchScratch &scratch,
+        std::uint32_t index) {
+    return scratch.shapeCollisionStorage[
+            static_cast<std::uint64_t>(index) * scratch.stride +
+            scratch.slot];
+}
+
+__device__ inline const CudaCollision &ShapeCollisionAt(
+        const CudaCollisionSearchScratch &scratch,
+        std::uint32_t index) {
+    return scratch.shapeCollisionStorage[
+            static_cast<std::uint64_t>(index) * scratch.stride +
+            scratch.slot];
+}
+
+template <bool TrackDiagnostics, typename Scratch>
+__device__ inline void Clear(Scratch &scratch) {
     scratch.collisionCount = 0u;
     scratch.shapeCollisionCount = 0u;
     if constexpr (TrackDiagnostics) {
@@ -36,28 +92,29 @@ __device__ inline void Clear(CudaCollisionScratch &scratch) {
     scratch.overflow = false;
 }
 
+template <typename Scratch>
 __device__ inline CudaCollision *AddShape(
-        CudaCollisionScratch &scratch) {
+        Scratch &scratch) {
     if (scratch.shapeCollisionCount >=
         ShapeCollisionCapacity) {
         scratch.overflow = true;
         return nullptr;
     }
-    CudaCollision *result =
-            &scratch.shapeCollisions[
-                    scratch.shapeCollisionCount++];
+    CudaCollision *result = &ShapeCollisionAt(
+            scratch, scratch.shapeCollisionCount++);
     *result = {};
     return result;
 }
 
+template <typename Scratch>
 __device__ inline void AddMain(
-        CudaCollisionScratch &scratch,
+        Scratch &scratch,
         const CudaCollision &value) {
     if (scratch.collisionCount >= CollisionCapacity) {
         scratch.overflow = true;
         return;
     }
-    scratch.collisions[scratch.collisionCount++] = value;
+    CollisionAt(scratch, scratch.collisionCount++) = value;
 }
 
 template<typename T>
@@ -314,8 +371,9 @@ __device__ inline GmVec3 TransformEllipsoidNormal(
     };
 }
 
+template <typename Scratch>
 struct UnitSphereTriangleQuery {
-    CudaCollisionScratch &scratch;
+    Scratch &scratch;
     GmVec3 center{};
     float radius = 1.0f;
     std::uint32_t materialA = 0u;
@@ -448,15 +506,16 @@ struct UnitSphereTriangleQuery {
     }
 };
 
+template <typename Scratch>
 __device__ inline void TransformNewCollisions(
-        CudaCollisionScratch &scratch,
+        Scratch &scratch,
         std::uint32_t firstNew,
         const GmIso4 &contactToWorld,
         const GmIso4 &normalToWorld) {
     for (std::uint32_t index = firstNew;
          index < scratch.shapeCollisionCount; ++index) {
         CudaCollision &collision =
-                scratch.shapeCollisions[index];
+                ShapeCollisionAt(scratch, index);
         collision.contactPoint = TransformPoint(
                 contactToWorld, collision.contactPoint);
         collision.impulseNormal = Normalize(
@@ -469,7 +528,7 @@ __device__ inline void TransformNewCollisions(
     }
 }
 
-template <bool TrackDiagnostics>
+template <bool TrackDiagnostics, typename Scratch>
 __device__ inline int EllipsoidMesh(
         const CudaPackedSceneHeader *scene,
         const CudaPackedStaticConfigurationHeader *configuration,
@@ -479,7 +538,7 @@ __device__ inline int EllipsoidMesh(
         const CudaVehicleCollisionShape &shape,
         std::uint32_t shapeIndex,
         const GmIso4 &shapeWorld,
-        CudaCollisionScratch &scratch) {
+        Scratch &scratch) {
     const GmVec3 radii = shape.localBounds.halfExtents;
     const GmVec3 inverseRadii = {
             1.0f / radii.x,
@@ -601,7 +660,7 @@ __device__ inline int EllipsoidMesh(
         };
         const std::uint32_t firstNew =
                 scratch.shapeCollisionCount;
-        UnitSphereTriangleQuery query{
+        UnitSphereTriangleQuery<Scratch> query{
                 scratch,
                 {},
                 1.0f,
@@ -649,14 +708,16 @@ __device__ inline bool NearlyEqual(
            NearlyEqual(left.z, right.z);
 }
 
+template <typename Scratch>
 __device__ inline void MergeShapeContacts(
-        CudaCollisionScratch &scratch) {
+        Scratch &scratch) {
     const std::uint32_t firstTarget =
             scratch.collisionCount;
     for (std::uint32_t index = 0u;
          index < scratch.shapeCollisionCount; ++index) {
-        if (scratch.shapeCollisions[index].sphereMergePrimary) {
-            AddMain(scratch, scratch.shapeCollisions[index]);
+        if (ShapeCollisionAt(
+                    scratch, index).sphereMergePrimary) {
+            AddMain(scratch, ShapeCollisionAt(scratch, index));
         }
     }
     const std::uint32_t targetAfterPrimaries =
@@ -664,12 +725,12 @@ __device__ inline void MergeShapeContacts(
     for (std::uint32_t index = 0u;
          index < scratch.shapeCollisionCount; ++index) {
         const CudaCollision &collision =
-                scratch.shapeCollisions[index];
+                ShapeCollisionAt(scratch, index);
         if (collision.sphereMergePrimary) continue;
         std::uint32_t target = firstTarget;
         for (; target < targetAfterPrimaries; ++target) {
             const CudaCollision &primary =
-                    scratch.collisions[target];
+                    CollisionAt(scratch, target);
             if (NearlyEqual(
                         collision.extraNegated,
                         primary.extraNegated) ||
@@ -760,8 +821,9 @@ __device__ inline void Swap(
     right = temporary;
 }
 
+template <typename Scratch>
 __device__ inline void SortForResponse(
-        CudaCollisionScratch &scratch) {
+        Scratch &scratch) {
     constexpr std::uint32_t Cutoff = 8u;
     constexpr std::uint32_t StackSize = 30u;
     if (scratch.collisionCount < 2u) return;
@@ -778,36 +840,36 @@ __device__ inline void SortForResponse(
                 for (std::uint32_t cursor = low + 1u;
                      cursor <= high; ++cursor) {
                     if (CompareForResponse(
-                                scratch.collisions[cursor],
-                                scratch.collisions[selected]) > 0) {
+                                CollisionAt(scratch, cursor),
+                                CollisionAt(scratch, selected)) > 0) {
                         selected = cursor;
                     }
                 }
                 if (selected != high) {
-                    Swap(scratch.collisions[selected],
-                         scratch.collisions[high]);
+                    Swap(CollisionAt(scratch, selected),
+                         CollisionAt(scratch, high));
                 }
                 --high;
             }
         } else {
             std::uint32_t middle = low + count / 2u;
             if (CompareForResponse(
-                        scratch.collisions[low],
-                        scratch.collisions[middle]) > 0) {
-                Swap(scratch.collisions[low],
-                     scratch.collisions[middle]);
+                        CollisionAt(scratch, low),
+                        CollisionAt(scratch, middle)) > 0) {
+                Swap(CollisionAt(scratch, low),
+                     CollisionAt(scratch, middle));
             }
             if (CompareForResponse(
-                        scratch.collisions[low],
-                        scratch.collisions[high]) > 0) {
-                Swap(scratch.collisions[low],
-                     scratch.collisions[high]);
+                        CollisionAt(scratch, low),
+                        CollisionAt(scratch, high)) > 0) {
+                Swap(CollisionAt(scratch, low),
+                     CollisionAt(scratch, high));
             }
             if (CompareForResponse(
-                        scratch.collisions[middle],
-                        scratch.collisions[high]) > 0) {
-                Swap(scratch.collisions[middle],
-                     scratch.collisions[high]);
+                        CollisionAt(scratch, middle),
+                        CollisionAt(scratch, high)) > 0) {
+                Swap(CollisionAt(scratch, middle),
+                     CollisionAt(scratch, high));
             }
             std::uint32_t lowCursor = low;
             std::uint32_t highCursor = high;
@@ -818,8 +880,8 @@ __device__ inline void SortForResponse(
                     } while (
                             lowCursor < middle &&
                             CompareForResponse(
-                                    scratch.collisions[lowCursor],
-                                    scratch.collisions[middle]) <= 0);
+                                    CollisionAt(scratch, lowCursor),
+                                    CollisionAt(scratch, middle)) <= 0);
                 }
                 if (middle <= lowCursor) {
                     do {
@@ -827,19 +889,19 @@ __device__ inline void SortForResponse(
                     } while (
                             lowCursor <= high &&
                             CompareForResponse(
-                                    scratch.collisions[lowCursor],
-                                    scratch.collisions[middle]) <= 0);
+                                    CollisionAt(scratch, lowCursor),
+                                    CollisionAt(scratch, middle)) <= 0);
                 }
                 do {
                     --highCursor;
                 } while (
                         highCursor > middle &&
                         CompareForResponse(
-                                scratch.collisions[highCursor],
-                                scratch.collisions[middle]) > 0);
+                                CollisionAt(scratch, highCursor),
+                                CollisionAt(scratch, middle)) > 0);
                 if (highCursor < lowCursor) break;
-                Swap(scratch.collisions[lowCursor],
-                     scratch.collisions[highCursor]);
+                Swap(CollisionAt(scratch, lowCursor),
+                     CollisionAt(scratch, highCursor));
                 if (middle == highCursor) {
                     middle = lowCursor;
                 } else if (middle == lowCursor) {
@@ -853,8 +915,8 @@ __device__ inline void SortForResponse(
                 } while (
                         highCursor > middle &&
                         CompareForResponse(
-                                scratch.collisions[highCursor],
-                                scratch.collisions[middle]) == 0);
+                                CollisionAt(scratch, highCursor),
+                                CollisionAt(scratch, middle)) == 0);
             }
             if (middle >= highCursor) {
                 do {
@@ -862,8 +924,8 @@ __device__ inline void SortForResponse(
                 } while (
                         highCursor > low &&
                         CompareForResponse(
-                                scratch.collisions[highCursor],
-                                scratch.collisions[middle]) == 0);
+                                CollisionAt(scratch, highCursor),
+                                CollisionAt(scratch, middle)) == 0);
             }
             const std::uint32_t leftSpan =
                     highCursor - low;
@@ -908,12 +970,14 @@ __device__ inline void SortForResponse(
 
 }  // namespace detail
 
-template <bool TrackDiagnostics = true>
+template <
+        bool TrackDiagnostics = true,
+        typename Scratch = CudaCollisionScratch>
 __device__ inline Status Detect(
         const CudaPackedSceneHeader *scene,
         const CudaPackedStaticConfigurationHeader *configuration,
         const CudaCandidatePhysicsState &candidate,
-        CudaCollisionScratch &scratch) {
+        Scratch &scratch) {
     detail::Clear<TrackDiagnostics>(scratch);
     if (scene == nullptr || configuration == nullptr ||
         scene->magic != CudaPackedSceneHeader::Magic ||

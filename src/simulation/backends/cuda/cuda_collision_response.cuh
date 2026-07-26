@@ -793,12 +793,14 @@ __device__ inline void AbsorbVehicle(
 
 }  // namespace response_detail
 
-template <bool TrackDiagnostics = true>
+template <
+        bool TrackDiagnostics = true,
+        typename Scratch = CudaCollisionScratch>
 __device__ inline Status Respond(
         const CudaPackedSceneHeader *scene,
         const CudaPackedStaticConfigurationHeader *configuration,
         CudaCandidatePhysicsState &candidate,
-        CudaCollisionScratch &scratch) {
+        Scratch &scratch) {
     if (scene == nullptr || configuration == nullptr) {
         return Status::InvalidScene;
     }
@@ -813,7 +815,7 @@ __device__ inline Status Respond(
     for (std::uint32_t index = 0u;
          index < scratch.collisionCount; ++index) {
         const CudaCollision &collision =
-                scratch.collisions[index];
+                detail::CollisionAt(scratch, index);
         if (collision.staticActorIndex >= scene->actors.count ||
             collision.movingShapeIndex >=
                     configuration->collisionShapes.count) {

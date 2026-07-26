@@ -55,6 +55,16 @@ struct CudaCollisionScratch {
     CudaCollision shapeCollisions[ShapeCollisionCapacity]{};
 };
 
+struct CudaCollisionSearchScratch {
+    std::uint32_t collisionCount;
+    std::uint32_t shapeCollisionCount;
+    bool overflow;
+    CudaCollision *collisionStorage;
+    CudaCollision *shapeCollisionStorage;
+    std::uint32_t slot;
+    std::uint32_t stride;
+};
+
 }  // namespace forevervalidator::simulation::cuda::collision
 
 #endif
