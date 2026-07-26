@@ -72,6 +72,20 @@ CudaSearchBatchExecution CudaSearchExecutor::RunBatch(
     return RunBatch(firstCandidateId, candidateCount, false);
 }
 
+bool CudaSearchExecutor::ReserveBatchCapacity(
+        std::uint32_t,
+        std::string *diagnostic) noexcept {
+    if (diagnostic != nullptr) {
+        *diagnostic =
+                "CUDA search is unavailable in a CPU-only build";
+    }
+    return false;
+}
+
+std::uint32_t CudaSearchExecutor::BatchCapacity() const noexcept {
+    return 0u;
+}
+
 #endif
 
 }  // namespace forevervalidator::simulation

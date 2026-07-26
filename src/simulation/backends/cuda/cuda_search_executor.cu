@@ -87,6 +87,17 @@ public:
     ~DeviceAllocation() { Reset(); }
     DeviceAllocation(const DeviceAllocation &) = delete;
     DeviceAllocation &operator=(const DeviceAllocation &) = delete;
+    DeviceAllocation(DeviceAllocation &&other) noexcept
+        : data_(std::exchange(other.data_, nullptr)),
+          count_(std::exchange(other.count_, 0u)) {}
+    DeviceAllocation &operator=(DeviceAllocation &&other) noexcept {
+        if (this != &other) {
+            Reset();
+            data_ = std::exchange(other.data_, nullptr);
+            count_ = std::exchange(other.count_, 0u);
+        }
+        return *this;
+    }
 
     bool Allocate(std::size_t count) {
         Reset();
@@ -1706,6 +1717,151 @@ struct CudaSearchExecutor::Impl {
     DeviceAllocation<std::uint32_t> globalBestMutationCount;
     DeviceAllocation<DeviceBatchSummary> summary;
 
+    void UpdateResidentBytes() {
+        residentBytes = 0u;
+#define ADD_BYTES(member) residentBytes += member.Bytes()
+        ADD_BYTES(branchState);
+        ADD_BYTES(baselineTicks);
+        ADD_BYTES(baselineInputs);
+        ADD_BYTES(modifiers);
+        ADD_BYTES(smoothWeights);
+        ADD_BYTES(evaluator);
+        ADD_BYTES(candidateBestStates);
+        ADD_BYTES(candidateBestSamples);
+        ADD_BYTES(randomStates);
+        ADD_BYTES(candidateEvents);
+        ADD_BYTES(temporaryEvents);
+        ADD_BYTES(passBaselineEvents);
+        ADD_BYTES(eligibleIndices);
+        ADD_BYTES(eventCounts);
+        ADD_BYTES(mutationCounts);
+        ADD_BYTES(statuses);
+        ADD_BYTES(activeCandidates);
+        ADD_BYTES(scores);
+        ADD_BYTES(reducedBest);
+        ADD_BYTES(reductionTemporary);
+        ADD_BYTES(scratch);
+        ADD_BYTES(cancellation);
+        ADD_BYTES(globalBestSample);
+        ADD_BYTES(globalBestState);
+        ADD_BYTES(globalBestInputs);
+        ADD_BYTES(globalBestEventCount);
+        ADD_BYTES(globalBestMutationCount);
+        ADD_BYTES(summary);
+#undef ADD_BYTES
+    }
+
+    bool ReserveBatchCapacity(
+            std::uint32_t candidateCount,
+            std::string *diagnostic) {
+        if (candidateCount <= configuration.maximumBatchSize) {
+            if (diagnostic != nullptr) {
+                diagnostic->clear();
+            }
+            return true;
+        }
+        const std::uint64_t eventSlots64 =
+                static_cast<std::uint64_t>(candidateCount) *
+                configuration.maximumEventCount;
+        const std::uint64_t scoreSlots64 =
+                1u +
+                static_cast<std::uint64_t>(candidateCount) *
+                        evaluationTickCount;
+        if (eventSlots64 >
+                    std::numeric_limits<std::size_t>::max() ||
+            scoreSlots64 >
+                    std::numeric_limits<std::size_t>::max()) {
+            if (diagnostic != nullptr) {
+                *diagnostic =
+                        "CUDA search calibration buffer dimensions overflow";
+            }
+            return false;
+        }
+
+        const std::size_t candidates = candidateCount;
+        const std::size_t eventSlots =
+                static_cast<std::size_t>(eventSlots64);
+        const std::size_t scoreSlots =
+                static_cast<std::size_t>(scoreSlots64);
+        DeviceAllocation<CudaCandidateState> nextCandidateBestStates;
+        DeviceAllocation<DeviceSample> nextCandidateBestSamples;
+        DeviceAllocation<DeviceMt19937> nextRandomStates;
+        DeviceAllocation<CudaSearchInputEvent> nextCandidateEvents;
+        DeviceAllocation<CudaSearchInputEvent> nextTemporaryEvents;
+        DeviceAllocation<CudaSearchInputEvent> nextPassBaselineEvents;
+        DeviceAllocation<std::uint32_t> nextEligibleIndices;
+        DeviceAllocation<std::uint32_t> nextEventCounts;
+        DeviceAllocation<std::uint32_t> nextMutationCounts;
+        DeviceAllocation<DeviceCandidateStatus> nextStatuses;
+        DeviceAllocation<bool> nextActiveCandidates;
+        DeviceAllocation<DeviceSample> nextScores;
+        DeviceAllocation<std::byte> nextReductionTemporary;
+        DeviceAllocation<cuda::collision::CudaCollisionScratch> nextScratch;
+        if (!nextCandidateBestStates.Allocate(candidates) ||
+            !nextCandidateBestSamples.Allocate(candidates) ||
+            !nextRandomStates.Allocate(candidates) ||
+            !nextCandidateEvents.Allocate(eventSlots) ||
+            !nextTemporaryEvents.Allocate(eventSlots) ||
+            !nextPassBaselineEvents.Allocate(eventSlots) ||
+            !nextEligibleIndices.Allocate(eventSlots) ||
+            !nextEventCounts.Allocate(candidates) ||
+            !nextMutationCounts.Allocate(candidates) ||
+            !nextStatuses.Allocate(candidates) ||
+            !nextActiveCandidates.Allocate(candidates) ||
+            !nextScores.Allocate(scoreSlots) ||
+            !nextScratch.Allocate(candidates)) {
+            static_cast<void>(cudaGetLastError());
+            if (diagnostic != nullptr) {
+                *diagnostic =
+                        "CUDA calibration could not reserve a larger real batch";
+            }
+            return false;
+        }
+
+        std::size_t reductionBytes = 0u;
+        const cudaError_t error = cub::DeviceReduce::Reduce(
+                nullptr, reductionBytes,
+                nextScores.Get(), reducedBest.Get(),
+                scoreSlots,
+                BetterSample{
+                        configuration.evaluator.kind ==
+                                CudaSearchEvaluatorKind::Velocity},
+                DeviceSample{});
+        if (error != cudaSuccess ||
+            !nextReductionTemporary.Allocate(reductionBytes)) {
+            static_cast<void>(cudaGetLastError());
+            if (diagnostic != nullptr) {
+                *diagnostic = error != cudaSuccess
+                        ? CudaFailure(
+                                  "sizing calibrated CUDA winner reduction",
+                                  error)
+                        : "CUDA calibration winner reduction allocation failed";
+            }
+            return false;
+        }
+
+        candidateBestStates = std::move(nextCandidateBestStates);
+        candidateBestSamples = std::move(nextCandidateBestSamples);
+        randomStates = std::move(nextRandomStates);
+        candidateEvents = std::move(nextCandidateEvents);
+        temporaryEvents = std::move(nextTemporaryEvents);
+        passBaselineEvents = std::move(nextPassBaselineEvents);
+        eligibleIndices = std::move(nextEligibleIndices);
+        eventCounts = std::move(nextEventCounts);
+        mutationCounts = std::move(nextMutationCounts);
+        statuses = std::move(nextStatuses);
+        activeCandidates = std::move(nextActiveCandidates);
+        scores = std::move(nextScores);
+        reductionTemporary = std::move(nextReductionTemporary);
+        scratch = std::move(nextScratch);
+        configuration.maximumBatchSize = candidateCount;
+        UpdateResidentBytes();
+        if (diagnostic != nullptr) {
+            diagnostic->clear();
+        }
+        return true;
+    }
+
     CudaSearchBatchExecution Execute(
             std::uint64_t firstCandidateId,
             std::uint32_t candidateCount,
@@ -2181,36 +2337,7 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
             return {};
         }
 
-#define ADD_BYTES(member) impl->residentBytes += impl->member.Bytes()
-        ADD_BYTES(branchState);
-        ADD_BYTES(baselineTicks);
-        ADD_BYTES(baselineInputs);
-        ADD_BYTES(modifiers);
-        ADD_BYTES(smoothWeights);
-        ADD_BYTES(evaluator);
-        ADD_BYTES(candidateBestStates);
-        ADD_BYTES(candidateBestSamples);
-        ADD_BYTES(randomStates);
-        ADD_BYTES(candidateEvents);
-        ADD_BYTES(temporaryEvents);
-        ADD_BYTES(passBaselineEvents);
-        ADD_BYTES(eligibleIndices);
-        ADD_BYTES(eventCounts);
-        ADD_BYTES(mutationCounts);
-        ADD_BYTES(statuses);
-        ADD_BYTES(activeCandidates);
-        ADD_BYTES(scores);
-        ADD_BYTES(reducedBest);
-        ADD_BYTES(reductionTemporary);
-        ADD_BYTES(scratch);
-        ADD_BYTES(cancellation);
-        ADD_BYTES(globalBestSample);
-        ADD_BYTES(globalBestState);
-        ADD_BYTES(globalBestInputs);
-        ADD_BYTES(globalBestEventCount);
-        ADD_BYTES(globalBestMutationCount);
-        ADD_BYTES(summary);
-#undef ADD_BYTES
+        impl->UpdateResidentBytes();
         if (diagnostic != nullptr) {
             diagnostic->clear();
         }
@@ -2283,6 +2410,38 @@ CudaSearchBatchExecution CudaSearchExecutor::RunBatch(
     return impl_->Execute(
             firstCandidateId, candidateCount, false,
             cancellationRequested);
+}
+
+bool CudaSearchExecutor::ReserveBatchCapacity(
+        std::uint32_t candidateCount,
+        std::string *diagnostic) noexcept {
+    try {
+        if (!impl_ || candidateCount == 0u) {
+            if (diagnostic != nullptr) {
+                *diagnostic = !impl_
+                        ? "CUDA search executor is invalid"
+                        : "CUDA batch capacity must be positive";
+            }
+            return false;
+        }
+        return impl_->ReserveBatchCapacity(candidateCount, diagnostic);
+    } catch (const std::bad_alloc &) {
+        if (diagnostic != nullptr) {
+            *diagnostic =
+                    "CUDA calibration host allocation failed";
+        }
+        return false;
+    } catch (...) {
+        if (diagnostic != nullptr) {
+            *diagnostic =
+                    "unexpected CUDA calibration allocation failure";
+        }
+        return false;
+    }
+}
+
+std::uint32_t CudaSearchExecutor::BatchCapacity() const noexcept {
+    return impl_ ? impl_->configuration.maximumBatchSize : 0u;
 }
 
 }  // namespace forevervalidator::simulation

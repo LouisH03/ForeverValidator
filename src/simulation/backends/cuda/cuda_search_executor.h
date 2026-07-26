@@ -154,6 +154,10 @@ public:
             std::uint64_t firstCandidateId,
             std::uint32_t candidateCount,
             const std::function<bool()> &cancellationRequested) noexcept;
+    bool ReserveBatchCapacity(
+            std::uint32_t candidateCount,
+            std::string *diagnostic) noexcept;
+    std::uint32_t BatchCapacity() const noexcept;
 
 private:
     struct Impl;

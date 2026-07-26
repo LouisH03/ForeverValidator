@@ -526,6 +526,8 @@ public:
             std::uint64_t firstCandidateId,
             std::uint32_t candidateCount,
             const std::function<bool()> &cancellationRequested) noexcept;
+    PhysicsSandboxResult<std::uint32_t> ReserveBatchCapacity(
+            std::uint32_t candidateCount) noexcept;
 
 private:
     struct Impl;

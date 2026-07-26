@@ -2487,6 +2487,41 @@ PhysicsSandboxCudaSearchSession::RunBatch(
     }
 }
 
+PhysicsSandboxResult<std::uint32_t>
+PhysicsSandboxCudaSearchSession::ReserveBatchCapacity(
+        std::uint32_t candidateCount) noexcept {
+    try {
+        if (!impl_ || !impl_->executor || candidateCount == 0u) {
+            return PhysicsSandboxResult<std::uint32_t>::Failure(
+                    SearchError(
+                            PhysicsSandboxErrorCode::InvalidRequest,
+                            "invalid CUDA calibration batch capacity"));
+        }
+        std::string diagnostic;
+        if (!impl_->executor->ReserveBatchCapacity(
+                    candidateCount, &diagnostic)) {
+            return PhysicsSandboxResult<std::uint32_t>::Failure(
+                    SearchError(
+                            PhysicsSandboxErrorCode::AllocationFailed,
+                            diagnostic.empty()
+                                    ? "CUDA calibration capacity allocation failed"
+                                    : diagnostic));
+        }
+        return PhysicsSandboxResult<std::uint32_t>::Success(
+                impl_->executor->BatchCapacity());
+    } catch (const std::bad_alloc &) {
+        return PhysicsSandboxResult<std::uint32_t>::Failure(
+                SearchError(
+                        PhysicsSandboxErrorCode::AllocationFailed,
+                        "CUDA calibration capacity allocation failed"));
+    } catch (...) {
+        return PhysicsSandboxResult<std::uint32_t>::Failure(
+                SearchError(
+                        PhysicsSandboxErrorCode::UnexpectedFailure,
+                        "unexpected CUDA calibration capacity failure"));
+    }
+}
+
 PhysicsSandboxResult<PhysicsSandboxCudaSearchSession>
 CreatePhysicsSandboxCudaSearchSession(
         PhysicsSandbox &sandbox,
