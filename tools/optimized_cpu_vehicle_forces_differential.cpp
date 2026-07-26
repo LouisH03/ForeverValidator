@@ -213,6 +213,17 @@ bool RunCurveCases(OptimizedCpuBinary32MathPath selectedPath) {
                     {0.0f, 2.0f},
                     {std::numeric_limits<float>::max(), 3.0f},
             },
+            {
+                    {10.0f, 1.0f},
+                    {-10.0f, 2.0f},
+                    {0.0f, 3.0f},
+            },
+            {
+                    {-1.0f, 1.0f},
+                    {-1.0f, 2.0f},
+                    {0.0f, 3.0f},
+                    {1.0f, 4.0f},
+            },
     };
 
     std::vector<float> inputs = {
