@@ -2331,6 +2331,16 @@ PhysicsSandboxCudaSearchSession::Impl::Convert(
             execution.winnerStateCaptureKernelMilliseconds;
     result.metrics.finalizationKernelMilliseconds =
             execution.finalizationKernelMilliseconds;
+    result.metrics.simulationThreadsPerBlock =
+            execution.simulationThreadsPerBlock;
+    result.metrics.simulationRegistersPerThread =
+            execution.simulationRegistersPerThread;
+    result.metrics.simulationLocalBytesPerThread =
+            execution.simulationLocalBytesPerThread;
+    result.metrics.simulationActiveBlocksPerMultiprocessor =
+            execution.simulationActiveBlocksPerMultiprocessor;
+    result.metrics.simulationTheoreticalOccupancy =
+            execution.simulationTheoreticalOccupancy;
     if (!execution.best.valid) {
         return PhysicsSandboxResult<
                 PhysicsSandboxCudaSearchBatch>::Success(

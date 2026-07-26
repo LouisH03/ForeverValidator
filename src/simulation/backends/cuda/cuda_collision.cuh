@@ -676,7 +676,7 @@ __device__ inline GmIso4 BodyPose(
 __device__ inline GmIso4 ShapeBodyPose(
         const CudaVehicleCollisionShape &shape,
         const CudaPackedStaticConfigurationHeader *configuration,
-        const CudaCandidateState &candidate) {
+        const CudaCandidatePhysicsState &candidate) {
     if (shape.wheelRole == UINT32_MAX) {
         return shape.bodyPose;
     }
@@ -893,7 +893,7 @@ __device__ inline void SortForResponse(
 __device__ inline Status Detect(
         const CudaPackedSceneHeader *scene,
         const CudaPackedStaticConfigurationHeader *configuration,
-        const CudaCandidateState &candidate,
+        const CudaCandidatePhysicsState &candidate,
         CudaCollisionScratch &scratch) {
     detail::Clear(scratch);
     if (scene == nullptr || configuration == nullptr ||

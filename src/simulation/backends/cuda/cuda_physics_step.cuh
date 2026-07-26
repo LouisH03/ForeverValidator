@@ -17,7 +17,7 @@ enum class Status : std::uint32_t {
 };
 
 __device__ inline vehicle::ForceStatus ForcePass(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration,
         float dt) {
     environment::BeginForcePass(candidate.body, configuration);
@@ -31,7 +31,7 @@ __device__ inline vehicle::ForceStatus ForcePass(
 __device__ inline Status CollisionSubstep(
         const CudaPackedSceneHeader *scene,
         const CudaPackedStaticConfigurationHeader *configuration,
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         float dt,
         collision::CudaCollisionScratch &scratch) {
     const vehicle::ForceStatus forceStatus =
@@ -59,7 +59,7 @@ __device__ inline Status CollisionSubstep(
 __device__ inline Status Step(
         const CudaPackedSceneHeader *scene,
         const CudaPackedStaticConfigurationHeader *configuration,
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         collision::CudaCollisionScratch &scratch) {
     const float dt =
             __int2float_rn(static_cast<std::int32_t>(

@@ -51,7 +51,7 @@ __device__ inline const VehicleMaterialDefinition &Material(
 }
 
 __device__ inline void UpdateBodyContactSnapshot(
-        CudaCandidateState &candidate) {
+        CudaCandidatePhysicsState &candidate) {
     auto &contacts = candidate.vehicle.contacts;
     auto &frame =
             candidate.vehicle.frameHistory.physicsCurrent;
@@ -120,7 +120,7 @@ __device__ inline void UpdateBodyContactSnapshot(
 }
 
 __device__ inline void UpdateWheelSnapshot(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         CudaWheelState &wheel) {
     wheel.previousPhysics = wheel.currentPhysics;
     auto &snapshot = wheel.currentPhysics;
@@ -145,7 +145,7 @@ __device__ inline void UpdateWheelSnapshot(
 }
 
 __device__ inline void UpdateMaterialFeedback(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration) {
     auto &vehicle = candidate.vehicle;
     const VehicleMaterialDefinition &material =
@@ -218,7 +218,7 @@ __device__ inline void UpdateMaterialFeedback(
 }  // namespace after_detail
 
 __device__ inline void AfterContacts(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration) {
     auto &vehicle = candidate.vehicle;
     vehicle.frameHistory.physicsPrevious =

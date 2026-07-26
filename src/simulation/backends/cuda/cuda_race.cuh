@@ -8,7 +8,7 @@ namespace forevervalidator::simulation::cuda::race {
 namespace detail {
 
 __device__ inline void SetSpawn(
-        CudaRaceState &race,
+        CudaRacePhysicsState &race,
         const GmIso4 &spawn,
         bool updateHistory) {
     if (updateHistory) {
@@ -18,17 +18,17 @@ __device__ inline void SetSpawn(
 }
 
 __device__ inline void ClearFreewheel(
-        CudaCandidateState &candidate) {
+        CudaCandidatePhysicsState &candidate) {
     candidate.vehicle.controls.forcedLowSpeedFriction = false;
     ++candidate.race.progress.freewheelClearCount;
 }
 
 __device__ inline bool AcceptCheckpointSlot(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         std::uint32_t checkpointIndex,
         std::uint32_t checkpointSlot,
         const GmIso4 *spawn) {
-    CudaRaceState &race = candidate.race;
+    CudaRacePhysicsState &race = candidate.race;
     if (checkpointIndex >= race.checkpointSlotsPassed.count ||
         checkpointSlot >= race.checkpointSlotsPassed.count ||
         race.checkpointSlotsPassed.values[checkpointSlot] != 0u) {
@@ -65,9 +65,9 @@ __device__ inline bool AcceptCheckpointSlot(
 }
 
 __device__ inline void Checkpoint(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const CudaSceneActor &actor) {
-    CudaRaceState &race = candidate.race;
+    CudaRacePhysicsState &race = candidate.race;
     race.progress.lastBlockRole = actor.checkpointRole;
     race.progress.lastContactBlockId = actor.raceBlockId;
     if (actor.checkpointSlot == UINT32_MAX) return;
@@ -89,9 +89,9 @@ __device__ inline void Checkpoint(
 }
 
 __device__ inline void Finish(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const CudaSceneActor &actor) {
-    CudaRaceState &race = candidate.race;
+    CudaRacePhysicsState &race = candidate.race;
     ReplayRaceProgress &progress = race.progress;
     progress.lastBlockRole = actor.checkpointRole;
     if (progress.raceCompleted ||
@@ -131,7 +131,7 @@ __device__ inline void Finish(
 }  // namespace detail
 
 __device__ inline void OnTriggerContact(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const CudaSceneActor &actor) {
     if (!actor.hasCheckpoint ||
         actor.checkpointRole ==

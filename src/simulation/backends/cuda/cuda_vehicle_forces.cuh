@@ -82,7 +82,7 @@ __device__ inline GmVec3 TransformDirection(
 }
 
 __device__ inline GmBoxAligned WaterWorldBox(
-        const CudaCandidateState &candidate) {
+        const CudaCandidatePhysicsState &candidate) {
     const GmBoxAligned &local =
             candidate.vehicle.water.boxLocal;
     const GmMat3 &rotation = candidate.body.write.rotation;
@@ -113,7 +113,7 @@ __device__ inline GmBoxAligned WaterWorldBox(
 }
 
 __device__ inline bool WaterAcceptsRegion(
-        const CudaCandidateState &candidate,
+        const CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration,
         GmBoxAligned &world) {
     if (!configuration->water.present) return false;
@@ -168,7 +168,7 @@ __device__ inline bool WaterAcceptsRegion(
 }
 
 __device__ inline void AddCentralForce(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const GmVec3 &localForce) {
     const GmVec3 world =
             LocalToWorld(candidate.body, localForce);
@@ -190,7 +190,7 @@ __device__ inline void AddCentralForce(
 }
 
 __device__ inline void AddForceAtPoint(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const GmVec3 &localForce,
         const GmVec3 &localPoint) {
     const GmVec3 worldForce =
@@ -259,7 +259,7 @@ __device__ inline void AddForceAtPoint(
 }
 
 __device__ inline void AddTorque(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const GmVec3 &localTorque) {
     const GmVec3 world =
             LocalToWorld(candidate.body, localTorque);
@@ -272,7 +272,7 @@ __device__ inline void AddTorque(
 }
 
 __device__ inline void AddCentralImpulse(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const GmVec3 &localImpulse) {
     const GmVec3 world =
             LocalToWorld(candidate.body, localImpulse);
@@ -299,7 +299,7 @@ __device__ inline void AddCentralImpulse(
 }
 
 __device__ inline int ApplyWaterForces(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration,
         const GmVec3 &forceToSubtract) {
     GmBoxAligned worldBox;
@@ -458,14 +458,14 @@ __device__ inline int ApplyWaterForces(
 }
 
 __device__ inline void SetLocalLinearSpeed(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const GmVec3 &localSpeed) {
     candidate.body.current.linearSpeed =
             LocalToWorld(candidate.body, localSpeed);
 }
 
 __device__ inline void SetLocalAngularSpeed(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const GmVec3 &localSpeed) {
     candidate.body.current.angularSpeed =
             LocalToWorld(candidate.body, localSpeed);
@@ -548,7 +548,7 @@ __device__ inline void SaveAndClearFeedback(
 }
 
 __device__ inline void SetZeroDynamics(
-        CudaCandidateState &candidate) {
+        CudaCandidatePhysicsState &candidate) {
     candidate.body.current.linearSpeed = {};
     candidate.body.current.angularSpeed = {};
     candidate.body.current.force = {};
@@ -567,7 +567,7 @@ __device__ inline std::uint32_t FakeContactTextureIndex(
 }
 
 __device__ inline void CreateFakeContacts(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration) {
     CudaVehicleState &vehicle = candidate.vehicle;
     const GmVec3 linearSpeed = WorldToLocal(
@@ -651,7 +651,7 @@ __device__ inline void CreateFakeContacts(
 }
 
 __device__ inline void ApplyFrictionForces(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration,
         const GmVec3 &speed) {
     CudaVehicleState &vehicle = candidate.vehicle;
@@ -756,7 +756,7 @@ __device__ inline void ApplyFrictionForces(
 }
 
 __device__ inline void ClampLinearSpeed(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         GmVec3 &localSpeed) {
     const float capSquared =
             candidate.vehicle.linearSpeedCap *
@@ -781,7 +781,7 @@ __device__ inline void ClampLinearSpeed(
 }
 
 __device__ inline void GroundMaterial(
-        const CudaCandidateState &candidate,
+        const CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration,
         VehicleMaterialBlendValues &values,
         bool &present) {
@@ -878,7 +878,7 @@ __device__ inline float VisualSteerYaw(
 }
 
 __device__ inline void UpdateAirControl(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration,
         const GmVec3 &angularSpeed,
         bool groundContact,
@@ -1179,7 +1179,7 @@ __device__ inline void UpdateImpactStates(
 }
 
 __device__ inline void ApplySpecialContactResponse(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration,
         const GmVec3 &currentForce,
         std::uint32_t tick,
@@ -1277,7 +1277,7 @@ __device__ inline void UpdateFeedbackSpring(
 }
 
 __device__ inline void UpdateFeedback(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration,
         float dt,
         const GmVec3 &linearSpeed,
@@ -1358,7 +1358,7 @@ __device__ inline float SignNonNegative(float value) {
 }
 
 __device__ inline void WheelSuspensionForce(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration,
         CudaWheelState &wheel) {
     if (!wheel.realTime.contactPresent) return;
@@ -1666,7 +1666,7 @@ __device__ inline float SignedAngle(
 }
 
 __device__ inline void EnterCircularBurnout(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration,
         const GmVec3 &linearSpeed,
         float visualSteerYaw) {
@@ -1785,7 +1785,7 @@ __device__ inline void EnterCircularBurnout(
 }
 
 __device__ inline void ApplyCircularBurnout(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration,
         const GmVec3 &currentForce,
         const GmVec3 &linearSpeed,
@@ -2038,7 +2038,7 @@ __device__ inline void ApplyCircularBurnout(
 }
 
 __device__ inline void ApplyDirtSlide(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration,
         bool dirtSurface,
         const GmVec3 &linearSpeed) {
@@ -2122,7 +2122,7 @@ __device__ inline void ApplyDirtSlide(
 }
 
 __device__ inline ForceStatus ComputeModel6Ground(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration,
         float dt,
         const GmVec3 &currentForce,
@@ -2625,7 +2625,7 @@ __device__ inline ForceStatus ComputeModel6Ground(
 }  // namespace force_detail
 
 __device__ inline ForceStatus ComputeForcesModel6(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration,
         float dt) {
     CudaVehicleState &vehicle = candidate.vehicle;

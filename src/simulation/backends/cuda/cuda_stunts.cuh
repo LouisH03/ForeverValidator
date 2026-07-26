@@ -203,7 +203,7 @@ __device__ inline std::uint32_t RotationCount(
                        : (magnitude + HalfPi) / Pi);
 }
 
-__device__ inline void Reset(CudaRaceState &race) {
+__device__ inline void Reset(CudaRacePhysicsState &race) {
     race.stuntRotation = {};
     race.stuntTakeoffTick = UINT32_MAX;
     race.stuntLandingTick = UINT32_MAX;
@@ -221,7 +221,7 @@ __device__ inline void Reset(CudaRaceState &race) {
     }
 }
 
-__device__ inline void PushInput(CudaRaceState &race) {
+__device__ inline void PushInput(CudaRacePhysicsState &race) {
     CTrackManiaRace::ReplayStuntInputSnapshot snapshot;
     snapshot.tickTimeMs = race.replayStuntState.tickTimeMs;
     snapshot.lastChangeTimeMs =
@@ -238,7 +238,7 @@ __device__ inline void PushInput(CudaRaceState &race) {
     }
 }
 
-__device__ inline void PushLocation(CudaRaceState &race) {
+__device__ inline void PushLocation(CudaRacePhysicsState &race) {
     constexpr std::uint32_t Capacity = 20u;
     if (race.stuntLocationHistorySize == Capacity) {
         for (std::uint32_t index = 1u; index < Capacity; ++index) {
@@ -254,7 +254,7 @@ __device__ inline void PushLocation(CudaRaceState &race) {
 }
 
 __device__ inline bool IsStuntTimeOver(
-        const CudaRaceState &race,
+        const CudaRacePhysicsState &race,
         std::uint32_t tick) {
     if (race.replayStuntsRaceStartTimeMs == UINT32_MAX ||
         race.replayStuntsRaceStartTimeMs >= tick) {
@@ -265,7 +265,7 @@ __device__ inline bool IsStuntTimeOver(
 }
 
 __device__ inline bool IsMasterJump(
-        const CudaRaceState &race,
+        const CudaRacePhysicsState &race,
         std::uint32_t startTimeMs,
         std::uint32_t endTimeMs) {
     const std::uint32_t queryStart =
@@ -298,7 +298,7 @@ __device__ inline bool IsMasterJump(
 }
 
 __device__ inline Status AppendEvent(
-        CudaRaceState &race,
+        CudaFixedArray<ReplayStuntEvent, 2048u> &stuntEvents,
         std::uint32_t figure,
         std::uint32_t degree,
         std::uint32_t score,
@@ -307,11 +307,11 @@ __device__ inline Status AppendEvent(
         bool reverseLanding,
         bool masterJump,
         std::uint32_t chain) {
-    if (race.stuntEvents.count >= 2048u) {
+    if (stuntEvents.count >= 2048u) {
         return Status::EventCapacityExceeded;
     }
     ReplayStuntEvent &event =
-            race.stuntEvents.values[race.stuntEvents.count++];
+            stuntEvents.values[stuntEvents.count++];
     event.figure = static_cast<EFigures>(figure);
     event.degree = degree;
     event.score = score;
@@ -323,7 +323,7 @@ __device__ inline Status AppendEvent(
     return Status::Success;
 }
 
-__device__ inline void UpdateRotation(CudaRaceState &race) {
+__device__ inline void UpdateRotation(CudaRacePhysicsState &race) {
     const GmMat3 relative = MultiplyByTranspose(
             race.replayStuntState.vehicleLocation.rotation,
             race.stuntPreviousLocation.rotation);
@@ -338,7 +338,9 @@ __device__ inline void UpdateRotation(CudaRaceState &race) {
             race.replayStuntState.vehicleLocation;
 }
 
-__device__ inline Status Compute(CudaRaceState &race) {
+__device__ inline Status Compute(
+        CudaRacePhysicsState &race,
+        CudaFixedArray<ReplayStuntEvent, 2048u> &stuntEvents) {
     if (!race.replayStuntsEnabled ||
         race.stuntLandingTick == UINT32_MAX) {
         return Status::Success;
@@ -517,7 +519,7 @@ __device__ inline Status Compute(CudaRaceState &race) {
     }
     race.stuntComboWindowMs = interComboDelay + 20u * score;
     const Status eventStatus = AppendEvent(
-            race, figure, 180u * primaryCount, score, bonus,
+            stuntEvents, figure, 180u * primaryCount, score, bonus,
             straightLanding, reverseLanding, masterJump,
             race.stuntChain);
     if (eventStatus != Status::Success) {
@@ -554,7 +556,7 @@ __device__ inline void Configure(
     detail::Reset(race);
 }
 
-__device__ inline void ApplyRespawnPenalty(CudaRaceState &race) {
+__device__ inline void ApplyRespawnPenalty(CudaRacePhysicsState &race) {
     if (!race.replayStuntsEnabled) return;
     const std::uint32_t penalty =
             race.stuntsScore < detail::RespawnPenalty
@@ -580,12 +582,13 @@ __device__ inline Status ApplyTimePenalty(
     if (penalty == 0u) return Status::Success;
     race.stuntComboWindowMs = detail::InterComboDelay;
     return detail::AppendEvent(
-            race, 34u, 0u, penalty, 0.0f,
+            race.stuntEvents, 34u, 0u, penalty, 0.0f,
             false, false, false, 0u);
 }
 
 __device__ inline Status UpdateState(
-        CudaRaceState &race,
+        CudaRacePhysicsState &race,
+        CudaFixedArray<ReplayStuntEvent, 2048u> &stuntEvents,
         const ReplayStuntSimulationState &state) {
     race.replayStuntState = state;
     race.replayStuntStateAvailable = true;
@@ -638,7 +641,8 @@ __device__ inline Status UpdateState(
                                               speedMagnitude,
                                       race.replayStuntState.forwardSpeed /
                                               speedMagnitude);
-            const Status status = detail::Compute(race);
+            const Status status =
+                    detail::Compute(race, stuntEvents);
             if (status != Status::Success) return status;
             detail::Reset(race);
         } else {
@@ -673,6 +677,13 @@ __device__ inline Status UpdateState(
     return Status::Success;
 }
 
+__device__ inline Status UpdateState(
+        CudaRaceState &race,
+        const ReplayStuntSimulationState &state) {
+    return UpdateState(
+            race, race.stuntEvents, state);
+}
+
 __device__ inline Status Update(
         CudaCandidateState &candidate,
         const CudaControlTick &tick) {
@@ -703,7 +714,8 @@ __device__ inline Status Update(
             physics.noGroundFrictionGuard;
     state.inputLastChangeTimeMs =
             tick.stuntsInput.lastChangeTimeMs;
-    return UpdateState(candidate.race, state);
+    return UpdateState(
+            candidate.race, candidate.stuntEvents, state);
 }
 
 }  // namespace forevervalidator::simulation::cuda::stunts

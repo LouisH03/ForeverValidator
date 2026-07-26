@@ -298,7 +298,7 @@ __device__ inline void IntegrateWheelSuspension(
 }
 
 __device__ inline void IntegrateVehiclePrefix(
-    CudaCandidateState &candidate,
+    CudaCandidatePhysicsState &candidate,
     const CudaPackedStaticConfigurationHeader *configuration,
     float dt) {
     CudaVehicleState &vehicle = candidate.vehicle;

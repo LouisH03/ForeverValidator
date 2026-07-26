@@ -52,7 +52,7 @@ __device__ inline GmVec3 LocalToWorldSideA(
 }
 
 __device__ inline GmVec3 WorldCenterOfMass(
-        const CudaCandidateState &candidate) {
+        const CudaCandidatePhysicsState &candidate) {
     return detail::TransformPoint(
             {candidate.body.current.rotation,
              candidate.body.current.position},
@@ -60,7 +60,7 @@ __device__ inline GmVec3 WorldCenterOfMass(
 }
 
 __device__ inline GmVec3 SpeedAtPoint(
-        const CudaCandidateState &candidate,
+        const CudaCandidatePhysicsState &candidate,
         const GmVec3 &point) {
     const auto &state = candidate.body.current;
     const GmVec3 center = WorldCenterOfMass(candidate);
@@ -83,7 +83,7 @@ __device__ inline GmVec3 SpeedAtPoint(
 __device__ inline std::uint32_t WheelIndexForShape(
         const CudaVehicleCollisionShape &shape,
         const CudaPackedStaticConfigurationHeader *configuration,
-        const CudaCandidateState &candidate) {
+        const CudaCandidatePhysicsState &candidate) {
     if (shape.wheelRole == UINT32_MAX) return UINT32_MAX;
     const VehicleWheelDefinition *definitions =
             reinterpret_cast<const VehicleWheelDefinition *>(
@@ -104,7 +104,7 @@ __device__ inline Contact MakeVehicleContact(
         const CudaVehicleCollisionShape &shape,
         const CudaSceneActor &actor,
         const CudaPackedStaticConfigurationHeader *configuration,
-        const CudaCandidateState &candidate) {
+        const CudaCandidatePhysicsState &candidate) {
     const GmMat3 &rotation = candidate.body.current.rotation;
     const GmVec3 pointFromBody = {
             collision.contactPoint.x -
@@ -135,7 +135,7 @@ __device__ inline Contact MakeVehicleContact(
 }
 
 __device__ inline void AddReplacement(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const GmVec3 &replacement,
         bool &overflow) {
     auto &items = candidate.body.collisionReplacements;
@@ -156,7 +156,7 @@ __device__ inline void Accumulate(
 }
 
 __device__ inline void AddPointImpulse(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration,
         const GmVec3 &localImpulse,
         const GmVec3 &localPoint) {
@@ -243,7 +243,7 @@ __device__ inline void AddPointImpulse(
 }
 
 __device__ inline void ComputeAndApplyContactImpulse(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration,
         float restitution,
         const GmVec3 &speed,
@@ -375,7 +375,7 @@ __device__ inline GmVec3 ClampTangentSpeed(
 }
 
 __device__ inline void AddWorldImpulseAtPoint(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const GmVec3 &impulse,
         const GmVec3 &point) {
     auto &state = candidate.body.current;
@@ -413,7 +413,7 @@ __device__ inline void AddWorldImpulseAtPoint(
 }
 
 __device__ inline void ApplyGenericImpulse(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const CudaCollision &collision,
         const GmVec3 &originalSpeed) {
     const MaterialData materialA =
@@ -510,7 +510,7 @@ __device__ inline float BodyContactTangentLimit(
 }
 
 __device__ inline void ApplyBodyContactImpulse(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration,
         Contact &contact) {
     const float speedAlongNormal =
@@ -608,7 +608,7 @@ __device__ inline bool ApplyWheelReplacement(
 }
 
 __device__ inline void ApplyWheelImpulse(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration,
         CudaWheelState &wheel,
         Contact &contact,
@@ -653,7 +653,7 @@ __device__ inline void ApplyWheelImpulse(
 }
 
 __device__ inline void AbsorbWheel(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration,
         Contact &contact) {
     CudaWheelState &wheel =
@@ -715,7 +715,7 @@ __device__ inline void AbsorbWheel(
 }
 
 __device__ inline void AbsorbVehicle(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration,
         Contact &contact) {
     if (contact.peerMaterial ==
@@ -796,7 +796,7 @@ __device__ inline void AbsorbVehicle(
 __device__ inline Status Respond(
         const CudaPackedSceneHeader *scene,
         const CudaPackedStaticConfigurationHeader *configuration,
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         CudaCollisionScratch &scratch) {
     if (scene == nullptr || configuration == nullptr) {
         return Status::InvalidScene;

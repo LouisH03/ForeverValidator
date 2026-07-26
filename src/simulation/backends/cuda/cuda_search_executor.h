@@ -135,6 +135,11 @@ struct CudaSearchBatchExecution {
     double winnerReductionKernelMilliseconds = 0.0;
     double winnerStateCaptureKernelMilliseconds = 0.0;
     double finalizationKernelMilliseconds = 0.0;
+    std::uint32_t simulationThreadsPerBlock = 0u;
+    std::uint32_t simulationRegistersPerThread = 0u;
+    std::uint64_t simulationLocalBytesPerThread = 0u;
+    std::uint32_t simulationActiveBlocksPerMultiprocessor = 0u;
+    double simulationTheoreticalOccupancy = 0.0;
     std::string diagnostic;
 };
 

@@ -132,7 +132,7 @@ struct CudaDynamicBodyState {
     std::uint32_t dynamicType = 0u;
 };
 
-struct CudaRaceState {
+struct CudaRacePhysicsState {
     CTrackManiaPlayer::RuntimeClone player{};
     CudaFixedArray<std::uint8_t, 1024u> checkpointSlotsPassed{};
     CudaOptional<GmIso4> playerSpawnLocation{};
@@ -166,11 +166,14 @@ struct CudaRaceState {
     CudaOptional<std::uint32_t> stuntScoreAtTimeLimit{};
     std::uint32_t stuntFigureScores[39]{};
     std::uint32_t stuntsScore = 0u;
+};
+
+struct CudaRaceState : CudaRacePhysicsState {
     CudaFixedArray<ReplayStuntEvent, 2048u> stuntEvents{};
 };
 
-struct CudaCandidateState {
-    static constexpr std::uint32_t SchemaVersion = 3u;
+struct CudaCandidatePhysicsState {
+    static constexpr std::uint32_t SchemaVersion = 4u;
 
     std::uint32_t schemaVersion = SchemaVersion;
     std::uint32_t candidateId = 0u;
@@ -180,14 +183,20 @@ struct CudaCandidateState {
     ReplayPhysicsWorld::RuntimeClone world{};
     CudaDynamicBodyState body{};
     CudaVehicleState vehicle{};
-    CudaRaceState race{};
+    CudaRacePhysicsState race{};
     std::uint32_t incrementalRespawnCount = 0u;
     bool firstStep = true;
     bool stuntsEnabled = false;
     std::uint8_t reserved[10]{};
 };
 
-static_assert(std::is_standard_layout_v<CudaCandidateState>);
+struct CudaCandidateState : CudaCandidatePhysicsState {
+    CudaFixedArray<ReplayStuntEvent, 2048u> stuntEvents{};
+};
+
+static_assert(std::is_standard_layout_v<CudaCandidatePhysicsState>);
+static_assert(std::is_trivially_copyable_v<CudaCandidatePhysicsState>);
+static_assert(sizeof(CudaCandidatePhysicsState) < 16u * 1024u);
 static_assert(std::is_trivially_copyable_v<CudaCandidateState>);
 static_assert(sizeof(CudaCandidateState) < 192u * 1024u);
 

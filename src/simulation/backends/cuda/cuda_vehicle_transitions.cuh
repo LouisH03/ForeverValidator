@@ -181,7 +181,7 @@ __device__ inline void ResetWheel(
 }
 
 __device__ inline void VehicleReset(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration) {
     CudaVehicleState &vehicle = candidate.vehicle;
     vehicle.controls.lowSpeedGateA = 0.0f;
@@ -295,7 +295,7 @@ __device__ inline void VehicleReset(
 }  // namespace detail
 
 __device__ inline void ApplyControls(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const ReplayVehicleControlState &controls) {
     candidate.vehicle.controls.lowSpeedGateA =
             controls.lowSpeedGateA;
@@ -312,7 +312,7 @@ __device__ inline void ApplyControls(
 }
 
 __device__ inline void PrepareStep(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const CudaControlTick &tick,
         const CudaPackedStaticConfigurationHeader *configuration) {
     ApplyControls(candidate, tick.controls);
@@ -366,7 +366,7 @@ __device__ inline void PrepareStep(
 }
 
 __device__ inline bool Respawn(
-        CudaCandidateState &candidate,
+        CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration) {
     if (!candidate.race.playerSpawnLocation.present) {
         return false;

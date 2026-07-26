@@ -2114,7 +2114,8 @@ ReplaySimulationSession::RunCudaVehiclePrefixDifferentialForTesting(
             ReplaySimulationInstanceSemanticHash(decoded);
     constexpr std::size_t CandidateSemanticExtent =
             offsetof(
-                    forevervalidator::simulation::CudaCandidateState,
+                    forevervalidator::simulation::
+                            CudaCandidatePhysicsState,
                     stuntsEnabled) +
             sizeof(bool);
     if (candidateMismatch >= CandidateSemanticExtent &&
@@ -2251,7 +2252,8 @@ ReplaySimulationSession::RunCudaVehicleForceDifferentialForTesting(
     }
     constexpr std::size_t SemanticExtent =
             offsetof(
-                    forevervalidator::simulation::CudaCandidateState,
+                    forevervalidator::simulation::
+                            CudaCandidatePhysicsState,
                     stuntsEnabled) +
             sizeof(bool);
     result.checkedBytes = SemanticExtent;

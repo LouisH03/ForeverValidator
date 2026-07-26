@@ -10,6 +10,7 @@
 #include <limits>
 #include <new>
 #include <thread>
+#include <type_traits>
 #include <utility>
 
 #include "simulation/backends/cuda/cuda_exact_math.cuh"
@@ -23,6 +24,7 @@ namespace forevervalidator::simulation {
 namespace {
 
 constexpr std::uint32_t InvalidCandidateSlot = UINT32_MAX;
+constexpr std::uint32_t SimulationBlockSize = 32u;
 
 enum class DeviceCandidateStatus : std::uint32_t {
     Success,
@@ -1121,7 +1123,7 @@ __device__ ReplayStuntInputState StuntsFromState(
     return result;
 }
 
-__device__ void ApplyControlPrefix(CudaCandidateState &state,
+__device__ void ApplyControlPrefix(CudaCandidatePhysicsState &state,
                                    const CudaControlTick &tick) {
     state.world.schemePeriodMs = tick.periodMs;
     state.world.tickTimeMs = tick.timeMs;
@@ -1199,7 +1201,7 @@ __device__ bool SegmentEntry(
 
 __device__ DeviceSample EvaluateState(
         const CudaSearchEvaluatorConfiguration &evaluator,
-        const CudaCandidateState &state,
+        const CudaCandidatePhysicsState &state,
         const GmVec3 &previousPosition,
         double previousTimeMs,
         double currentTimeMs,
@@ -1436,6 +1438,18 @@ __global__ void GenerateSearchCandidatesKernel(
     activeCandidates[slot] = active;
 }
 
+template <typename State, bool SimulateStunts>
+__device__ State LoadSearchState(
+        const CudaCandidateState *branchState) {
+    if constexpr (SimulateStunts) {
+        return *branchState;
+    } else {
+        return static_cast<const CudaCandidatePhysicsState &>(
+                *branchState);
+    }
+}
+
+template <typename State, bool SimulateStunts>
 __global__ void SimulateSearchCandidatesKernel(
         const void *sceneData,
         const void *configurationData,
@@ -1479,7 +1493,8 @@ __global__ void SimulateSearchCandidatesKernel(
         return;
     }
 
-    CudaCandidateState state = *branchState;
+    State state =
+            LoadSearchState<State, SimulateStunts>(branchState);
     state.candidateId = static_cast<std::uint32_t>(candidateId);
     DeviceControlState controlState;
     std::uint32_t eventCursor = 0u;
@@ -1550,7 +1565,7 @@ __global__ void SimulateSearchCandidatesKernel(
                     DeviceCandidateStatus::UnsupportedPhysicsTransition;
             return;
         }
-        if (state.stuntsEnabled) {
+        if constexpr (SimulateStunts) {
             const cuda::stunts::Status stuntStatus =
                     cuda::stunts::Update(state, tick);
             if (stuntStatus != cuda::stunts::Status::Success) {
@@ -1798,6 +1813,10 @@ struct CudaSearchExecutor::Impl {
     std::uint64_t residentBytes = 0u;
     std::uint64_t initialUploadBytes = 0u;
     bool baselineEvaluated = false;
+    std::uint32_t simulationRegistersPerThread = 0u;
+    std::uint64_t simulationLocalBytesPerThread = 0u;
+    std::uint32_t simulationActiveBlocksPerMultiprocessor = 0u;
+    double simulationTheoreticalOccupancy = 0.0;
 
     DeviceAllocation<CudaCandidateState> branchState;
     DeviceAllocation<CudaControlTick> baselineTicks;
@@ -1860,6 +1879,67 @@ struct CudaSearchExecutor::Impl {
         ADD_BYTES(globalBestMutationCount);
         ADD_BYTES(summary);
 #undef ADD_BYTES
+    }
+
+    bool LoadSimulationKernelMetrics(std::string *diagnostic) {
+        const void *kernel = configuration.branchState.stuntsEnabled
+                ? reinterpret_cast<const void *>(
+                          SimulateSearchCandidatesKernel<
+                                  CudaCandidateState, true>)
+                : reinterpret_cast<const void *>(
+                          SimulateSearchCandidatesKernel<
+                                  CudaCandidatePhysicsState, false>);
+        cudaFuncAttributes attributes{};
+        cudaError_t error =
+                cudaFuncGetAttributes(&attributes, kernel);
+        if (error != cudaSuccess) {
+            if (diagnostic != nullptr) {
+                *diagnostic = CudaFailure(
+                        "querying CUDA simulation kernel attributes",
+                        error);
+            }
+            return false;
+        }
+        int activeBlocks = 0;
+        error = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                &activeBlocks, kernel, SimulationBlockSize, 0u);
+        if (error != cudaSuccess) {
+            if (diagnostic != nullptr) {
+                *diagnostic = CudaFailure(
+                        "querying CUDA simulation occupancy", error);
+            }
+            return false;
+        }
+        int device = 0;
+        cudaDeviceProp properties{};
+        error = cudaGetDevice(&device);
+        if (error == cudaSuccess) {
+            error = cudaGetDeviceProperties(&properties, device);
+        }
+        if (error != cudaSuccess) {
+            if (diagnostic != nullptr) {
+                *diagnostic = CudaFailure(
+                        "querying CUDA device properties", error);
+            }
+            return false;
+        }
+        simulationRegistersPerThread =
+                static_cast<std::uint32_t>(attributes.numRegs);
+        simulationLocalBytesPerThread =
+                static_cast<std::uint64_t>(
+                        attributes.localSizeBytes);
+        simulationActiveBlocksPerMultiprocessor =
+                static_cast<std::uint32_t>(activeBlocks);
+        simulationTheoreticalOccupancy =
+                properties.maxThreadsPerMultiProcessor == 0
+                ? 0.0
+                : static_cast<double>(
+                          activeBlocks * SimulationBlockSize) /
+                          properties.maxThreadsPerMultiProcessor;
+        if (diagnostic != nullptr) {
+            diagnostic->clear();
+        }
+        return true;
     }
 
     bool ReserveBatchCapacity(
@@ -2060,35 +2140,49 @@ struct CudaSearchExecutor::Impl {
                 activeCandidates.Get(),
                 cancellation.Get());
         cudaEventRecord(mutationsGenerated.Get());
-        constexpr std::uint32_t simulationBlockSize = 32u;
         const std::uint32_t simulationBlocks =
-                (candidateCount - 1u) / simulationBlockSize + 1u;
-        SimulateSearchCandidatesKernel
-                <<<simulationBlocks, simulationBlockSize>>>(
-                configuration.deviceScene,
-                configuration.deviceStaticConfiguration,
-                branchState.Get(),
-                baselineTicks.Get(),
-                timelineTickCount,
-                evaluator.Get(),
-                configuration.tickDurationMs,
-                configuration.prestartDurationMs,
-                configuration.branchTimeMs,
-                configuration.evaluationStartTimeMs,
-                evaluationTickCount,
-                firstCandidateId,
-                candidateCount,
-                baseline,
-                static_cast<std::uint32_t>(
-                        configuration.maximumEventCount),
-                candidateBestSamples.Get(),
-                candidateEvents.Get(),
-                eventCounts.Get(),
-                statuses.Get(),
-                activeCandidates.Get(),
-                scores.Get(),
-                scratch.Get(),
-                cancellation.Get());
+                (candidateCount - 1u) / SimulationBlockSize + 1u;
+        const auto launchSimulation = [&](auto stateType,
+                                          auto simulateStunts) {
+            using State = decltype(stateType);
+            constexpr bool SimulateStunts =
+                    decltype(simulateStunts)::value;
+            SimulateSearchCandidatesKernel<State, SimulateStunts>
+                    <<<simulationBlocks, SimulationBlockSize>>>(
+                    configuration.deviceScene,
+                    configuration.deviceStaticConfiguration,
+                    branchState.Get(),
+                    baselineTicks.Get(),
+                    timelineTickCount,
+                    evaluator.Get(),
+                    configuration.tickDurationMs,
+                    configuration.prestartDurationMs,
+                    configuration.branchTimeMs,
+                    configuration.evaluationStartTimeMs,
+                    evaluationTickCount,
+                    firstCandidateId,
+                    candidateCount,
+                    baseline,
+                    static_cast<std::uint32_t>(
+                            configuration.maximumEventCount),
+                    candidateBestSamples.Get(),
+                    candidateEvents.Get(),
+                    eventCounts.Get(),
+                    statuses.Get(),
+                    activeCandidates.Get(),
+                    scores.Get(),
+                    scratch.Get(),
+                    cancellation.Get());
+        };
+        if (configuration.branchState.stuntsEnabled) {
+            launchSimulation(
+                    CudaCandidateState{},
+                    std::true_type{});
+        } else {
+            launchSimulation(
+                    CudaCandidatePhysicsState{},
+                    std::false_type{});
+        }
         cudaEventRecord(simulationFinished.Get());
         std::size_t temporaryBytes = reductionTemporary.Bytes();
         error = cub::DeviceReduce::Reduce(
@@ -2213,6 +2307,15 @@ struct CudaSearchExecutor::Impl {
                 winnerStateCaptured.Get(),
                 finished.Get());
         result.finalizationKernelMilliseconds = milliseconds;
+        result.simulationThreadsPerBlock = SimulationBlockSize;
+        result.simulationRegistersPerThread =
+                simulationRegistersPerThread;
+        result.simulationLocalBytesPerThread =
+                simulationLocalBytesPerThread;
+        result.simulationActiveBlocksPerMultiprocessor =
+                simulationActiveBlocksPerMultiprocessor;
+        result.simulationTheoreticalOccupancy =
+                simulationTheoreticalOccupancy;
 
         DeviceBatchSummary hostSummary;
         error = cudaMemcpy(
@@ -2512,6 +2615,9 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
             return {};
         }
 
+        if (!impl->LoadSimulationKernelMetrics(diagnostic)) {
+            return {};
+        }
         impl->UpdateResidentBytes();
         if (diagnostic != nullptr) {
             diagnostic->clear();

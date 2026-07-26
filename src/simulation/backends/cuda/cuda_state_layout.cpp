@@ -214,13 +214,14 @@ CudaStateConversionResult EncodeVehicle(
 
 CudaStateConversionResult EncodeRace(
         const CTrackManiaRace::RuntimeClone &source,
-        CudaRaceState &destination) {
+        CudaRacePhysicsState &destination,
+        CudaFixedArray<ReplayStuntEvent, 2048u> &stuntEvents) {
     if (source.checkpointSlotsPassed.size() >
         std::size(destination.checkpointSlotsPassed.values)) {
         return CudaStateConversionResult::CheckpointOverflow;
     }
     if (source.stuntEvents.size() >
-        std::size(destination.stuntEvents.values)) {
+        std::size(stuntEvents.values)) {
         return CudaStateConversionResult::StuntEventOverflow;
     }
     destination.player = source.player.CaptureRuntimeClone();
@@ -283,14 +284,14 @@ CudaStateConversionResult EncodeRace(
               source.replayStuntFigureScores.end(),
               destination.stuntFigureScores);
     destination.stuntsScore = source.stuntsScore;
-    destination.stuntEvents.count =
+    stuntEvents.count =
             static_cast<std::uint32_t>(source.stuntEvents.size());
     for (std::size_t index = 0u;
          index < source.stuntEvents.size(); ++index) {
         const ReplayStuntEvent &sourceEvent =
                 source.stuntEvents[index];
         ReplayStuntEvent &destinationEvent =
-                destination.stuntEvents.values[index];
+                stuntEvents.values[index];
         destinationEvent.figure = sourceEvent.figure;
         destinationEvent.degree = sourceEvent.degree;
         destinationEvent.score = sourceEvent.score;
@@ -386,7 +387,10 @@ void DecodeVehicle(const CudaVehicleState &source,
     car.forceAccumulators = source.forceAccumulators;
 }
 
-void DecodeRace(const CudaRaceState &source,
+void DecodeRace(
+                const CudaRacePhysicsState &source,
+                const CudaFixedArray<ReplayStuntEvent, 2048u>
+                        &stuntEvents,
                 CTrackManiaRace::RuntimeClone &destination) {
     destination.player.RestoreRuntimeClone(source.player);
     destination.checkpointSlotsPassed.assign(
@@ -445,8 +449,8 @@ void DecodeRace(const CudaRaceState &source,
               destination.replayStuntFigureScores.begin());
     destination.stuntsScore = source.stuntsScore;
     destination.stuntEvents.assign(
-            source.stuntEvents.values,
-            source.stuntEvents.values + source.stuntEvents.count);
+            stuntEvents.values,
+            stuntEvents.values + stuntEvents.count);
 }
 
 }  // namespace
@@ -458,7 +462,8 @@ CudaStateConversionResult EncodeCudaRaceState(
         return CudaStateConversionResult::InvalidArgument;
     }
     *destination = CudaRaceState{};
-    return EncodeRace(source, *destination);
+    return EncodeRace(
+            source, *destination, destination->stuntEvents);
 }
 
 CudaStateConversionResult DecodeCudaRaceState(
@@ -477,7 +482,7 @@ CudaStateConversionResult DecodeCudaRaceState(
     }
     try {
         CTrackManiaRace::RuntimeClone result;
-        DecodeRace(source, result);
+        DecodeRace(source, source.stuntEvents, result);
         *destination = std::move(result);
         return CudaStateConversionResult::Success;
     } catch (const std::bad_alloc &) {
@@ -515,7 +520,9 @@ CudaStateConversionResult EncodeCudaCandidateState(
     if (result != CudaStateConversionResult::Success) {
         return result;
     }
-    return EncodeRace(source.race, destination->race);
+    return EncodeRace(
+            source.race, destination->race,
+            destination->stuntEvents);
 }
 
 CudaStateConversionResult DecodeCudaCandidateState(
@@ -539,8 +546,8 @@ CudaStateConversionResult DecodeCudaCandidateState(
         std::size(source.race.checkpointSlotsPassed.values)) {
         return CudaStateConversionResult::CheckpointOverflow;
     }
-    if (source.race.stuntEvents.count >
-        std::size(source.race.stuntEvents.values)) {
+    if (source.stuntEvents.count >
+        std::size(source.stuntEvents.values)) {
         return CudaStateConversionResult::StuntEventOverflow;
     }
     try {
@@ -548,7 +555,9 @@ CudaStateConversionResult DecodeCudaCandidateState(
         result.runtime.world = source.world;
         DecodeBody(source.body, result.runtime.body);
         DecodeVehicle(source.vehicle, result.runtime.vehicle);
-        DecodeRace(source.race, result.race);
+        DecodeRace(
+                source.race, source.stuntEvents,
+                result.race);
         result.incrementalRespawnCount =
                 source.incrementalRespawnCount;
         result.randomState = source.randomState;

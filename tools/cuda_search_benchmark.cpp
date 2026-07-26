@@ -26,10 +26,11 @@ int main(int argc, char **argv) {
     using namespace forevervalidator;
     using namespace forevervalidator::experimental;
 
-    if (argc < 6 || argc > 7) {
+    if (argc < 6 || argc > 8) {
         return Fail(
                 "usage: PACKS REPLAY CANDIDATES TIMELINE_TICKS "
-                "REPETITIONS [BRANCH_TIME_MS]");
+                "REPETITIONS [BRANCH_TIME_MS] "
+                "[random-steering|input-insertion]");
     }
     const std::uint32_t candidateCount =
             static_cast<std::uint32_t>(std::stoul(argv[3]));
@@ -38,7 +39,13 @@ int main(int argc, char **argv) {
     const std::uint32_t repetitions =
             static_cast<std::uint32_t>(std::stoul(argv[5]));
     const std::uint64_t branchTimeMs =
-            argc == 7 ? std::stoull(argv[6]) : 5000u;
+            argc >= 7 ? std::stoull(argv[6]) : 5000u;
+    const std::string modifier =
+            argc == 8 ? argv[7] : "random-steering";
+    if (modifier != "random-steering" &&
+        modifier != "input-insertion") {
+        return Fail("unknown modifier");
+    }
     if (candidateCount == 0u || timelineTicks == 0u ||
         repetitions == 0u) {
         return Fail("benchmark dimensions must be positive");
@@ -98,11 +105,26 @@ int main(int argc, char **argv) {
     configuration.earliestMutationTimeMs = firstTickTimeMs;
     configuration.evaluationStartTimeMs = firstTickTimeMs;
     configuration.evaluationEndTimeMs = evaluationEndTimeMs;
-    configuration.modifiers.push_back(
-            PhysicsSandboxCudaRandomSteeringModifier{
-                    {firstTickTimeMs,
-                     evaluationEndTimeMs,
-                     0x6d2b79f5u}});
+    if (modifier == "random-steering") {
+        configuration.modifiers.push_back(
+                PhysicsSandboxCudaRandomSteeringModifier{
+                        {firstTickTimeMs,
+                         evaluationEndTimeMs,
+                         0x6d2b79f5u}});
+    } else {
+        PhysicsSandboxCudaInputInsertionModifier insertion;
+        insertion.window = {
+                firstTickTimeMs,
+                evaluationEndTimeMs,
+                0x6d2b79f5u};
+        insertion.steering.enabled = true;
+        insertion.steering.minimumCount = 1u;
+        insertion.steering.maximumCount = 1u;
+        insertion.steeringOffset = true;
+        insertion.steeringOffsetMinimum = 1;
+        insertion.steeringOffsetMaximum = 1;
+        configuration.modifiers.push_back(insertion);
+    }
     configuration.evaluator = PhysicsSandboxCudaVelocityEvaluator{};
 
     auto session = CreatePhysicsSandboxCudaSearchSession(
@@ -117,8 +139,6 @@ int main(int argc, char **argv) {
                     Diagnostic(baseline.Error()));
     }
 
-    const double simulatedTicks =
-            static_cast<double>(candidateCount) * timelineTicks;
     std::uint64_t firstCandidateId = 0u;
     for (std::uint32_t repetition = 0u;
          repetition < repetitions; ++repetition) {
@@ -129,9 +149,13 @@ int main(int argc, char **argv) {
                         Diagnostic(batch.Error()));
         }
         if (batch.Value().cancelled ||
-            batch.Value().evaluatedCandidateCount != candidateCount) {
+            batch.Value().evaluatedCandidateCount == 0u) {
             return Fail("CUDA search batch was incomplete");
         }
+        const double simulatedTicks =
+                static_cast<double>(
+                        batch.Value().evaluatedCandidateCount) *
+                timelineTicks;
         const double kernelMilliseconds =
                 batch.Value().metrics.kernelMilliseconds;
         const double simulationKernelMilliseconds =
@@ -146,8 +170,11 @@ int main(int argc, char **argv) {
                   << "{"
                   << "\"repetition\":" << repetition << ","
                   << "\"candidates\":" << candidateCount << ","
+                  << "\"evaluated_candidates\":"
+                  << batch.Value().evaluatedCandidateCount << ","
                   << "\"timeline_ticks\":" << timelineTicks << ","
                   << "\"branch_time_ms\":" << branchTimeMs << ","
+                  << "\"modifier\":\"" << modifier << "\","
                   << "\"kernel_ms\":" << kernelMilliseconds << ","
                   << "\"score_initialization_kernel_ms\":"
                   << batch.Value().metrics
@@ -177,6 +204,26 @@ int main(int argc, char **argv) {
                   << normalizedPhysicsNanoseconds << ","
                   << "\"simulation_kernel_ticks_per_second\":"
                   << ticksPerSecond << ","
+                  << "\"simulation_threads_per_block\":"
+                  << batch.Value().metrics
+                             .simulationThreadsPerBlock
+                  << ","
+                  << "\"simulation_registers_per_thread\":"
+                  << batch.Value().metrics
+                             .simulationRegistersPerThread
+                  << ","
+                  << "\"simulation_local_bytes_per_thread\":"
+                  << batch.Value().metrics
+                             .simulationLocalBytesPerThread
+                  << ","
+                  << "\"simulation_active_blocks_per_sm\":"
+                  << batch.Value().metrics
+                             .simulationActiveBlocksPerMultiprocessor
+                  << ","
+                  << "\"simulation_theoretical_occupancy\":"
+                  << batch.Value().metrics
+                             .simulationTheoreticalOccupancy
+                  << ","
                   << "\"resident_device_bytes\":"
                   << batch.Value().metrics.residentDeviceBytes
                   << "}\n";

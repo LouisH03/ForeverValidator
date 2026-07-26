@@ -103,7 +103,7 @@ int main() {
         return 1;
     }
     encoded = valid;
-    encoded.race.stuntEvents.count = 2049u;
+    encoded.stuntEvents.count = 2049u;
     if (DecodeCudaCandidateState(encoded, &decoded) !=
         CudaStateConversionResult::StuntEventOverflow) {
         std::cerr << "stunt event overflow was not rejected\n";
