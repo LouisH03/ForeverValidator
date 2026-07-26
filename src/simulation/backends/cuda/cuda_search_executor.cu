@@ -25,6 +25,8 @@ namespace {
 
 constexpr std::uint32_t InvalidCandidateSlot = UINT32_MAX;
 constexpr std::uint32_t SimulationBlockSize = 32u;
+constexpr std::uint32_t LatencyKernelMinimumBlocksPerSm = 1u;
+constexpr std::uint32_t ThroughputKernelMinimumBlocksPerSm = 16u;
 
 enum class DeviceCandidateStatus : std::uint32_t {
     Success,
@@ -1449,8 +1451,13 @@ __device__ State LoadSearchState(
     }
 }
 
-template <typename State, bool SimulateStunts>
-__global__ void SimulateSearchCandidatesKernel(
+template <
+        typename State,
+        bool SimulateStunts,
+        std::uint32_t MinimumBlocksPerSm>
+__global__ __launch_bounds__(
+        SimulationBlockSize,
+        MinimumBlocksPerSm) void SimulateSearchCandidatesKernel(
         const void *sceneData,
         const void *configurationData,
         const CudaCandidateState *branchState,
@@ -1827,16 +1834,22 @@ __global__ void FinalizeSearchBatchKernel(
 }  // namespace
 
 struct CudaSearchExecutor::Impl {
+    struct SimulationKernelMetrics {
+        std::uint32_t registersPerThread = 0u;
+        std::uint64_t localBytesPerThread = 0u;
+        std::uint32_t activeBlocksPerMultiprocessor = 0u;
+        double theoreticalOccupancy = 0.0;
+    };
+
     CudaSearchExecutorConfiguration configuration;
     std::uint32_t timelineTickCount = 0u;
     std::uint32_t evaluationTickCount = 0u;
     std::uint64_t residentBytes = 0u;
     std::uint64_t initialUploadBytes = 0u;
     bool baselineEvaluated = false;
-    std::uint32_t simulationRegistersPerThread = 0u;
-    std::uint64_t simulationLocalBytesPerThread = 0u;
-    std::uint32_t simulationActiveBlocksPerMultiprocessor = 0u;
-    double simulationTheoreticalOccupancy = 0.0;
+    std::uint32_t multiprocessorCount = 0u;
+    SimulationKernelMetrics latencyKernelMetrics;
+    SimulationKernelMetrics throughputKernelMetrics;
 
     DeviceAllocation<CudaCandidateState> branchState;
     DeviceAllocation<CudaControlTick> baselineTicks;
@@ -1903,14 +1916,26 @@ struct CudaSearchExecutor::Impl {
 #undef ADD_BYTES
     }
 
-    bool LoadSimulationKernelMetrics(std::string *diagnostic) {
-        const void *kernel = configuration.branchState.stuntsEnabled
+    template <std::uint32_t MinimumBlocksPerSm>
+    const void *SimulationKernel() const {
+        return configuration.branchState.stuntsEnabled
                 ? reinterpret_cast<const void *>(
                           SimulateSearchCandidatesKernel<
-                                  CudaCandidateState, true>)
+                                  CudaCandidateState,
+                                  true,
+                                  MinimumBlocksPerSm>)
                 : reinterpret_cast<const void *>(
                           SimulateSearchCandidatesKernel<
-                                  CudaCandidatePhysicsState, false>);
+                                  CudaCandidatePhysicsState,
+                                  false,
+                                  MinimumBlocksPerSm>);
+    }
+
+    bool LoadSimulationKernelMetrics(
+            const void *kernel,
+            const cudaDeviceProp &properties,
+            SimulationKernelMetrics *metrics,
+            std::string *diagnostic) {
         cudaFuncAttributes attributes{};
         cudaError_t error =
                 cudaFuncGetAttributes(&attributes, kernel);
@@ -1932,9 +1957,29 @@ struct CudaSearchExecutor::Impl {
             }
             return false;
         }
+        metrics->registersPerThread =
+                static_cast<std::uint32_t>(attributes.numRegs);
+        metrics->localBytesPerThread =
+                static_cast<std::uint64_t>(
+                        attributes.localSizeBytes);
+        metrics->activeBlocksPerMultiprocessor =
+                static_cast<std::uint32_t>(activeBlocks);
+        metrics->theoreticalOccupancy =
+                properties.maxThreadsPerMultiProcessor == 0
+                ? 0.0
+                : static_cast<double>(
+                          activeBlocks * SimulationBlockSize) /
+                          properties.maxThreadsPerMultiProcessor;
+        if (diagnostic != nullptr) {
+            diagnostic->clear();
+        }
+        return true;
+    }
+
+    bool LoadSimulationKernelMetrics(std::string *diagnostic) {
         int device = 0;
         cudaDeviceProp properties{};
-        error = cudaGetDevice(&device);
+        cudaError_t error = cudaGetDevice(&device);
         if (error == cudaSuccess) {
             error = cudaGetDeviceProperties(&properties, device);
         }
@@ -1945,23 +1990,21 @@ struct CudaSearchExecutor::Impl {
             }
             return false;
         }
-        simulationRegistersPerThread =
-                static_cast<std::uint32_t>(attributes.numRegs);
-        simulationLocalBytesPerThread =
-                static_cast<std::uint64_t>(
-                        attributes.localSizeBytes);
-        simulationActiveBlocksPerMultiprocessor =
-                static_cast<std::uint32_t>(activeBlocks);
-        simulationTheoreticalOccupancy =
-                properties.maxThreadsPerMultiProcessor == 0
-                ? 0.0
-                : static_cast<double>(
-                          activeBlocks * SimulationBlockSize) /
-                          properties.maxThreadsPerMultiProcessor;
-        if (diagnostic != nullptr) {
-            diagnostic->clear();
-        }
-        return true;
+        multiprocessorCount =
+                static_cast<std::uint32_t>(
+                        properties.multiProcessorCount);
+        return LoadSimulationKernelMetrics(
+                       SimulationKernel<
+                               LatencyKernelMinimumBlocksPerSm>(),
+                       properties,
+                       &latencyKernelMetrics,
+                       diagnostic) &&
+               LoadSimulationKernelMetrics(
+                       SimulationKernel<
+                               ThroughputKernelMinimumBlocksPerSm>(),
+                       properties,
+                       &throughputKernelMetrics,
+                       diagnostic);
     }
 
     bool ReserveBatchCapacity(
@@ -2185,39 +2228,67 @@ struct CudaSearchExecutor::Impl {
         cudaEventRecord(mutationsGenerated.Get());
         const std::uint32_t simulationBlocks =
                 (candidateCount - 1u) / SimulationBlockSize + 1u;
+        // Pay the throughput kernel's spill cost only when the latency
+        // kernel would need another full resident wave.
+        const bool useThroughputKernel =
+                static_cast<std::uint64_t>(simulationBlocks) >
+                static_cast<std::uint64_t>(
+                        latencyKernelMetrics.
+                                activeBlocksPerMultiprocessor) *
+                        multiprocessorCount;
+        const SimulationKernelMetrics &simulationMetrics =
+                useThroughputKernel
+                ? throughputKernelMetrics
+                : latencyKernelMetrics;
         const auto launchSimulation = [&](auto stateType,
                                           auto simulateStunts) {
             using State = decltype(stateType);
             constexpr bool SimulateStunts =
                     decltype(simulateStunts)::value;
-            SimulateSearchCandidatesKernel<State, SimulateStunts>
-                    <<<simulationBlocks, SimulationBlockSize>>>(
-                    configuration.deviceScene,
-                    configuration.deviceStaticConfiguration,
-                    branchState.Get(),
-                    baselineTicks.Get(),
-                    timelineTickCount,
-                    evaluator.Get(),
-                    configuration.tickDurationMs,
-                    configuration.prestartDurationMs,
-                    configuration.branchTimeMs,
-                    configuration.evaluationStartTimeMs,
-                    evaluationTickCount,
-                    firstCandidateId,
-                    candidateCount,
-                    baseline,
-                    static_cast<std::uint32_t>(
-                            configuration.maximumEventCount),
-                    candidateBestSamples.Get(),
-                    candidateEvents.Get(),
-                    eventCounts.Get(),
-                    statuses.Get(),
-                    activeCandidates.Get(),
-                    scores.Get(),
-                    collisionScratch.Get(),
-                    shapeCollisionScratch.Get(),
-                    configuration.maximumBatchSize,
-                    cancellation.Get());
+            const auto launch = [&](auto minimumBlocks) {
+                constexpr std::uint32_t MinimumBlocksPerSm =
+                        decltype(minimumBlocks)::value;
+                SimulateSearchCandidatesKernel<
+                        State,
+                        SimulateStunts,
+                        MinimumBlocksPerSm>
+                        <<<simulationBlocks, SimulationBlockSize>>>(
+                        configuration.deviceScene,
+                        configuration.deviceStaticConfiguration,
+                        branchState.Get(),
+                        baselineTicks.Get(),
+                        timelineTickCount,
+                        evaluator.Get(),
+                        configuration.tickDurationMs,
+                        configuration.prestartDurationMs,
+                        configuration.branchTimeMs,
+                        configuration.evaluationStartTimeMs,
+                        evaluationTickCount,
+                        firstCandidateId,
+                        candidateCount,
+                        baseline,
+                        static_cast<std::uint32_t>(
+                                configuration.maximumEventCount),
+                        candidateBestSamples.Get(),
+                        candidateEvents.Get(),
+                        eventCounts.Get(),
+                        statuses.Get(),
+                        activeCandidates.Get(),
+                        scores.Get(),
+                        collisionScratch.Get(),
+                        shapeCollisionScratch.Get(),
+                        configuration.maximumBatchSize,
+                        cancellation.Get());
+            };
+            if (useThroughputKernel) {
+                launch(std::integral_constant<
+                       std::uint32_t,
+                       ThroughputKernelMinimumBlocksPerSm>{});
+            } else {
+                launch(std::integral_constant<
+                       std::uint32_t,
+                       LatencyKernelMinimumBlocksPerSm>{});
+            }
         };
         if (configuration.branchState.stuntsEnabled) {
             launchSimulation(
@@ -2356,13 +2427,13 @@ struct CudaSearchExecutor::Impl {
         result.finalizationKernelMilliseconds = milliseconds;
         result.simulationThreadsPerBlock = SimulationBlockSize;
         result.simulationRegistersPerThread =
-                simulationRegistersPerThread;
+                simulationMetrics.registersPerThread;
         result.simulationLocalBytesPerThread =
-                simulationLocalBytesPerThread;
+                simulationMetrics.localBytesPerThread;
         result.simulationActiveBlocksPerMultiprocessor =
-                simulationActiveBlocksPerMultiprocessor;
+                simulationMetrics.activeBlocksPerMultiprocessor;
         result.simulationTheoreticalOccupancy =
-                simulationTheoreticalOccupancy;
+                simulationMetrics.theoreticalOccupancy;
 
         DeviceBatchSummary hostSummary;
         error = cudaMemcpy(
