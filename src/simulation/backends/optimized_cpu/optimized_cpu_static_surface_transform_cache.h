@@ -8,8 +8,8 @@
 #include <vector>
 
 #include "engine/physics/collision/hms_collision_manager.h"
+#include "simulation/backends/optimized_cpu/optimized_cpu_ellipsoid_mesh_packet.h"
 #include "simulation/backends/optimized_cpu/optimized_cpu_static_bvh.h"
-#include "simulation/backends/optimized_cpu/optimized_cpu_static_mesh_triangle_sidecar.h"
 #include "simulation/backends/optimized_cpu/optimized_cpu_static_scene_fingerprint.h"
 
 class CPlugSurface;
@@ -117,6 +117,13 @@ public:
         return triangleSidecars_[staticTreeIndex];
     }
 
+    const OptimizedCpuCertifiedStaticMeshPacket *CertifiedMeshPacketAt(
+            u32 staticTreeIndex) const noexcept {
+        const OptimizedCpuCertifiedStaticMeshPacket &packet =
+                certifiedMeshPackets_[staticTreeIndex];
+        return packet.IsAvailable() ? &packet : nullptr;
+    }
+
     bool TemporalCandidateSpanFor(
             const CPlugTree &movingTree,
             u32 temporalSlotOrdinal,
@@ -153,6 +160,8 @@ private:
     std::vector<GmIso4> inverses_;
     std::vector<const OptimizedCpuStaticMeshTriangleSidecar *>
             triangleSidecars_;
+    std::vector<OptimizedCpuCertifiedStaticMeshPacket>
+            certifiedMeshPackets_;
     OptimizedCpuStaticBvh surfaceBvh_;
     bool staticBroadPhaseArithmeticIsBounded_ = false;
     mutable std::array<const CPlugTree *, 8u> boundedMovingTrees_{};

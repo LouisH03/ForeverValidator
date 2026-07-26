@@ -270,33 +270,28 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
 
         const CHmsCollisionManagerSColOctreeCell::StaticSurface &staticSurface =
                 record->SurfaceData();
-        const GmSurf *staticGeometry = staticSurface.surface->Geometry();
         const OptimizedCpuStaticMeshTriangleSidecar *triangleSidecar =
                 transforms.TriangleSidecarAt(staticTreeIndex);
+        const OptimizedCpuCertifiedStaticMeshPacket *certifiedMesh =
+                transforms.CertifiedMeshPacketAt(staticTreeIndex);
         bool packetHandled = false;
-        if (staticGeometry != nullptr &&
-            typeid(*staticGeometry) == typeid(GmSurfMesh) &&
-            triangleSidecar != nullptr) {
+        if (certifiedMesh != nullptr) {
             std::array<u32, EllipsoidPacketWidth> firstNew{};
             for (std::size_t laneIndex = 0u;
                  laneIndex < laneCount;
                  ++laneIndex) {
+                if ((activeMask & (1u << laneIndex)) == 0u) {
+                    continue;
+                }
                 firstNew[laneIndex] =
                         lanes[laneIndex].buffer->PhysicalCollisionCount();
             }
-            const LocatedGmSurf locatedMesh = {
-                staticGeometry,
-                &staticSurface.location,
-                1,
-            };
             std::uint32_t hitMask = 0u;
             packetHandled =
-                    GmCollision_PreparedEllipsoidPacket_Mesh_InlineMathOptimizedCpuNativeBinary32WithStaticCache(
+                    GmCollision_PreparedEllipsoidPacket_Mesh_InlineMathOptimizedCpuNativeBinary32WithCertifiedStaticMesh(
                             preparedPacket,
                             activeMask,
-                            locatedMesh,
-                            transforms.InverseAt(staticTreeIndex),
-                            *triangleSidecar,
+                            *certifiedMesh,
                             &hitMask);
             if (packetHandled) {
                 for (std::size_t laneIndex = 0u;

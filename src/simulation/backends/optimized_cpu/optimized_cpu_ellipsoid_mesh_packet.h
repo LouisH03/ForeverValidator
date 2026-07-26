@@ -7,6 +7,7 @@
 
 #include "engine/physics/geometry/gm_surface.h"
 #include "simulation/backends/optimized_cpu/optimized_cpu_native_binary32_collision.h"
+#include "simulation/backends/optimized_cpu/optimized_cpu_static_mesh_triangle_sidecar.h"
 
 struct alignas(32) OptimizedCpuPacketFloatLanes {
     std::array<float, 8u> values{};
@@ -39,6 +40,20 @@ struct alignas(32) OptimizedCpuPreparedEllipsoidMeshPacket {
     std::uint32_t preparedMask = 0u;
 };
 
+struct OptimizedCpuCertifiedStaticMeshPacket {
+    const GmSurfMesh *sourceMesh = nullptr;
+    GmIso4 meshIso{};
+    GmIso4 meshInverse{};
+    const OptimizedCpuStaticMeshTriangleSidecar *triangles = nullptr;
+    OptimizedCpuStaticMeshTriangleHierarchyView hierarchy{};
+
+    bool IsAvailable(void) const noexcept {
+        return sourceMesh != nullptr && triangles != nullptr &&
+               hierarchy.cells != nullptr &&
+               hierarchy.postingIndices != nullptr && hierarchy.count != 0u;
+    }
+};
+
 bool PrepareOptimizedCpuEllipsoidMeshPacket(
         const OptimizedCpuEllipsoidMeshPacketLane *lanes,
         std::size_t laneCount,
@@ -51,6 +66,12 @@ bool GmCollision_PreparedEllipsoidPacket_Mesh_InlineMathOptimizedCpuNativeBinary
         const LocatedGmSurf &mesh,
         const GmIso4 &meshInverse,
         const OptimizedCpuStaticMeshTriangleSidecar &triangles,
+        std::uint32_t *hitMask) noexcept;
+
+bool GmCollision_PreparedEllipsoidPacket_Mesh_InlineMathOptimizedCpuNativeBinary32WithCertifiedStaticMesh(
+        const OptimizedCpuPreparedEllipsoidMeshPacket &prepared,
+        std::uint32_t activeMask,
+        const OptimizedCpuCertifiedStaticMeshPacket &mesh,
         std::uint32_t *hitMask) noexcept;
 
 #endif

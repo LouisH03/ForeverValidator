@@ -1,5 +1,6 @@
 #include "simulation/backends/optimized_cpu/optimized_cpu_static_surface_transform_cache.h"
 
+#include <cmath>
 #include <cstring>
 #include <new>
 #include <typeinfo>
@@ -10,6 +11,18 @@
 #include "simulation/backends/optimized_cpu/optimized_cpu_static_bounds_overlap.h"
 
 namespace {
+
+bool IsFiniteTransform(const GmIso4 &transform) noexcept {
+    const float *values = reinterpret_cast<const float *>(&transform);
+    for (std::size_t index = 0u;
+         index < sizeof(transform) / sizeof(float);
+         ++index) {
+        if (!std::isfinite(values[index])) {
+            return false;
+        }
+    }
+    return true;
+}
 
 const OptimizedCpuStaticMeshTriangleSidecar *FindTriangleSidecar(
         const std::vector<std::unique_ptr<
@@ -430,6 +443,7 @@ bool OptimizedCpuStaticSurfaceTransformCache::TryRebuild(
             }
             cachedGroup.inverses_.resize(records.size());
             cachedGroup.triangleSidecars_.resize(records.size(), nullptr);
+            cachedGroup.certifiedMeshPackets_.resize(records.size());
             std::vector<OptimizedCpuStaticBvh::Entry> surfaceEntries;
             surfaceEntries.reserve(records.size());
             for (std::size_t recordIndex = 0u;
@@ -477,6 +491,18 @@ bool OptimizedCpuStaticSurfaceTransformCache::TryRebuild(
                             std::move(candidate));
                 }
                 cachedGroup.triangleSidecars_[recordIndex] = sidecar;
+                OptimizedCpuStaticMeshTriangleHierarchyView hierarchy;
+                if (IsFiniteTransform(
+                            cachedGroup.inverses_[recordIndex]) &&
+                    sidecar->TriangleHierarchyView(&hierarchy)) {
+                    cachedGroup.certifiedMeshPackets_[recordIndex] = {
+                        &mesh,
+                        surface.location,
+                        cachedGroup.inverses_[recordIndex],
+                        sidecar,
+                        hierarchy,
+                    };
+                }
             }
             cachedGroup.surfaceBvh_.TryBuild(
                     surfaceEntries, records.size());
@@ -505,6 +531,7 @@ void OptimizedCpuStaticSurfaceTransformCache::Clear(void) noexcept {
         group.wholePassPredictions_.fill({});
         group.inverses_.clear();
         group.triangleSidecars_.clear();
+        group.certifiedMeshPackets_.clear();
         group.surfaceBvh_.Clear();
     }
     triangleSidecars_.clear();
@@ -539,7 +566,8 @@ bool OptimizedCpuStaticSurfaceTransformCache::CertifyForAdvance(
         if (cachedGroup.sourceRecords_ != records.data() ||
             cachedGroup.sourceRecordCount_ != records.size() ||
             cachedGroup.inverses_.size() != records.size() ||
-            cachedGroup.triangleSidecars_.size() != records.size()) {
+            cachedGroup.triangleSidecars_.size() != records.size() ||
+            cachedGroup.certifiedMeshPackets_.size() != records.size()) {
             return false;
         }
         for (std::size_t recordIndex = 0u;
@@ -571,6 +599,27 @@ bool OptimizedCpuStaticSurfaceTransformCache::CertifyForAdvance(
                 typeid(*geometry) != typeid(GmSurfMesh) ||
                 !sidecar->IsFor(
                         static_cast<const GmSurfMesh &>(*geometry))) {
+                return false;
+            }
+            const OptimizedCpuCertifiedStaticMeshPacket &packet =
+                    cachedGroup.certifiedMeshPackets_[recordIndex];
+            if (!packet.IsAvailable()) {
+                continue;
+            }
+            OptimizedCpuStaticMeshTriangleHierarchyView hierarchy;
+            if (packet.sourceMesh != geometry ||
+                packet.triangles != sidecar ||
+                std::memcmp(&packet.meshIso,
+                            &surface.location,
+                            sizeof(GmIso4)) != 0 ||
+                std::memcmp(&packet.meshInverse,
+                            &cachedGroup.inverses_[recordIndex],
+                            sizeof(GmIso4)) != 0 ||
+                !sidecar->TriangleHierarchyView(&hierarchy) ||
+                packet.hierarchy.cells != hierarchy.cells ||
+                packet.hierarchy.postingIndices !=
+                        hierarchy.postingIndices ||
+                packet.hierarchy.count != hierarchy.count) {
                 return false;
             }
         }

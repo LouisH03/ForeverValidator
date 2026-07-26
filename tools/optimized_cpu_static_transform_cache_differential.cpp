@@ -333,8 +333,16 @@ int main(void) {
                       cachedStaticGroup->InverseAt(1u),
                       firstTransform) ||
         cachedStaticGroup->TriangleSidecarAt(0u) != nullptr ||
+        cachedStaticGroup->CertifiedMeshPacketAt(0u) != nullptr ||
         cachedStaticGroup->TriangleSidecarAt(1u) == nullptr ||
-        !cachedStaticGroup->TriangleSidecarAt(1u)->IsFor(*sourceMesh)) {
+        !cachedStaticGroup->TriangleSidecarAt(1u)->IsFor(*sourceMesh) ||
+        cachedStaticGroup->CertifiedMeshPacketAt(1u) == nullptr ||
+        cachedStaticGroup->CertifiedMeshPacketAt(1u)->sourceMesh !=
+                sourceMesh ||
+        !SameBits(cachedStaticGroup->CertifiedMeshPacketAt(1u)->meshIso,
+                  firstTransform) ||
+        !SameBits(cachedStaticGroup->CertifiedMeshPacketAt(1u)->meshInverse,
+                  cachedStaticGroup->InverseAt(1u))) {
         std::fprintf(stderr, "initial static triangle sidecar differs\n");
         return 1;
     }
@@ -358,8 +366,30 @@ int main(void) {
                       cachedStaticGroup->InverseAt(1u),
                       secondTransform) ||
         cachedStaticGroup->TriangleSidecarAt(1u) == nullptr ||
-        !cachedStaticGroup->TriangleSidecarAt(1u)->IsFor(*sourceMesh)) {
+        !cachedStaticGroup->TriangleSidecarAt(1u)->IsFor(*sourceMesh) ||
+        cachedStaticGroup->CertifiedMeshPacketAt(1u) == nullptr ||
+        !SameBits(cachedStaticGroup->CertifiedMeshPacketAt(1u)->meshIso,
+                  secondTransform)) {
         std::fprintf(stderr, "rebuilt static triangle sidecar differs\n");
+        return 1;
+    }
+
+    auto &mutableStaticSurface = const_cast<
+            CHmsCollisionManagerSColOctreeCell::StaticSurface &>(
+            cachedStaticGroup->RecordData()[1u].SurfaceData());
+    const GmIso4 savedStaticLocation = mutableStaticSurface.location;
+    mutableStaticSurface.location.translation.x += 0.25f;
+    if (cache.CertifyForAdvance(firstZone) ||
+        cache.IsCertifiedFor(firstZone)) {
+        std::fprintf(stderr,
+                     "changed certified mesh location retained certificate\n");
+        return 1;
+    }
+    mutableStaticSurface.location = savedStaticLocation;
+    if (!cache.CertifyForAdvance(firstZone) ||
+        !cache.IsCertifiedFor(firstZone)) {
+        std::fprintf(stderr,
+                     "restored certified mesh location lost certificate\n");
         return 1;
     }
     auto *mutableSidecar =
@@ -595,6 +625,6 @@ int main(void) {
         return 1;
     }
 
-    std::printf("static_transform_cache_cases=36 result=identical\n");
+    std::printf("static_transform_cache_cases=41 result=identical\n");
     return 0;
 }

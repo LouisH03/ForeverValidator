@@ -841,9 +841,10 @@ struct PacketExecution {
 FV_E031_AVX2 bool RunPacketAvx2(
         const OptimizedCpuPreparedEllipsoidMeshPacket &setup,
         std::uint32_t activeMask,
-        const LocatedGmSurf &mesh,
+        const GmIso4 &meshIso,
         const GmIso4 &meshInverse,
         const OptimizedCpuStaticMeshTriangleSidecar &triangles,
+        const OptimizedCpuStaticMeshTriangleHierarchyView &hierarchy,
         std::uint32_t *hitMask) noexcept {
     const Iso3x8 ellipsoidWorld = LoadIso(setup);
     const Vec3x8 radii = {
@@ -856,9 +857,8 @@ FV_E031_AVX2 bool RunPacketAvx2(
         Load(setup.inverseRadiiY.values),
         Load(setup.inverseRadiiZ.values),
     };
-    const Iso3x8 ellipsoidToMesh = mesh.enabled == 0
-            ? ellipsoidWorld
-            : Compose(ellipsoidWorld, BroadcastIso(meshInverse));
+    const Iso3x8 ellipsoidToMesh =
+            Compose(ellipsoidWorld, BroadcastIso(meshInverse));
     const Boxx8 meshBounds =
             TransformEllipsoidBox(ellipsoidToMesh, radii);
     const Iso3x8 meshToEllipsoid = Inverse(ellipsoidToMesh);
@@ -868,7 +868,7 @@ FV_E031_AVX2 bool RunPacketAvx2(
         meshToEllipsoid,
         radii,
         inverseRadii,
-        BroadcastIso(*mesh.iso),
+        BroadcastIso(meshIso),
         meshBounds,
         MaskForBits(activeMask),
         {},
@@ -876,11 +876,6 @@ FV_E031_AVX2 bool RunPacketAvx2(
         false,
         0u,
     };
-
-    OptimizedCpuStaticMeshTriangleHierarchyView hierarchy;
-    if (!triangles.TriangleHierarchyView(&hierarchy)) {
-        return false;
-    }
 
     struct TraversalFrame {
         u32 end = 0u;
@@ -990,12 +985,51 @@ bool GmCollision_PreparedEllipsoidPacket_Mesh_InlineMathOptimizedCpuNativeBinary
         return true;
     }
 #if FV_E031_HAS_X86_PACKET
+    OptimizedCpuStaticMeshTriangleHierarchyView hierarchy;
+    if (!triangles.TriangleHierarchyView(&hierarchy)) {
+        return false;
+    }
     return RunPacketAvx2(
             prepared,
             activeMask,
-            mesh,
+            *mesh.iso,
             meshInverse,
             triangles,
+            hierarchy,
+            hitMask);
+#else
+    return false;
+#endif
+}
+
+bool GmCollision_PreparedEllipsoidPacket_Mesh_InlineMathOptimizedCpuNativeBinary32WithCertifiedStaticMesh(
+        const OptimizedCpuPreparedEllipsoidMeshPacket &prepared,
+        std::uint32_t activeMask,
+        const OptimizedCpuCertifiedStaticMeshPacket &mesh,
+        std::uint32_t *hitMask) noexcept {
+    if (hitMask == nullptr || prepared.laneCount < 2u ||
+        prepared.laneCount > PacketWidth) {
+        return false;
+    }
+    *hitMask = 0u;
+    const std::uint32_t laneMask =
+            (1u << static_cast<unsigned int>(prepared.laneCount)) - 1u;
+    activeMask &= laneMask;
+    if ((activeMask & ~prepared.preparedMask) != 0u ||
+        !mesh.IsAvailable()) {
+        return false;
+    }
+    if (activeMask == 0u) {
+        return true;
+    }
+#if FV_E031_HAS_X86_PACKET
+    return RunPacketAvx2(
+            prepared,
+            activeMask,
+            mesh.meshIso,
+            mesh.meshInverse,
+            *mesh.triangles,
+            mesh.hierarchy,
             hitMask);
 #else
     return false;

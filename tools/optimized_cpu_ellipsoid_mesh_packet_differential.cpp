@@ -215,6 +215,18 @@ bool RunPackets(const GmSurfMesh &mesh,
     GmIso4 meshInverse;
     meshInverse.SetInverse(meshIso);
     const LocatedGmSurf locatedMesh = {&mesh, &meshIso, true};
+    OptimizedCpuStaticMeshTriangleHierarchyView hierarchy;
+    if (!sidecar.TriangleHierarchyView(&hierarchy)) {
+        std::fprintf(stderr, "certified hierarchy unavailable\n");
+        return false;
+    }
+    const OptimizedCpuCertifiedStaticMeshPacket certifiedMesh = {
+        &mesh,
+        meshIso,
+        meshInverse,
+        &sidecar,
+        hierarchy,
+    };
     XorShift32 random;
 
     for (std::size_t caseIndex = 0u; caseIndex < 4096u; ++caseIndex) {
@@ -224,9 +236,12 @@ bool RunPackets(const GmSurfMesh &mesh,
         std::array<VectorCollisionBuffer, PacketWidth> scalarBuffers;
         std::array<VectorCollisionBuffer, PacketWidth> packetBuffers;
         std::array<VectorCollisionBuffer, PacketWidth> preparedBuffers;
+        std::array<VectorCollisionBuffer, PacketWidth> certifiedBuffers;
         std::array<OptimizedCpuEllipsoidMeshPacketLane, PacketWidth> lanes;
         std::array<OptimizedCpuEllipsoidMeshPacketLane, PacketWidth>
                 preparedLanes;
+        std::array<OptimizedCpuEllipsoidMeshPacketLane, PacketWidth>
+                certifiedLanes;
         std::uint32_t activeMask = random.Next() & 0xffu;
         if (__builtin_popcount(activeMask) < 2) {
             activeMask |= 0x3u;
@@ -259,6 +274,10 @@ bool RunPackets(const GmSurfMesh &mesh,
             preparedLanes[lane] = {
                 &located[lane],
                 &preparedBuffers[lane],
+            };
+            certifiedLanes[lane] = {
+                &located[lane],
+                &certifiedBuffers[lane],
             };
             if ((activeMask & (1u << lane)) != 0u) {
                 const int hit =
@@ -326,9 +345,35 @@ bool RunPackets(const GmSurfMesh &mesh,
                          preparedHitMask);
             return false;
         }
+        OptimizedCpuPreparedEllipsoidMeshPacket certifiedPrepared;
+        if (!PrepareOptimizedCpuEllipsoidMeshPacket(
+                    certifiedLanes.data(),
+                    certifiedLanes.size(),
+                    0xffu,
+                    &certifiedPrepared)) {
+            std::fprintf(stderr,
+                         "certified packet case %zu was not prepared\n",
+                         caseIndex);
+            return false;
+        }
+        std::uint32_t certifiedHitMask = 0u;
+        if (!GmCollision_PreparedEllipsoidPacket_Mesh_InlineMathOptimizedCpuNativeBinary32WithCertifiedStaticMesh(
+                    certifiedPrepared,
+                    activeMask,
+                    certifiedMesh,
+                    &certifiedHitMask) ||
+            certifiedHitMask != scalarHitMask) {
+            std::fprintf(stderr,
+                         "certified case %zu hit mask differs: scalar=%02x certified=%02x\n",
+                         caseIndex,
+                         scalarHitMask,
+                         certifiedHitMask);
+            return false;
+        }
         for (std::size_t lane = 0u; lane < PacketWidth; ++lane) {
             if (!SameBuffer(scalarBuffers[lane], packetBuffers[lane]) ||
-                !SameBuffer(scalarBuffers[lane], preparedBuffers[lane])) {
+                !SameBuffer(scalarBuffers[lane], preparedBuffers[lane]) ||
+                !SameBuffer(scalarBuffers[lane], certifiedBuffers[lane])) {
                 std::fprintf(stderr,
                              "packet case %zu lane %zu collision differs\n",
                              caseIndex,
