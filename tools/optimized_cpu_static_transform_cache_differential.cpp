@@ -174,6 +174,7 @@ bool CheckMovingEllipsoidPacketPlan(void) {
 
     OptimizedCpuMovingEllipsoidPacketPlan plan;
     if (!plan.TryBuild(root) || !plan.IsFor(root) ||
+        !plan.IsDirectLaneStar() ||
         plan.NodeCount() != 3u || plan.LaneCount() != 2u ||
         plan.OperationCount() != 5u) {
         std::fprintf(stderr, "moving packet plan dimensions differ\n");
@@ -228,8 +229,30 @@ bool CheckMovingEllipsoidPacketPlan(void) {
         std::fprintf(stderr, "disabled ordinal fixture became active\n");
         return false;
     }
+
+    CPlugTree nestedRoot;
+    nestedRoot.SetCollisionEnabled(true);
+    nestedRoot.SetTreeBounds(
+            {{0.0f, 0.0f, 0.0f}, {8.0f, 8.0f, 8.0f}});
+    auto container = std::make_unique<CPlugTree>();
+    container->SetCollisionEnabled(true);
+    container->SetTreeBounds(
+            {{0.0f, 0.0f, 0.0f}, {4.0f, 4.0f, 4.0f}});
+    container->AddOwnedChild(makeLane(-2.0f, true));
+    container->AddOwnedChild(makeLane(2.0f, true));
+    nestedRoot.AddOwnedChild(std::move(container));
+    OptimizedCpuMovingEllipsoidPacketPlan nestedPlan;
+    if (!nestedPlan.TryBuild(nestedRoot) ||
+        !nestedPlan.IsFor(nestedRoot) ||
+        nestedPlan.IsDirectLaneStar()) {
+        std::fprintf(stderr,
+                     "nested moving packet plan star certificate differs\n");
+        return false;
+    }
+
     secondLaneTree->SetCollisionEnabled(false);
     if (plan.TryBuild(root) || plan.IsFor(root) ||
+        plan.IsDirectLaneStar() ||
         plan.NodeCount() != 0u || plan.LaneCount() != 0u ||
         plan.OperationCount() != 0u) {
         std::fprintf(stderr, "incomplete moving packet plan was retained\n");

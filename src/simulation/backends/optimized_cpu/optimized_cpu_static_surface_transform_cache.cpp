@@ -98,7 +98,41 @@ bool OptimizedCpuMovingEllipsoidPacketPlan::TryBuild(
         Clear();
         return false;
     }
+    candidate.directLaneStar_ = candidate.HasDirectLaneStarTopology();
     *this = candidate;
+    return true;
+}
+
+bool OptimizedCpuMovingEllipsoidPacketPlan::
+HasDirectLaneStarTopology(void) const noexcept {
+    if (sourceRoot_ == nullptr || laneCount_ < 2u ||
+        nodeCount_ != laneCount_ + 1u ||
+        operationCount_ != laneCount_ * 2u + 1u ||
+        nodes_[0u].tree != sourceRoot_ ||
+        nodes_[0u].parentNodeIndex != NoParent ||
+        operations_[0u].kind != OperationKind::ComposeNode ||
+        operations_[0u].index != 0u) {
+        return false;
+    }
+    for (std::size_t laneIndex = 0u;
+         laneIndex < laneCount_;
+         ++laneIndex) {
+        const std::uint8_t nodeIndex = static_cast<std::uint8_t>(
+                laneIndex + 1u);
+        const Node &node = nodes_[nodeIndex];
+        const Lane &lane = lanes_[laneIndex];
+        const Operation &compose = operations_[laneIndex * 2u + 1u];
+        const Operation &emit = operations_[laneIndex * 2u + 2u];
+        if (node.parentNodeIndex != 0u ||
+            lane.nodeIndex != nodeIndex ||
+            lane.tree != node.tree ||
+            compose.kind != OperationKind::ComposeNode ||
+            compose.index != nodeIndex ||
+            emit.kind != OperationKind::EmitLane ||
+            emit.index != laneIndex) {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -172,6 +206,7 @@ void OptimizedCpuMovingEllipsoidPacketPlan::Clear(void) noexcept {
     nodeCount_ = 0u;
     laneCount_ = 0u;
     operationCount_ = 0u;
+    directLaneStar_ = false;
 }
 
 bool OptimizedCpuMovingEllipsoidPacketPlan::IsFor(

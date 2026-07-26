@@ -165,6 +165,120 @@ void CompletePacketCollisionMaterials(
     }
 }
 
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((hot, noinline,
+               optimize("no-inline-functions,no-unroll-loops")))
+#elif defined(__clang__)
+__attribute__((hot, noinline))
+#endif
+std::size_t CollectDirectLaneStarTraversalLanes(
+        const GmIso4 &movingIso,
+        const OptimizedCpuMovingEllipsoidPacketPlan &movingPlan,
+        EllipsoidPacketTraversalLanes *lanes) {
+    const auto *planNodes = movingPlan.NodeData();
+    const auto *planLanes = movingPlan.LaneData();
+    const OptimizedCpuMovingEllipsoidPacketPlan::Node &rootNode =
+            planNodes[0u];
+    GmIso4 rootLocation = rootNode.usesLocalTransform
+            ? rootNode.tree->LocalIso()
+            : movingIso;
+    if (rootNode.usesLocalTransform) {
+        rootLocation.Mult(movingIso);
+    }
+
+    const std::size_t laneCount = movingPlan.LaneCount();
+    for (std::size_t laneIndex = 0u;
+         laneIndex < laneCount;
+         ++laneIndex) {
+        const OptimizedCpuMovingEllipsoidPacketPlan::Lane &planLane =
+                planLanes[laneIndex];
+        const OptimizedCpuMovingEllipsoidPacketPlan::Node &node =
+                planNodes[laneIndex + 1u];
+        GmIso4 location = node.usesLocalTransform
+                ? node.tree->LocalIso()
+                : rootLocation;
+        if (node.usesLocalTransform) {
+            location.Mult(rootLocation);
+        }
+        GmBoxAligned bounds;
+        planLane.tree->GetTransformedCollisionBox(rootLocation, bounds);
+        lanes->ConstructAt(
+                laneIndex,
+                planLane.tree,
+                planLane.surface,
+                location,
+                bounds,
+                planLane.temporalSlotOrdinal);
+    }
+    return laneCount;
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((hot, noinline))
+#endif
+std::size_t CollectCompiledPlanTraversalLanes(
+        const GmIso4 &movingIso,
+        const OptimizedCpuMovingEllipsoidPacketPlan &movingPlan,
+        EllipsoidPacketTraversalLanes *lanes) {
+    UninitializedObjectArray<
+            GmIso4,
+            OptimizedCpuMovingEllipsoidPacketPlan::MaxNodeCount>
+            nodeLocations;
+    const auto *planNodes = movingPlan.NodeData();
+    const auto *planLanes = movingPlan.LaneData();
+    const auto *operations = movingPlan.OperationData();
+    std::size_t laneCount = 0u;
+    for (std::size_t operationIndex = 0u;
+         operationIndex < movingPlan.OperationCount();
+         ++operationIndex) {
+        const OptimizedCpuMovingEllipsoidPacketPlan::Operation &operation =
+                operations[operationIndex];
+        if (operation.kind ==
+            OptimizedCpuMovingEllipsoidPacketPlan::OperationKind::
+                    ComposeNode) {
+            const OptimizedCpuMovingEllipsoidPacketPlan::Node &node =
+                    planNodes[operation.index];
+            const GmIso4 &parentLocation =
+                    node.parentNodeIndex ==
+                                    OptimizedCpuMovingEllipsoidPacketPlan::
+                                            NoParent
+                            ? movingIso
+                            : nodeLocations[node.parentNodeIndex];
+            if (node.usesLocalTransform) {
+                GmIso4 &location = nodeLocations.ConstructAt(
+                        operation.index,
+                        node.tree->LocalIso());
+                location.Mult(parentLocation);
+            } else {
+                nodeLocations.ConstructAt(
+                        operation.index,
+                        parentLocation);
+            }
+            continue;
+        }
+
+        const OptimizedCpuMovingEllipsoidPacketPlan::Lane &planLane =
+                planLanes[operation.index];
+        const OptimizedCpuMovingEllipsoidPacketPlan::Node &node =
+                planNodes[planLane.nodeIndex];
+        const GmIso4 &parentLocation =
+                node.parentNodeIndex ==
+                                OptimizedCpuMovingEllipsoidPacketPlan::NoParent
+                        ? movingIso
+                        : nodeLocations[node.parentNodeIndex];
+        GmBoxAligned bounds;
+        planLane.tree->GetTransformedCollisionBox(parentLocation, bounds);
+        lanes->ConstructAt(
+                laneCount++,
+                planLane.tree,
+                planLane.surface,
+                nodeLocations[planLane.nodeIndex],
+                bounds,
+                planLane.temporalSlotOrdinal);
+    }
+    return laneCount;
+}
+
 bool DetectEllipsoidPacketAgainstStaticGroup(
         CHmsCollisionManagerSZone &zone,
         const GmIso4 &movingIso,
@@ -183,63 +297,11 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
     EllipsoidPacketTraversalLanes lanes;
     std::size_t laneCount = 0u;
     if (movingPlan != nullptr) {
-        UninitializedObjectArray<
-                GmIso4,
-                OptimizedCpuMovingEllipsoidPacketPlan::MaxNodeCount>
-                nodeLocations;
-        const auto *planNodes = movingPlan->NodeData();
-        const auto *planLanes = movingPlan->LaneData();
-        const auto *operations = movingPlan->OperationData();
-        for (std::size_t operationIndex = 0u;
-             operationIndex < movingPlan->OperationCount();
-             ++operationIndex) {
-            const OptimizedCpuMovingEllipsoidPacketPlan::Operation
-                    &operation = operations[operationIndex];
-            if (operation.kind ==
-                OptimizedCpuMovingEllipsoidPacketPlan::OperationKind::
-                        ComposeNode) {
-                const OptimizedCpuMovingEllipsoidPacketPlan::Node &node =
-                        planNodes[operation.index];
-                const GmIso4 &parentLocation =
-                        node.parentNodeIndex ==
-                                        OptimizedCpuMovingEllipsoidPacketPlan::
-                                                NoParent
-                                ? movingIso
-                                : nodeLocations[node.parentNodeIndex];
-                if (node.usesLocalTransform) {
-                    GmIso4 &location = nodeLocations.ConstructAt(
-                            operation.index,
-                            node.tree->LocalIso());
-                    location.Mult(parentLocation);
-                } else {
-                    nodeLocations.ConstructAt(
-                            operation.index,
-                            parentLocation);
-                }
-                continue;
-            }
-
-            const OptimizedCpuMovingEllipsoidPacketPlan::Lane &planLane =
-                    planLanes[operation.index];
-            const OptimizedCpuMovingEllipsoidPacketPlan::Node &node =
-                    planNodes[planLane.nodeIndex];
-            const GmIso4 &parentLocation =
-                    node.parentNodeIndex ==
-                                    OptimizedCpuMovingEllipsoidPacketPlan::
-                                            NoParent
-                            ? movingIso
-                            : nodeLocations[node.parentNodeIndex];
-            GmBoxAligned bounds;
-            planLane.tree->GetTransformedCollisionBox(
-                    parentLocation, bounds);
-            lanes.ConstructAt(
-                    laneCount++,
-                    planLane.tree,
-                    planLane.surface,
-                    nodeLocations[planLane.nodeIndex],
-                    bounds,
-                    planLane.temporalSlotOrdinal);
-        }
+        laneCount = movingPlan->IsDirectLaneStar()
+                ? CollectDirectLaneStarTraversalLanes(
+                          movingIso, *movingPlan, &lanes)
+                : CollectCompiledPlanTraversalLanes(
+                          movingIso, *movingPlan, &lanes);
     } else {
         u32 nextTemporalSlotOrdinal = 0u;
         if (!CollectEllipsoidPacketTraversalLanes(

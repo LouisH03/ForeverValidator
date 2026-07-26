@@ -74,10 +74,15 @@ public:
         return operationCount_;
     }
 
+    bool IsDirectLaneStar(void) const noexcept {
+        return directLaneStar_;
+    }
+
 private:
     bool TryAppendTree(const CPlugTree &tree,
                        std::uint8_t parentNodeIndex,
                        u32 *nextTemporalSlotOrdinal) noexcept;
+    bool HasDirectLaneStarTopology(void) const noexcept;
 
     const CPlugTree *sourceRoot_ = nullptr;
     std::array<Node, MaxNodeCount> nodes_{};
@@ -86,6 +91,7 @@ private:
     std::size_t nodeCount_ = 0u;
     std::size_t laneCount_ = 0u;
     std::size_t operationCount_ = 0u;
+    bool directLaneStar_ = false;
 };
 
 class OptimizedCpuStaticSurfaceTransformGroup {
