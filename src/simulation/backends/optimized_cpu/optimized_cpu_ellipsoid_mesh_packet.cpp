@@ -947,8 +947,11 @@ FV_E031_AVX2 bool RunPacketAvx2(
 
 bool OptimizedCpuEllipsoidMeshPacketAvailable(void) noexcept {
 #if FV_E031_HAS_X86_PACKET
-    __builtin_cpu_init();
-    return __builtin_cpu_supports("avx2");
+    static const bool available = []() noexcept {
+        __builtin_cpu_init();
+        return __builtin_cpu_supports("avx2") != 0;
+    }();
+    return available;
 #else
     return false;
 #endif
