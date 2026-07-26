@@ -1,4 +1,4 @@
-#include "simulation/backends/optimized_cpu/optimized_cpu_native_binary32_collision.h"
+#include "simulation/backends/optimized_cpu/optimized_cpu_ellipsoid_mesh_packet.h"
 
 #include <algorithm>
 #include <array>
@@ -23,7 +23,8 @@
 
 namespace {
 
-constexpr std::size_t PacketWidth = 8u;
+constexpr std::size_t PacketWidth =
+        OptimizedCpuPreparedEllipsoidMeshPacket::Width;
 
 bool IsFiniteTransform(const GmIso4 &transform) noexcept {
     const float values[] = {
@@ -48,33 +49,23 @@ bool IsFiniteTransform(const GmIso4 &transform) noexcept {
     return true;
 }
 
-struct RawPacketSetup {
-    std::array<GmIso4, PacketWidth> ellipsoidWorld{};
-    std::array<GmVec3, PacketWidth> radii{};
-    std::array<GmVec3, PacketWidth> inverseRadii{};
-    std::array<GmLocalMaterialIndex, PacketWidth> materials{};
-    std::array<CGmCollisionBuffer *, PacketWidth> buffers{};
-    std::uint32_t activeMask = 0u;
-};
-
-bool BuildRawPacketSetup(
+bool BuildPreparedPacket(
         const OptimizedCpuEllipsoidMeshPacketLane *lanes,
         std::size_t laneCount,
         std::uint32_t requestedMask,
-        const LocatedGmSurf &mesh,
-        const GmIso4 &meshInverse,
-        RawPacketSetup *setup) noexcept {
-    if (lanes == nullptr || setup == nullptr || laneCount < 2u ||
-        laneCount > PacketWidth || mesh.surf == nullptr || mesh.iso == nullptr ||
-        typeid(*mesh.surf) != typeid(GmSurfMesh) ||
-        !IsFiniteTransform(meshInverse)) {
+        OptimizedCpuPreparedEllipsoidMeshPacket *prepared) noexcept {
+    if (lanes == nullptr || prepared == nullptr || laneCount < 2u ||
+        laneCount > PacketWidth) {
         return false;
     }
     const std::uint32_t laneMask =
             (1u << static_cast<unsigned int>(laneCount)) - 1u;
     requestedMask &= laneMask;
+    OptimizedCpuPreparedEllipsoidMeshPacket candidate;
+    candidate.laneCount = laneCount;
+    candidate.preparedMask = requestedMask;
     if (requestedMask == 0u) {
-        setup->activeMask = 0u;
+        *prepared = candidate;
         return true;
     }
 
@@ -97,23 +88,44 @@ bool BuildRawPacketSetup(
             !std::isfinite(radii.z)) {
             return false;
         }
-        setup->ellipsoidWorld[lane] = located->enabled == 0
+        const GmIso4 ellipsoidWorld = located->enabled == 0
                 ? GmIso4{
                       {{1.0f, 0.0f, 0.0f},
                        {0.0f, 1.0f, 0.0f},
                        {0.0f, 0.0f, 1.0f}},
                       {0.0f, 0.0f, 0.0f}}
                 : *located->iso;
-        setup->radii[lane] = radii;
-        setup->inverseRadii[lane] = {
-            1.0f / radii.x,
-            1.0f / radii.y,
-            1.0f / radii.z,
-        };
-        setup->materials[lane] = ellipsoid.material;
-        setup->buffers[lane] = lanes[lane].collisionBuffer;
+        candidate.worldXx.values[lane] =
+                ellipsoidWorld.rotation.basisX.x;
+        candidate.worldXy.values[lane] =
+                ellipsoidWorld.rotation.basisY.x;
+        candidate.worldXz.values[lane] =
+                ellipsoidWorld.rotation.basisZ.x;
+        candidate.worldYx.values[lane] =
+                ellipsoidWorld.rotation.basisX.y;
+        candidate.worldYy.values[lane] =
+                ellipsoidWorld.rotation.basisY.y;
+        candidate.worldYz.values[lane] =
+                ellipsoidWorld.rotation.basisZ.y;
+        candidate.worldZx.values[lane] =
+                ellipsoidWorld.rotation.basisX.z;
+        candidate.worldZy.values[lane] =
+                ellipsoidWorld.rotation.basisY.z;
+        candidate.worldZz.values[lane] =
+                ellipsoidWorld.rotation.basisZ.z;
+        candidate.worldTx.values[lane] = ellipsoidWorld.translation.x;
+        candidate.worldTy.values[lane] = ellipsoidWorld.translation.y;
+        candidate.worldTz.values[lane] = ellipsoidWorld.translation.z;
+        candidate.radiiX.values[lane] = radii.x;
+        candidate.radiiY.values[lane] = radii.y;
+        candidate.radiiZ.values[lane] = radii.z;
+        candidate.inverseRadiiX.values[lane] = 1.0f / radii.x;
+        candidate.inverseRadiiY.values[lane] = 1.0f / radii.y;
+        candidate.inverseRadiiZ.values[lane] = 1.0f / radii.z;
+        candidate.materials[lane] = ellipsoid.material;
+        candidate.buffers[lane] = lanes[lane].collisionBuffer;
     }
-    setup->activeMask = requestedMask;
+    *prepared = candidate;
     return true;
 }
 
@@ -301,59 +313,24 @@ FV_E031_INLINE Vec3x8 Normalize(const Vec3x8 &value,
     };
 }
 
-template <typename Extract>
-FV_E031_INLINE __m256 LoadTransformComponent(
-        const std::array<GmIso4, PacketWidth> &transforms,
-        Extract extract) {
-    alignas(32) std::array<float, PacketWidth> values{};
-    for (std::size_t lane = 0u; lane < PacketWidth; ++lane) {
-        values[lane] = extract(transforms[lane]);
-    }
-    return Load(values);
-}
-
 FV_E031_INLINE Iso3x8 LoadIso(
-        const std::array<GmIso4, PacketWidth> &transforms) {
+        const OptimizedCpuPreparedEllipsoidMeshPacket &prepared) {
     return {
         {
-            LoadTransformComponent(transforms, [](const GmIso4 &iso) {
-                return iso.rotation.basisX.x;
-            }),
-            LoadTransformComponent(transforms, [](const GmIso4 &iso) {
-                return iso.rotation.basisY.x;
-            }),
-            LoadTransformComponent(transforms, [](const GmIso4 &iso) {
-                return iso.rotation.basisZ.x;
-            }),
-            LoadTransformComponent(transforms, [](const GmIso4 &iso) {
-                return iso.rotation.basisX.y;
-            }),
-            LoadTransformComponent(transforms, [](const GmIso4 &iso) {
-                return iso.rotation.basisY.y;
-            }),
-            LoadTransformComponent(transforms, [](const GmIso4 &iso) {
-                return iso.rotation.basisZ.y;
-            }),
-            LoadTransformComponent(transforms, [](const GmIso4 &iso) {
-                return iso.rotation.basisX.z;
-            }),
-            LoadTransformComponent(transforms, [](const GmIso4 &iso) {
-                return iso.rotation.basisY.z;
-            }),
-            LoadTransformComponent(transforms, [](const GmIso4 &iso) {
-                return iso.rotation.basisZ.z;
-            }),
+            Load(prepared.worldXx.values),
+            Load(prepared.worldXy.values),
+            Load(prepared.worldXz.values),
+            Load(prepared.worldYx.values),
+            Load(prepared.worldYy.values),
+            Load(prepared.worldYz.values),
+            Load(prepared.worldZx.values),
+            Load(prepared.worldZy.values),
+            Load(prepared.worldZz.values),
         },
         {
-            LoadTransformComponent(transforms, [](const GmIso4 &iso) {
-                return iso.translation.x;
-            }),
-            LoadTransformComponent(transforms, [](const GmIso4 &iso) {
-                return iso.translation.y;
-            }),
-            LoadTransformComponent(transforms, [](const GmIso4 &iso) {
-                return iso.translation.z;
-            }),
+            Load(prepared.worldTx.values),
+            Load(prepared.worldTy.values),
+            Load(prepared.worldTz.values),
         },
     };
 }
@@ -370,17 +347,6 @@ FV_E031_INLINE void Store(const Vec3x8 &value,
     Store(value.x, x);
     Store(value.y, y);
     Store(value.z, z);
-}
-
-FV_E031_INLINE Vec3x8 LoadVectors(
-        const std::array<GmVec3, PacketWidth> &vectors) {
-    alignas(32) std::array<float, PacketWidth> x{}, y{}, z{};
-    for (std::size_t lane = 0u; lane < PacketWidth; ++lane) {
-        x[lane] = vectors[lane].x;
-        y[lane] = vectors[lane].y;
-        z[lane] = vectors[lane].z;
-    }
-    return {Load(x), Load(y), Load(z)};
 }
 
 FV_E031_INLINE Iso3x8 BroadcastIso(const GmIso4 &transform) {
@@ -523,7 +489,7 @@ FV_E031_INLINE __m256 BoundsMask(const Boxx8 &queries,
 }
 
 struct PacketExecution {
-    const RawPacketSetup &setup;
+    const OptimizedCpuPreparedEllipsoidMeshPacket &setup;
     Iso3x8 meshToUnit;
     Iso3x8 meshToEllipsoid;
     Vec3x8 radii;
@@ -873,14 +839,23 @@ struct PacketExecution {
 };
 
 FV_E031_AVX2 bool RunPacketAvx2(
-        const RawPacketSetup &setup,
+        const OptimizedCpuPreparedEllipsoidMeshPacket &setup,
+        std::uint32_t activeMask,
         const LocatedGmSurf &mesh,
         const GmIso4 &meshInverse,
         const OptimizedCpuStaticMeshTriangleSidecar &triangles,
         std::uint32_t *hitMask) noexcept {
-    const Iso3x8 ellipsoidWorld = LoadIso(setup.ellipsoidWorld);
-    const Vec3x8 radii = LoadVectors(setup.radii);
-    const Vec3x8 inverseRadii = LoadVectors(setup.inverseRadii);
+    const Iso3x8 ellipsoidWorld = LoadIso(setup);
+    const Vec3x8 radii = {
+        Load(setup.radiiX.values),
+        Load(setup.radiiY.values),
+        Load(setup.radiiZ.values),
+    };
+    const Vec3x8 inverseRadii = {
+        Load(setup.inverseRadiiX.values),
+        Load(setup.inverseRadiiY.values),
+        Load(setup.inverseRadiiZ.values),
+    };
     const Iso3x8 ellipsoidToMesh = mesh.enabled == 0
             ? ellipsoidWorld
             : Compose(ellipsoidWorld, BroadcastIso(meshInverse));
@@ -895,7 +870,7 @@ FV_E031_AVX2 bool RunPacketAvx2(
         inverseRadii,
         BroadcastIso(*mesh.iso),
         meshBounds,
-        MaskForBits(setup.activeMask),
+        MaskForBits(activeMask),
         {},
         {},
         false,
@@ -977,6 +952,56 @@ bool OptimizedCpuEllipsoidMeshPacketAvailable(void) noexcept {
 #endif
 }
 
+bool PrepareOptimizedCpuEllipsoidMeshPacket(
+        const OptimizedCpuEllipsoidMeshPacketLane *lanes,
+        std::size_t laneCount,
+        std::uint32_t preparedMask,
+        OptimizedCpuPreparedEllipsoidMeshPacket *prepared) noexcept {
+    if (!OptimizedCpuEllipsoidMeshPacketAvailable()) {
+        return false;
+    }
+    return BuildPreparedPacket(
+            lanes, laneCount, preparedMask, prepared);
+}
+
+bool GmCollision_PreparedEllipsoidPacket_Mesh_InlineMathOptimizedCpuNativeBinary32WithStaticCache(
+        const OptimizedCpuPreparedEllipsoidMeshPacket &prepared,
+        std::uint32_t activeMask,
+        const LocatedGmSurf &mesh,
+        const GmIso4 &meshInverse,
+        const OptimizedCpuStaticMeshTriangleSidecar &triangles,
+        std::uint32_t *hitMask) noexcept {
+    if (hitMask == nullptr || prepared.laneCount < 2u ||
+        prepared.laneCount > PacketWidth) {
+        return false;
+    }
+    *hitMask = 0u;
+    const std::uint32_t laneMask =
+            (1u << static_cast<unsigned int>(prepared.laneCount)) - 1u;
+    activeMask &= laneMask;
+    if ((activeMask & ~prepared.preparedMask) != 0u ||
+        mesh.surf == nullptr || mesh.iso == nullptr ||
+        typeid(*mesh.surf) != typeid(GmSurfMesh) ||
+        !IsFiniteTransform(meshInverse) ||
+        !triangles.IsFor(static_cast<const GmSurfMesh &>(*mesh.surf))) {
+        return false;
+    }
+    if (activeMask == 0u) {
+        return true;
+    }
+#if FV_E031_HAS_X86_PACKET
+    return RunPacketAvx2(
+            prepared,
+            activeMask,
+            mesh,
+            meshInverse,
+            triangles,
+            hitMask);
+#else
+    return false;
+#endif
+}
+
 bool GmCollision_EllipsoidPacket_Mesh_InlineMathOptimizedCpuNativeBinary32WithStaticCache(
         const OptimizedCpuEllipsoidMeshPacketLane *lanes,
         std::size_t laneCount,
@@ -993,19 +1018,21 @@ bool GmCollision_EllipsoidPacket_Mesh_InlineMathOptimizedCpuNativeBinary32WithSt
         !triangles.IsFor(static_cast<const GmSurfMesh &>(*mesh.surf))) {
         return false;
     }
-    RawPacketSetup rawSetup;
-    if (!BuildRawPacketSetup(
-                lanes, laneCount, activeMask, mesh, meshInverse, &rawSetup)) {
+    if (mesh.iso == nullptr || !IsFiniteTransform(meshInverse)) {
         return false;
     }
-    if (rawSetup.activeMask == 0u) {
-        return true;
+    OptimizedCpuPreparedEllipsoidMeshPacket prepared;
+    if (!BuildPreparedPacket(
+                lanes, laneCount, activeMask, &prepared)) {
+        return false;
     }
-#if FV_E031_HAS_X86_PACKET
-    return RunPacketAvx2(rawSetup, mesh, meshInverse, triangles, hitMask);
-#else
-    return false;
-#endif
+    return GmCollision_PreparedEllipsoidPacket_Mesh_InlineMathOptimizedCpuNativeBinary32WithStaticCache(
+            prepared,
+            activeMask,
+            mesh,
+            meshInverse,
+            triangles,
+            hitMask);
 }
 
 #undef FV_E031_HAS_X86_PACKET

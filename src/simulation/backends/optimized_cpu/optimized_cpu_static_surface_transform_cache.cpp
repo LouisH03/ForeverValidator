@@ -74,6 +74,98 @@ bool IsBoundedMovingTree(const CPlugTree &tree) noexcept {
 
 }  // namespace
 
+bool OptimizedCpuMovingEllipsoidPacketPlan::TryBuild(
+        const CPlugTree &root) noexcept {
+    OptimizedCpuMovingEllipsoidPacketPlan candidate;
+    candidate.sourceRoot_ = &root;
+    u32 nextTemporalSlotOrdinal = 0u;
+    if (!candidate.TryAppendTree(
+                root, NoParent, &nextTemporalSlotOrdinal) ||
+        candidate.laneCount_ < 2u) {
+        Clear();
+        return false;
+    }
+    *this = candidate;
+    return true;
+}
+
+bool OptimizedCpuMovingEllipsoidPacketPlan::TryAppendTree(
+        const CPlugTree &tree,
+        std::uint8_t parentNodeIndex,
+        u32 *nextTemporalSlotOrdinal) noexcept {
+    const u32 temporalSlotOrdinal = (*nextTemporalSlotOrdinal)++;
+    if (!tree.HasWorldBox()) {
+        return true;
+    }
+    if (nodeCount_ >= nodes_.size() ||
+        operationCount_ >= operations_.size()) {
+        return false;
+    }
+
+    const std::uint8_t nodeIndex =
+            static_cast<std::uint8_t>(nodeCount_++);
+    nodes_[nodeIndex] = {
+        &tree,
+        parentNodeIndex,
+        tree.HasLocalTransform() != 0,
+    };
+    operations_[operationCount_++] = {
+        OperationKind::ComposeNode,
+        nodeIndex,
+    };
+
+    const u32 childCount = tree.GetChildCount();
+    for (u32 childIndex = 0u; childIndex < childCount; ++childIndex) {
+        CPlugTree *child = tree.GetChild(childIndex);
+        if (child == nullptr ||
+            !TryAppendTree(
+                    *child,
+                    nodeIndex,
+                    nextTemporalSlotOrdinal)) {
+            return false;
+        }
+    }
+
+    CPlugSurface *surface = tree.Surface();
+    if (surface == nullptr) {
+        return true;
+    }
+    const GmSurf *geometry = surface->Geometry();
+    if (geometry == nullptr ||
+        typeid(*geometry) != typeid(GmSurfEllipsoid) ||
+        !surface->UsesSphereContactBuffer() ||
+        laneCount_ >= lanes_.size() ||
+        operationCount_ >= operations_.size()) {
+        return false;
+    }
+
+    const std::uint8_t laneIndex =
+            static_cast<std::uint8_t>(laneCount_++);
+    lanes_[laneIndex] = {
+        const_cast<CPlugTree *>(&tree),
+        surface,
+        nodeIndex,
+        temporalSlotOrdinal,
+    };
+    operations_[operationCount_++] = {
+        OperationKind::EmitLane,
+        laneIndex,
+    };
+    return true;
+}
+
+void OptimizedCpuMovingEllipsoidPacketPlan::Clear(void) noexcept {
+    sourceRoot_ = nullptr;
+    nodeCount_ = 0u;
+    laneCount_ = 0u;
+    operationCount_ = 0u;
+}
+
+bool OptimizedCpuMovingEllipsoidPacketPlan::IsFor(
+        const CPlugTree &root) const noexcept {
+    return sourceRoot_ == &root && laneCount_ >= 2u;
+}
+
 bool OptimizedCpuStaticSurfaceTransformGroup::
 WholeTreeBoundsOverlapAnySurface(
         const GmBoxAligned &movingBounds) const noexcept {
@@ -400,6 +492,8 @@ bool OptimizedCpuStaticSurfaceTransformCache::TryRebuild(
 void OptimizedCpuStaticSurfaceTransformCache::Clear(void) noexcept {
     sourceZone_ = nullptr;
     certifiedZone_ = nullptr;
+    certifiedMovingTree_ = nullptr;
+    movingEllipsoidPacketPlan_.Clear();
     for (OptimizedCpuStaticSurfaceTransformGroup &group : groups_) {
         group.ClearTemporalCandidates();
         group.sourceGroup_ = nullptr;
@@ -418,8 +512,11 @@ void OptimizedCpuStaticSurfaceTransformCache::Clear(void) noexcept {
 }
 
 bool OptimizedCpuStaticSurfaceTransformCache::CertifyForAdvance(
-        const CHmsCollisionManagerSZone &zone) noexcept {
+        const CHmsCollisionManagerSZone &zone,
+        const CPlugTree *movingTree) noexcept {
     certifiedZone_ = nullptr;
+    certifiedMovingTree_ = nullptr;
+    movingEllipsoidPacketPlan_.Clear();
     if (sourceZone_ != &zone) {
         return false;
     }
@@ -479,16 +576,59 @@ bool OptimizedCpuStaticSurfaceTransformCache::CertifyForAdvance(
         }
     }
 
+    if (movingTree != nullptr) {
+        (void)movingEllipsoidPacketPlan_.TryBuild(*movingTree);
+    }
     certifiedZone_ = &zone;
+    certifiedMovingTree_ = movingTree;
     return true;
+}
+
+bool OptimizedCpuStaticSurfaceTransformCache::CertifyForRuntimeAdvance(
+        const CHmsCollisionManagerSZone &zone,
+        const CPlugTree *movingTree) noexcept {
+    // Replay runtime construction owns the static scene and the vehicle
+    // collision-tree topology for the lifetime of this cache. Dynamic clone
+    // restore changes transforms and physics state in place, but not either
+    // identity. Keep the full CertifyForAdvance path available to callers
+    // that can mutate scene data directly.
+    if (certifiedZone_ == &zone &&
+        certifiedMovingTree_ == movingTree) {
+        return true;
+    }
+    return CertifyForAdvance(zone, movingTree);
+}
+
+void OptimizedCpuStaticSurfaceTransformCache::
+ClearRuntimeTemporalCandidates(
+        const CHmsCollisionManagerSZone &zone,
+        const CPlugTree *movingTree) noexcept {
+    if (certifiedZone_ != &zone ||
+        certifiedMovingTree_ != movingTree) {
+        ClearTemporalCandidates();
+        return;
+    }
+    for (OptimizedCpuStaticSurfaceTransformGroup &group : groups_) {
+        group.ClearTemporalCandidates();
+    }
 }
 
 void OptimizedCpuStaticSurfaceTransformCache::ClearTemporalCandidates(
         void) noexcept {
     certifiedZone_ = nullptr;
+    certifiedMovingTree_ = nullptr;
+    movingEllipsoidPacketPlan_.Clear();
     for (OptimizedCpuStaticSurfaceTransformGroup &group : groups_) {
         group.ClearTemporalCandidates();
     }
+}
+
+const OptimizedCpuMovingEllipsoidPacketPlan *
+OptimizedCpuStaticSurfaceTransformCache::MovingEllipsoidPacketPlanFor(
+        const CPlugTree &movingTree) const noexcept {
+    return movingEllipsoidPacketPlan_.IsFor(movingTree)
+            ? &movingEllipsoidPacketPlan_
+            : nullptr;
 }
 
 bool OptimizedCpuStaticSurfaceTransformCache::IsFor(

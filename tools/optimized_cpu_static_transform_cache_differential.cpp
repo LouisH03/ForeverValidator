@@ -128,12 +128,125 @@ GmIso4 SecondTransform(void) {
     return transform;
 }
 
+bool CheckMovingEllipsoidPacketPlan(void) {
+    std::vector<CMwNodRef<CPlugSurfaceGeom>> geometries;
+    std::vector<CMwNodRef<CPlugSurface>> surfaces;
+    const auto makeLane = [&](float x,
+                              bool usesLocalTransform) {
+        CMwNodRef<CPlugSurfaceGeom> geometry =
+                MakeMwNod<CPlugSurfaceGeom>();
+        auto ellipsoid = std::make_unique<GmSurfEllipsoid>();
+        ellipsoid->radii = {0.5f, 0.75f, 1.0f};
+        geometry->SetGmSurf(std::move(ellipsoid));
+        CMwNodRef<CPlugSurface> surface = MakeMwNod<CPlugSurface>();
+        surface->SetGeometry(geometry.Get());
+
+        auto tree = std::make_unique<CPlugTree>();
+        tree->SetCollisionEnabled(true);
+        tree->SetSurface(surface.Get());
+        tree->SetTreeBounds(surface->GeomBox());
+        if (usesLocalTransform) {
+            GmIso4 location;
+            location.SetIdentity();
+            location.translation.x = x;
+            tree->SetUseLocation(1);
+            tree->SetLocation(location);
+        }
+        geometries.push_back(geometry);
+        surfaces.push_back(surface);
+        return tree;
+    };
+
+    CPlugTree root;
+    root.SetCollisionEnabled(true);
+    root.SetTreeBounds({{0.0f, 0.0f, 0.0f}, {8.0f, 8.0f, 8.0f}});
+    auto firstLane = makeLane(-1.0f, true);
+    CPlugTree *firstLaneTree = firstLane.get();
+    CPlugSurface *firstLaneSurface = firstLaneTree->Surface();
+    auto disabled = std::make_unique<CPlugTree>();
+    CPlugTree *disabledTree = disabled.get();
+    auto secondLane = makeLane(1.0f, false);
+    CPlugTree *secondLaneTree = secondLane.get();
+    CPlugSurface *secondLaneSurface = secondLaneTree->Surface();
+    root.AddOwnedChild(std::move(firstLane));
+    root.AddOwnedChild(std::move(disabled));
+    root.AddOwnedChild(std::move(secondLane));
+
+    OptimizedCpuMovingEllipsoidPacketPlan plan;
+    if (!plan.TryBuild(root) || !plan.IsFor(root) ||
+        plan.NodeCount() != 3u || plan.LaneCount() != 2u ||
+        plan.OperationCount() != 5u) {
+        std::fprintf(stderr, "moving packet plan dimensions differ\n");
+        return false;
+    }
+    const auto *nodes = plan.NodeData();
+    const auto *lanes = plan.LaneData();
+    const auto *operations = plan.OperationData();
+    if (nodes[0u].tree != &root ||
+        nodes[0u].parentNodeIndex !=
+                OptimizedCpuMovingEllipsoidPacketPlan::NoParent ||
+        nodes[0u].usesLocalTransform ||
+        nodes[1u].tree != firstLaneTree ||
+        nodes[1u].parentNodeIndex != 0u ||
+        !nodes[1u].usesLocalTransform ||
+        nodes[2u].tree != secondLaneTree ||
+        nodes[2u].parentNodeIndex != 0u ||
+        nodes[2u].usesLocalTransform) {
+        std::fprintf(stderr, "moving packet plan node topology differs\n");
+        return false;
+    }
+    if (lanes[0u].tree != firstLaneTree ||
+        lanes[0u].surface != firstLaneSurface ||
+        lanes[0u].nodeIndex != 1u ||
+        lanes[0u].temporalSlotOrdinal != 1u ||
+        lanes[1u].tree != secondLaneTree ||
+        lanes[1u].surface != secondLaneSurface ||
+        lanes[1u].nodeIndex != 2u ||
+        lanes[1u].temporalSlotOrdinal != 3u) {
+        std::fprintf(stderr, "moving packet plan lane schedule differs\n");
+        return false;
+    }
+    using Kind = OptimizedCpuMovingEllipsoidPacketPlan::OperationKind;
+    const std::array<OptimizedCpuMovingEllipsoidPacketPlan::Operation, 5u>
+            expected = {{
+                {Kind::ComposeNode, 0u},
+                {Kind::ComposeNode, 1u},
+                {Kind::EmitLane, 0u},
+                {Kind::ComposeNode, 2u},
+                {Kind::EmitLane, 1u},
+            }};
+    for (std::size_t index = 0u; index < expected.size(); ++index) {
+        if (operations[index].kind != expected[index].kind ||
+            operations[index].index != expected[index].index) {
+            std::fprintf(stderr,
+                         "moving packet plan operation %zu differs\n",
+                         index);
+            return false;
+        }
+    }
+    if (disabledTree->HasWorldBox()) {
+        std::fprintf(stderr, "disabled ordinal fixture became active\n");
+        return false;
+    }
+    secondLaneTree->SetCollisionEnabled(false);
+    if (plan.TryBuild(root) || plan.IsFor(root) ||
+        plan.NodeCount() != 0u || plan.LaneCount() != 0u ||
+        plan.OperationCount() != 0u) {
+        std::fprintf(stderr, "incomplete moving packet plan was retained\n");
+        return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 int main(void) {
     tmnf::simulation::DeterministicExecutionScope deterministicScope;
     if (!deterministicScope.Established()) {
         std::fprintf(stderr, "could not establish deterministic execution\n");
+        return 1;
+    }
+    if (!CheckMovingEllipsoidPacketPlan()) {
         return 1;
     }
 
@@ -411,6 +524,36 @@ int main(void) {
         return 1;
     }
 
+    if (!cache.CertifyForAdvance(firstZone, movingTree) ||
+        !cache.IsCertifiedFor(firstZone)) {
+        std::fprintf(stderr,
+                     "runtime certificate fixture could not be established\n");
+        return 1;
+    }
+    cache.ClearRuntimeTemporalCandidates(firstZone, movingTree);
+    if (!cache.IsCertifiedFor(firstZone) ||
+        !cache.CertifyForRuntimeAdvance(firstZone, movingTree) ||
+        !cache.IsCertifiedFor(firstZone) ||
+        !cachedStaticGroup->TemporalCandidateSpanFor(
+                *movingTree,
+                MovingTreeTemporalSlotOrdinal,
+                nearBounds,
+                &temporalSpan) ||
+        temporalSpan.size != 1u || temporalSpan.data == nullptr ||
+        temporalSpan.data[0] != 1u) {
+        std::fprintf(stderr,
+                     "runtime temporal reset did not preserve certificate\n");
+        return 1;
+    }
+    cache.ClearRuntimeTemporalCandidates(secondZone, movingTree);
+    if (cache.IsCertifiedFor(firstZone) ||
+        cache.CertifyForRuntimeAdvance(secondZone, movingTree) ||
+        !cache.CertifyForAdvance(firstZone, movingTree)) {
+        std::fprintf(stderr,
+                     "runtime certificate accepted mismatched scene identity\n");
+        return 1;
+    }
+
     cache.ClearTemporalCandidates();
     if (cache.IsCertifiedFor(firstZone) ||
         !cache.CertifyForAdvance(firstZone) ||
@@ -452,6 +595,6 @@ int main(void) {
         return 1;
     }
 
-    std::printf("static_transform_cache_cases=31 result=identical\n");
+    std::printf("static_transform_cache_cases=36 result=identical\n");
     return 0;
 }

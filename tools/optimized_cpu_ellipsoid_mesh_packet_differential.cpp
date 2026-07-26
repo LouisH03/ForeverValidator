@@ -1,11 +1,14 @@
 #include <array>
+#include <cfenv>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 
 #include "engine/physics/collision/gm_collision_buffer.h"
 #include "engine/physics/geometry/gm_surface.h"
+#include "simulation/backends/optimized_cpu/optimized_cpu_ellipsoid_mesh_packet.h"
 #include "simulation/backends/optimized_cpu/optimized_cpu_native_binary32_collision.h"
 #include "simulation/backends/optimized_cpu/optimized_cpu_static_mesh_triangle_sidecar.h"
 #include "simulation/runtime/replay_deterministic_execution.h"
@@ -220,7 +223,10 @@ bool RunPackets(const GmSurfMesh &mesh,
         std::array<LocatedGmSurf, PacketWidth> located;
         std::array<VectorCollisionBuffer, PacketWidth> scalarBuffers;
         std::array<VectorCollisionBuffer, PacketWidth> packetBuffers;
+        std::array<VectorCollisionBuffer, PacketWidth> preparedBuffers;
         std::array<OptimizedCpuEllipsoidMeshPacketLane, PacketWidth> lanes;
+        std::array<OptimizedCpuEllipsoidMeshPacketLane, PacketWidth>
+                preparedLanes;
         std::uint32_t activeMask = random.Next() & 0xffu;
         if (__builtin_popcount(activeMask) < 2) {
             activeMask |= 0x3u;
@@ -250,6 +256,10 @@ bool RunPackets(const GmSurfMesh &mesh,
                 true,
             };
             lanes[lane] = {&located[lane], &packetBuffers[lane]};
+            preparedLanes[lane] = {
+                &located[lane],
+                &preparedBuffers[lane],
+            };
             if ((activeMask & (1u << lane)) != 0u) {
                 const int hit =
                         GmCollision_Ellipsoid_Mesh_InlineMathOptimizedCpuNativeBinary32WithStaticCache(
@@ -284,8 +294,41 @@ bool RunPackets(const GmSurfMesh &mesh,
                          packetHitMask);
             return false;
         }
+        OptimizedCpuPreparedEllipsoidMeshPacket prepared;
+        if (!PrepareOptimizedCpuEllipsoidMeshPacket(
+                    preparedLanes.data(),
+                    preparedLanes.size(),
+                    0xffu,
+                    &prepared)) {
+            std::fprintf(stderr,
+                         "prepared packet case %zu was not accepted\n",
+                         caseIndex);
+            return false;
+        }
+        std::uint32_t preparedHitMask = 0u;
+        if (!GmCollision_PreparedEllipsoidPacket_Mesh_InlineMathOptimizedCpuNativeBinary32WithStaticCache(
+                    prepared,
+                    activeMask,
+                    locatedMesh,
+                    meshInverse,
+                    sidecar,
+                    &preparedHitMask)) {
+            std::fprintf(stderr,
+                         "prepared collision case %zu was not accepted\n",
+                         caseIndex);
+            return false;
+        }
+        if (preparedHitMask != scalarHitMask) {
+            std::fprintf(stderr,
+                         "prepared case %zu hit mask differs: scalar=%02x prepared=%02x\n",
+                         caseIndex,
+                         scalarHitMask,
+                         preparedHitMask);
+            return false;
+        }
         for (std::size_t lane = 0u; lane < PacketWidth; ++lane) {
-            if (!SameBuffer(scalarBuffers[lane], packetBuffers[lane])) {
+            if (!SameBuffer(scalarBuffers[lane], packetBuffers[lane]) ||
+                !SameBuffer(scalarBuffers[lane], preparedBuffers[lane])) {
                 std::fprintf(stderr,
                              "packet case %zu lane %zu collision differs\n",
                              caseIndex,
@@ -306,6 +349,51 @@ bool RunPackets(const GmSurfMesh &mesh,
                 }
                 return false;
             }
+        }
+        if (caseIndex == 0u) {
+            OptimizedCpuPreparedEllipsoidMeshPacket incomplete = prepared;
+            const std::uint32_t firstActiveBit =
+                    activeMask & (0u - activeMask);
+            incomplete.preparedMask &= ~firstActiveBit;
+            std::uint32_t rejectedHitMask = 0xffffffffu;
+            if (GmCollision_PreparedEllipsoidPacket_Mesh_InlineMathOptimizedCpuNativeBinary32WithStaticCache(
+                        incomplete,
+                        activeMask,
+                        locatedMesh,
+                        meshInverse,
+                        sidecar,
+                        &rejectedHitMask) ||
+                rejectedHitMask != 0u) {
+                std::fprintf(stderr,
+                             "prepared packet accepted an unprepared active lane\n");
+                return false;
+            }
+
+            const GmVec3 savedRadii = ellipsoids[0u].radii;
+            ellipsoids[0u].radii.x = 0.0f;
+            GmIso4 invalidInverse = meshInverse;
+            invalidInverse.translation.x =
+                    std::numeric_limits<float>::quiet_NaN();
+            std::feclearexcept(FE_ALL_EXCEPT);
+            std::feraiseexcept(FE_INVALID);
+            const int exceptionsBefore = std::fetestexcept(FE_ALL_EXCEPT);
+            std::uint32_t invalidHitMask = 0xffffffffu;
+            if (GmCollision_EllipsoidPacket_Mesh_InlineMathOptimizedCpuNativeBinary32WithStaticCache(
+                        lanes.data(),
+                        lanes.size(),
+                        0x1u,
+                        locatedMesh,
+                        invalidInverse,
+                        sidecar,
+                        &invalidHitMask) ||
+                invalidHitMask != 0u ||
+                std::fetestexcept(FE_ALL_EXCEPT) != exceptionsBefore) {
+                std::fprintf(stderr,
+                             "rejected packet changed floating-point environment\n");
+                return false;
+            }
+            std::feclearexcept(FE_ALL_EXCEPT);
+            ellipsoids[0u].radii = savedRadii;
         }
     }
     return true;

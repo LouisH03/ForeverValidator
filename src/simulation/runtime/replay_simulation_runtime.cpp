@@ -161,8 +161,9 @@ void ReplaySimulationRuntime::
 CertifyOptimizedCpuStaticTransformsForAdvance(void) noexcept {
     State &state = *state_;
     if (state.optimizedCpuStaticTransforms != nullptr) {
-        state.optimizedCpuStaticTransforms->CertifyForAdvance(
-                state.world.CollisionZone());
+        CPlugTree *movingTree = state.body.Corpus().CollisionTree();
+        state.optimizedCpuStaticTransforms->CertifyForRuntimeAdvance(
+                state.world.CollisionZone(), movingTree);
     }
 }
 
@@ -407,7 +408,9 @@ void ReplaySimulationRuntime::RestoreRuntimeClone(
     state_->body.RestoreRuntimeClone(std::move(clone.body));
     state_->vehicle.RestoreRuntimeClone(clone.vehicle);
     if (state_->optimizedCpuStaticTransforms != nullptr) {
-        state_->optimizedCpuStaticTransforms->ClearTemporalCandidates();
+        state_->optimizedCpuStaticTransforms->ClearRuntimeTemporalCandidates(
+                state_->world.CollisionZone(),
+                state_->body.Corpus().CollisionTree());
     }
     state_->firstStep = clone.firstStep;
     state_->stuntsEnabled = clone.stuntsEnabled;

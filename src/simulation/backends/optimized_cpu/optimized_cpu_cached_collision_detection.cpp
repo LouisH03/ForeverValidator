@@ -16,6 +16,7 @@
 #include "simulation/backends/optimized_cpu/optimized_cpu_static_surface_transform_cache.h"
 #include "simulation/backends/optimized_cpu/optimized_cpu_static_triangle_mesh_query.h"
 #include "simulation/backends/optimized_cpu/optimized_cpu_native_binary32_collision.h"
+#include "simulation/backends/optimized_cpu/optimized_cpu_ellipsoid_mesh_packet.h"
 #include "simulation/backends/optimized_cpu/optimized_cpu_static_bounds_overlap.h"
 
 #if defined(__i386__) || defined(__x86_64__)
@@ -108,6 +109,7 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
         CHmsCollisionManagerSZone &zone,
         const GmIso4 &movingIso,
         const CPlugTree &movingTree,
+        const OptimizedCpuMovingEllipsoidPacketPlan *movingPlan,
         const OptimizedCpuStaticSurfaceTransformGroup &transforms,
         GmOctree<CHmsCollisionManagerSColOctreeCell> &staticTrees) {
     if (!OptimizedCpuEllipsoidMeshPacketAvailable()) {
@@ -116,15 +118,69 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
 
     std::array<EllipsoidPacketTraversalLane, EllipsoidPacketWidth> lanes{};
     std::size_t laneCount = 0u;
-    u32 nextTemporalSlotOrdinal = 0u;
-    if (!CollectEllipsoidPacketTraversalLanes(
-                movingIso,
-                movingTree,
-                &lanes,
-                &laneCount,
-                &nextTemporalSlotOrdinal) ||
-        laneCount < 2u) {
-        return false;
+    if (movingPlan != nullptr) {
+        std::array<
+                GmIso4,
+                OptimizedCpuMovingEllipsoidPacketPlan::MaxNodeCount>
+                nodeLocations;
+        const auto *planNodes = movingPlan->NodeData();
+        const auto *planLanes = movingPlan->LaneData();
+        const auto *operations = movingPlan->OperationData();
+        for (std::size_t operationIndex = 0u;
+             operationIndex < movingPlan->OperationCount();
+             ++operationIndex) {
+            const OptimizedCpuMovingEllipsoidPacketPlan::Operation
+                    &operation = operations[operationIndex];
+            if (operation.kind ==
+                OptimizedCpuMovingEllipsoidPacketPlan::OperationKind::
+                        ComposeNode) {
+                const OptimizedCpuMovingEllipsoidPacketPlan::Node &node =
+                        planNodes[operation.index];
+                const GmIso4 &parentLocation =
+                        node.parentNodeIndex ==
+                                        OptimizedCpuMovingEllipsoidPacketPlan::
+                                                NoParent
+                                ? movingIso
+                                : nodeLocations[node.parentNodeIndex];
+                GmIso4 &location = nodeLocations[operation.index];
+                if (node.usesLocalTransform) {
+                    location = node.tree->LocalIso();
+                    location.Mult(parentLocation);
+                } else {
+                    location = parentLocation;
+                }
+                continue;
+            }
+
+            const OptimizedCpuMovingEllipsoidPacketPlan::Lane &planLane =
+                    planLanes[operation.index];
+            const OptimizedCpuMovingEllipsoidPacketPlan::Node &node =
+                    planNodes[planLane.nodeIndex];
+            const GmIso4 &parentLocation =
+                    node.parentNodeIndex ==
+                                    OptimizedCpuMovingEllipsoidPacketPlan::
+                                            NoParent
+                            ? movingIso
+                            : nodeLocations[node.parentNodeIndex];
+            EllipsoidPacketTraversalLane &lane = lanes[laneCount++];
+            lane.tree = planLane.tree;
+            lane.surface = planLane.surface;
+            lane.location = nodeLocations[planLane.nodeIndex];
+            planLane.tree->GetTransformedCollisionBox(
+                    parentLocation, lane.bounds);
+            lane.temporalSlotOrdinal = planLane.temporalSlotOrdinal;
+        }
+    } else {
+        u32 nextTemporalSlotOrdinal = 0u;
+        if (!CollectEllipsoidPacketTraversalLanes(
+                    movingIso,
+                    movingTree,
+                    &lanes,
+                    &laneCount,
+                    &nextTemporalSlotOrdinal) ||
+            laneCount < 2u) {
+            return false;
+        }
     }
 
     std::array<
@@ -161,6 +217,16 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
             1,
         };
         packetLanes[laneIndex] = {&lane.located, lane.buffer};
+    }
+    OptimizedCpuPreparedEllipsoidMeshPacket preparedPacket;
+    const std::uint32_t allLaneMask =
+            (1u << static_cast<std::uint32_t>(laneCount)) - 1u;
+    if (!PrepareOptimizedCpuEllipsoidMeshPacket(
+                packetLanes.data(),
+                laneCount,
+                allLaneMask,
+                &preparedPacket)) {
+        return false;
     }
 
     for (;;) {
@@ -225,9 +291,8 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
             };
             std::uint32_t hitMask = 0u;
             packetHandled =
-                    GmCollision_EllipsoidPacket_Mesh_InlineMathOptimizedCpuNativeBinary32WithStaticCache(
-                            packetLanes.data(),
-                            laneCount,
+                    GmCollision_PreparedEllipsoidPacket_Mesh_InlineMathOptimizedCpuNativeBinary32WithStaticCache(
+                            preparedPacket,
                             activeMask,
                             locatedMesh,
                             transforms.InverseAt(staticTreeIndex),
@@ -653,6 +718,8 @@ DetectCollisionsCorpusOptimizedCpuNativeBinary32Cached(
                             *this,
                             *corpus->LocationIso(),
                             *corpus->CollisionTree(),
+                            transforms.MovingEllipsoidPacketPlanFor(
+                                    *corpus->CollisionTree()),
                             *groupTransforms,
                             against->targetGroup->staticTrees)) {
                     u32 nextTemporalSlotOrdinal = 0u;

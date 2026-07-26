@@ -12,6 +12,82 @@
 #include "simulation/backends/optimized_cpu/optimized_cpu_static_mesh_triangle_sidecar.h"
 #include "simulation/backends/optimized_cpu/optimized_cpu_static_scene_fingerprint.h"
 
+class CPlugSurface;
+class CPlugTree;
+
+class OptimizedCpuMovingEllipsoidPacketPlan {
+public:
+    static constexpr std::size_t MaxNodeCount = 32u;
+    static constexpr std::size_t MaxLaneCount = 8u;
+    static constexpr std::size_t MaxOperationCount =
+            MaxNodeCount + MaxLaneCount;
+    static constexpr std::uint8_t NoParent = 0xffu;
+
+    struct Node {
+        const CPlugTree *tree = nullptr;
+        std::uint8_t parentNodeIndex = NoParent;
+        bool usesLocalTransform = false;
+    };
+
+    struct Lane {
+        CPlugTree *tree = nullptr;
+        CPlugSurface *surface = nullptr;
+        std::uint8_t nodeIndex = 0u;
+        u32 temporalSlotOrdinal = 0u;
+    };
+
+    enum class OperationKind : std::uint8_t {
+        ComposeNode,
+        EmitLane,
+    };
+
+    struct Operation {
+        OperationKind kind = OperationKind::ComposeNode;
+        std::uint8_t index = 0u;
+    };
+
+    bool TryBuild(const CPlugTree &root) noexcept;
+    void Clear(void) noexcept;
+    bool IsFor(const CPlugTree &root) const noexcept;
+
+    const Node *NodeData(void) const noexcept {
+        return nodes_.data();
+    }
+
+    const Lane *LaneData(void) const noexcept {
+        return lanes_.data();
+    }
+
+    const Operation *OperationData(void) const noexcept {
+        return operations_.data();
+    }
+
+    std::size_t NodeCount(void) const noexcept {
+        return nodeCount_;
+    }
+
+    std::size_t LaneCount(void) const noexcept {
+        return laneCount_;
+    }
+
+    std::size_t OperationCount(void) const noexcept {
+        return operationCount_;
+    }
+
+private:
+    bool TryAppendTree(const CPlugTree &tree,
+                       std::uint8_t parentNodeIndex,
+                       u32 *nextTemporalSlotOrdinal) noexcept;
+
+    const CPlugTree *sourceRoot_ = nullptr;
+    std::array<Node, MaxNodeCount> nodes_{};
+    std::array<Lane, MaxLaneCount> lanes_{};
+    std::array<Operation, MaxOperationCount> operations_{};
+    std::size_t nodeCount_ = 0u;
+    std::size_t laneCount_ = 0u;
+    std::size_t operationCount_ = 0u;
+};
+
 class OptimizedCpuStaticSurfaceTransformGroup {
 public:
     struct TemporalCandidateSpan {
@@ -112,7 +188,14 @@ public:
     void Clear(void) noexcept;
     void ClearTemporalCandidates(void) noexcept;
     bool CertifyForAdvance(
-            const CHmsCollisionManagerSZone &zone) noexcept;
+            const CHmsCollisionManagerSZone &zone,
+            const CPlugTree *movingTree = nullptr) noexcept;
+    bool CertifyForRuntimeAdvance(
+            const CHmsCollisionManagerSZone &zone,
+            const CPlugTree *movingTree) noexcept;
+    void ClearRuntimeTemporalCandidates(
+            const CHmsCollisionManagerSZone &zone,
+            const CPlugTree *movingTree) noexcept;
     bool IsFor(const CHmsCollisionManagerSZone &zone) const noexcept;
     bool IsCertifiedFor(
             const CHmsCollisionManagerSZone &zone) const noexcept;
@@ -120,13 +203,17 @@ public:
             const CHmsCollisionManagerSGroup &group) const noexcept;
     std::optional<OptimizedCpuStaticSceneFingerprint>
             CaptureSourceFingerprintForTesting(void) const noexcept;
+    const OptimizedCpuMovingEllipsoidPacketPlan *MovingEllipsoidPacketPlanFor(
+            const CPlugTree &movingTree) const noexcept;
 
 private:
     const CHmsCollisionManagerSZone *sourceZone_ = nullptr;
     const CHmsCollisionManagerSZone *certifiedZone_ = nullptr;
+    const CPlugTree *certifiedMovingTree_ = nullptr;
     std::array<OptimizedCpuStaticSurfaceTransformGroup,
                CHmsCollisionManager_GroupCount> groups_{};
     std::vector<std::unique_ptr<OptimizedCpuStaticMeshTriangleSidecar>>
             triangleSidecars_;
     std::vector<const GmSurfMesh *> unavailableTriangleSidecarMeshes_;
+    OptimizedCpuMovingEllipsoidPacketPlan movingEllipsoidPacketPlan_;
 };
