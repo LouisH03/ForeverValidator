@@ -162,6 +162,18 @@ OptimizedCpuStaticSurfaceTransformCache::
             result.meshVertexCount += vertexCount;
             result.meshTriangleCount += triangleCount;
             result.meshOctreeCellCount += cellCount;
+            std::size_t meshTraversalDepth = 0u;
+            if (!MeasureOptimizedCpuStaticMeshTraversalDepth(
+                        cellCount == 0u ? nullptr : &mesh.OctreeCell(0u),
+                        cellCount,
+                        &meshTraversalDepth)) {
+                return std::nullopt;
+            }
+            if (result.meshOctreeMaximumTraversalDepth <
+                meshTraversalDepth) {
+                result.meshOctreeMaximumTraversalDepth =
+                        meshTraversalDepth;
+            }
 
             identity.AddU32(vertexCount);
             identity.AddPointer(vertexCount == 0u

@@ -25,6 +25,10 @@ namespace {
 
 constexpr std::size_t PacketWidth =
         OptimizedCpuPreparedEllipsoidMeshPacket::Width;
+// Archived TMNF Stadium meshes in the broad replay corpus peak at depth 20.
+// Deeper valid meshes remain exact through the scalar fallback because the
+// certified depth is rejected before any packet collision is emitted.
+constexpr std::size_t PacketTraversalCapacity = 24u;
 
 bool IsFiniteTransform(const GmIso4 &transform) noexcept {
     const float values[] = {
@@ -846,6 +850,11 @@ FV_E031_AVX2 bool RunPacketAvx2(
         const OptimizedCpuStaticMeshTriangleSidecar &triangles,
         const OptimizedCpuStaticMeshTriangleHierarchyView &hierarchy,
         std::uint32_t *hitMask) noexcept {
+    if (hierarchy.cells == nullptr || hierarchy.postingIndices == nullptr ||
+        hierarchy.count == 0u ||
+        hierarchy.maximumTraversalDepth > PacketTraversalCapacity) {
+        return false;
+    }
     const Iso3x8 ellipsoidWorld = LoadIso(setup);
     const Vec3x8 radii = {
         Load(setup.radiiX.values),
@@ -877,23 +886,26 @@ FV_E031_AVX2 bool RunPacketAvx2(
         0u,
     };
 
-    struct TraversalFrame {
-        u32 end = 0u;
-        __m256 laneMask{};
+    struct alignas(32) TraversalMask {
+        __m256 value;
     };
-    alignas(32) std::array<TraversalFrame, 64u> traversal{};
+    // Entries below traversalDepth are written together before either array
+    // is read. Leaving the unused tail uninitialized avoids clearing the
+    // fixed traversal storage on every static-mesh packet.
+    std::array<u32, PacketTraversalCapacity> traversalEnds;
+    std::array<TraversalMask, PacketTraversalCapacity> traversalMasks;
     std::size_t traversalDepth = 0u;
 
     for (u32 cellIndex = 0u;
          cellIndex < hierarchy.count;) {
         while (traversalDepth != 0u &&
-               traversal[traversalDepth - 1u].end <= cellIndex) {
+               traversalEnds[traversalDepth - 1u] <= cellIndex) {
             --traversalDepth;
         }
         const GmMeshOctreeCell &cell = hierarchy.cells[cellIndex];
         const __m256 parentMask = traversalDepth == 0u
                 ? execution.packetMask
-                : traversal[traversalDepth - 1u].laneMask;
+                : traversalMasks[traversalDepth - 1u].value;
         __m256 laneMask = BoundsMask(
                 execution.meshBounds,
                 cell.Bounds(),
@@ -904,13 +916,13 @@ FV_E031_AVX2 bool RunPacketAvx2(
             continue;
         }
         if (!cell.ContainsTriangle()) {
-            if (traversalDepth == traversal.size()) {
+            if (traversalDepth == traversalEnds.size()) {
                 return false;
             }
-            traversal[traversalDepth++] = {
-                cellIndex + cell.SubtreeEntryCount(),
-                laneMask,
-            };
+            traversalEnds[traversalDepth] =
+                    cellIndex + cell.SubtreeEntryCount();
+            traversalMasks[traversalDepth].value = laneMask;
+            ++traversalDepth;
             ++cellIndex;
             continue;
         }

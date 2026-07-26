@@ -186,6 +186,70 @@ bool HasGridCompatibleHierarchy(
 
 }  // namespace
 
+bool MeasureOptimizedCpuStaticMeshTraversalDepth(
+        const GmMeshOctreeCell *cells,
+        std::size_t count,
+        std::size_t *maximumDepth) noexcept {
+    if (maximumDepth == nullptr) {
+        return false;
+    }
+    if (count == 0u) {
+        *maximumDepth = 0u;
+        return true;
+    }
+    if (cells == nullptr ||
+        cells[0u].ContainsTriangle() ||
+        cells[0u].SubtreeEntryCount() != count) {
+        return false;
+    }
+    try {
+        std::vector<std::size_t> ends;
+        ends.reserve(32u);
+        std::size_t result = 0u;
+        for (std::size_t cellIndex = 0u;
+             cellIndex < count;
+             ++cellIndex) {
+            while (!ends.empty() && ends.back() == cellIndex) {
+                ends.pop_back();
+            }
+            if (!ends.empty() && ends.back() < cellIndex) {
+                return false;
+            }
+
+            const GmMeshOctreeCell &cell = cells[cellIndex];
+            const std::size_t subtreeCount = cell.SubtreeEntryCount();
+            if (cell.ContainsTriangle()) {
+                if (subtreeCount != 1u) {
+                    return false;
+                }
+                continue;
+            }
+            if (subtreeCount <= 1u || subtreeCount > count - cellIndex) {
+                return false;
+            }
+
+            const std::size_t end = cellIndex + subtreeCount;
+            if (!ends.empty() && end > ends.back()) {
+                return false;
+            }
+            ends.push_back(end);
+            if (result < ends.size()) {
+                result = ends.size();
+            }
+        }
+        while (!ends.empty() && ends.back() == count) {
+            ends.pop_back();
+        }
+        if (!ends.empty()) {
+            return false;
+        }
+        *maximumDepth = result;
+        return true;
+    } catch (const std::bad_alloc &) {
+        return false;
+    }
+}
+
 bool OptimizedCpuStaticMeshTriangleSidecar::TryBuild(
         const GmSurfMesh &mesh) noexcept {
     if (!tmnf::simulation::DeterministicExecutionScope::IsActive()) {
@@ -210,6 +274,14 @@ bool OptimizedCpuStaticMeshTriangleSidecar::TryBuild(
             Clear();
             return false;
         }
+        std::size_t maximumTraversalDepth = 0u;
+        if (!MeasureOptimizedCpuStaticMeshTraversalDepth(
+                    cells.data(),
+                    cells.size(),
+                    &maximumTraversalDepth)) {
+            Clear();
+            return false;
+        }
 
         OptimizedCpuStaticMeshTriangleSidecar rebuilt;
         rebuilt.sourceMesh_ = &mesh;
@@ -219,6 +291,7 @@ bool OptimizedCpuStaticMeshTriangleSidecar::TryBuild(
         rebuilt.sourceVertexCount_ = vertices.size();
         rebuilt.sourceTriangleCount_ = triangles.size();
         rebuilt.sourceCellCount_ = cells.size();
+        rebuilt.maximumTraversalDepth_ = maximumTraversalDepth;
         if (triangles.size() > rebuilt.triangles_.max_size()) {
             Clear();
             return false;
@@ -326,6 +399,7 @@ void OptimizedCpuStaticMeshTriangleSidecar::Clear(void) noexcept {
     sourceVertexCount_ = 0u;
     sourceTriangleCount_ = 0u;
     sourceCellCount_ = 0u;
+    maximumTraversalDepth_ = 0u;
     triangles_.clear();
     directTrianglePostings_.clear();
     directPostingIndexByCell_.clear();

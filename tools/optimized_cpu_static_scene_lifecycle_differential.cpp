@@ -83,7 +83,10 @@ bool CompareFingerprint(
                         actual.meshTriangleCount) &&
            CompareField(stage, "meshOctreeCellCount",
                         expected.meshOctreeCellCount,
-                        actual.meshOctreeCellCount);
+                        actual.meshOctreeCellCount) &&
+           CompareField(stage, "meshOctreeMaximumTraversalDepth",
+                        expected.meshOctreeMaximumTraversalDepth,
+                        actual.meshOctreeMaximumTraversalDepth);
 }
 
 std::optional<OptimizedCpuStaticSceneFingerprint> Capture(
@@ -267,6 +270,8 @@ int main(int argc, char **argv) {
               << " mesh_vertices=" << baseline->meshVertexCount
               << " mesh_triangles=" << baseline->meshTriangleCount
               << " mesh_octree_cells=" << baseline->meshOctreeCellCount
+              << " mesh_octree_max_depth="
+              << baseline->meshOctreeMaximumTraversalDepth
               << " lifecycle_stages=7 respawns_executed="
               << (respawned.Value().respawnCount - respawnCountBefore)
               << " result=identical\n";

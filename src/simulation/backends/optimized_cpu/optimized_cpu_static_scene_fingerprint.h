@@ -16,6 +16,7 @@ struct OptimizedCpuStaticSceneFingerprint {
     std::uint64_t meshVertexCount = 0u;
     std::uint64_t meshTriangleCount = 0u;
     std::uint64_t meshOctreeCellCount = 0u;
+    std::uint64_t meshOctreeMaximumTraversalDepth = 0u;
 
     bool operator==(
             const OptimizedCpuStaticSceneFingerprint &other) const noexcept {
@@ -29,7 +30,9 @@ struct OptimizedCpuStaticSceneFingerprint {
                meshSurfaceCount == other.meshSurfaceCount &&
                meshVertexCount == other.meshVertexCount &&
                meshTriangleCount == other.meshTriangleCount &&
-               meshOctreeCellCount == other.meshOctreeCellCount;
+               meshOctreeCellCount == other.meshOctreeCellCount &&
+               meshOctreeMaximumTraversalDepth ==
+                       other.meshOctreeMaximumTraversalDepth;
     }
 
     bool operator!=(
