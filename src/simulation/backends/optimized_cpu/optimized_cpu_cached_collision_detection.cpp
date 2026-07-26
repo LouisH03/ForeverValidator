@@ -183,21 +183,21 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
         }
     }
 
-    std::array<
-            OptimizedCpuStaticSurfaceTransformGroup::TemporalCandidateSpan,
-            EllipsoidPacketWidth>
-            candidateSpans{};
-    std::array<std::size_t, EllipsoidPacketWidth> candidateOffsets{};
+    std::array<const u32 *, EllipsoidPacketWidth> candidateCurrent{};
+    std::array<std::size_t, EllipsoidPacketWidth> candidateRemaining{};
     for (std::size_t laneIndex = 0u;
          laneIndex < laneCount;
          ++laneIndex) {
+        OptimizedCpuStaticSurfaceTransformGroup::TemporalCandidateSpan span;
         if (!transforms.TemporalCandidateSpanFor(
                     *lanes[laneIndex].tree,
                     lanes[laneIndex].temporalSlotOrdinal,
                     lanes[laneIndex].bounds,
-                    &candidateSpans[laneIndex])) {
+                    &span)) {
             return false;
         }
+        candidateCurrent[laneIndex] = span.data;
+        candidateRemaining[laneIndex] = span.size;
     }
 
     std::array<OptimizedCpuEllipsoidMeshPacketLane, EllipsoidPacketWidth>
@@ -234,11 +234,9 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
         for (std::size_t laneIndex = 0u;
              laneIndex < laneCount;
              ++laneIndex) {
-            const auto &span = candidateSpans[laneIndex];
-            const std::size_t offset = candidateOffsets[laneIndex];
-            if (offset < span.size) {
+            if (candidateRemaining[laneIndex] != 0u) {
                 staticTreeIndex = std::min(
-                        staticTreeIndex, span.data[offset]);
+                        staticTreeIndex, *candidateCurrent[laneIndex]);
             }
         }
         if (staticTreeIndex == std::numeric_limits<u32>::max()) {
@@ -251,13 +249,13 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
         for (std::size_t laneIndex = 0u;
              laneIndex < laneCount;
              ++laneIndex) {
-            const auto &span = candidateSpans[laneIndex];
-            std::size_t &offset = candidateOffsets[laneIndex];
-            if (offset >= span.size ||
-                span.data[offset] != staticTreeIndex) {
+            std::size_t &remaining = candidateRemaining[laneIndex];
+            const u32 *&candidate = candidateCurrent[laneIndex];
+            if (remaining == 0u || *candidate != staticTreeIndex) {
                 continue;
             }
-            ++offset;
+            ++candidate;
+            --remaining;
             if (OptimizedCpuStaticBoundsOverlap(
                         lanes[laneIndex].bounds,
                         record->Bounds())) {
