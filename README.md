@@ -62,6 +62,11 @@ build/native/libforevervalidator_json.a
 build/native/libforevervalidator_native.a
 ```
 
+The optional NVIDIA CUDA Stadium/StadiumCar backend is built with
+`-DFOREVERVALIDATOR_ENABLE_CUDA=ON`. Hardware requirements, build commands,
+architecture, correctness evidence, benchmarks, and limitations are in
+[docs/cuda-backend.md](docs/cuda-backend.md).
+
 ## Windows build
 
 ### From Linux
@@ -118,8 +123,9 @@ build/native/forevervalidator \
 
 Select a simulation backend at runtime with `--backend reference`,
 `--backend optimized-cpu`, `--backend speculative-ticking`, or
-`--backend batched`. Single-replay validation defaults to the authoritative
-reference backend. Multi-replay runs default to the ordered batched backend.
+`--backend batched`, or `--backend cuda`. Single-replay validation defaults
+to the authoritative reference backend. Multi-replay runs default to the
+ordered batched backend.
 `--batch-size N` controls how many replay files are loaded and submitted
 together, and defaults to 10.
 
