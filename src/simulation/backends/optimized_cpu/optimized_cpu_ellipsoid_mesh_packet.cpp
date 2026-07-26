@@ -936,7 +936,9 @@ FV_E031_AVX2 bool RunPacketAvx2(
                 triangles.DirectTriangleAt(postingIndex);
         const OptimizedCpuStaticMeshTriangleData &triangle =
                 triangles.TriangleAt(posting.triangleIndex);
-        laneMask = MaskForBits(laneBits);
+        // BoundsMask and every parent mask use canonical all-zero/all-one
+        // lanes, so converting through movemask and rebuilding the vector is
+        // redundant. Preserve the exact mask produced by the bounds test.
         execution.CollideTriangle(triangle, laneMask);
     }
     *hitMask = execution.hitMask;
