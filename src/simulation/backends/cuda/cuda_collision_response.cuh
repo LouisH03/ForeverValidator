@@ -793,6 +793,7 @@ __device__ inline void AbsorbVehicle(
 
 }  // namespace response_detail
 
+template <bool TrackDiagnostics = true>
 __device__ inline Status Respond(
         const CudaPackedSceneHeader *scene,
         const CudaPackedStaticConfigurationHeader *configuration,
@@ -840,19 +841,23 @@ __device__ inline Status Respond(
         const GmVec3 originalSpeed =
                 response_detail::SpeedAtPoint(
                         candidate, collision.contactPoint);
-        if (index == 0u) {
-            scratch.firstResponseWheelIndex =
-                    contact.wheelIndex;
-            scratch.firstResponseReplacementBefore =
-                    contact.replacement;
+        if constexpr (TrackDiagnostics) {
+            if (index == 0u) {
+                scratch.firstResponseWheelIndex =
+                        contact.wheelIndex;
+                scratch.firstResponseReplacementBefore =
+                        contact.replacement;
+            }
         }
         if (candidate.vehicle.mobil.absorbContactEnabled) {
             response_detail::AbsorbVehicle(
                     candidate, configuration, contact);
         }
-        if (index == 0u) {
-            scratch.firstResponseReplacementAfter =
-                    contact.replacement;
+        if constexpr (TrackDiagnostics) {
+            if (index == 0u) {
+                scratch.firstResponseReplacementAfter =
+                        contact.replacement;
+            }
         }
         const GmVec3 worldReplacement =
                 candidate.vehicle.mobil.absorbContactEnabled

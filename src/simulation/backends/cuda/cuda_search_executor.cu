@@ -1553,7 +1553,7 @@ __global__ void SimulateSearchCandidatesKernel(
             }
         }
         const cuda::physics::Status physicsStatus =
-                cuda::physics::Step(
+                cuda::physics::Step<false>(
                         static_cast<const CudaPackedSceneHeader *>(
                                 sceneData),
                         static_cast<const
@@ -1691,7 +1691,7 @@ __global__ void CaptureSearchWinnerStateKernel(
             }
         }
         const cuda::physics::Status physicsStatus =
-                cuda::physics::Step(
+                cuda::physics::Step<false>(
                         static_cast<const CudaPackedSceneHeader *>(
                                 sceneData),
                         static_cast<const

@@ -18,18 +18,21 @@ constexpr float DirectionEpsilonSquared = 1.0e-10f;
 constexpr float CollisionDistance = 1.0e-5f;
 constexpr float SphereNormalAlignment = 0.8660254f;
 
+template <bool TrackDiagnostics>
 __device__ inline void Clear(CudaCollisionScratch &scratch) {
     scratch.collisionCount = 0u;
     scratch.shapeCollisionCount = 0u;
-    scratch.accelerationCellVisits = 0u;
-    scratch.accelerationSurfaceVisits = 0u;
-    scratch.meshCellVisits = 0u;
-    scratch.meshCellIntersections = 0u;
-    scratch.meshTriangleCells = 0u;
-    scratch.triangleTests = 0u;
-    scratch.triangleHits = 0u;
-    scratch.firstVisitedShape = UINT32_MAX;
-    scratch.firstVisitedSurface = UINT32_MAX;
+    if constexpr (TrackDiagnostics) {
+        scratch.accelerationCellVisits = 0u;
+        scratch.accelerationSurfaceVisits = 0u;
+        scratch.meshCellVisits = 0u;
+        scratch.meshCellIntersections = 0u;
+        scratch.meshTriangleCells = 0u;
+        scratch.triangleTests = 0u;
+        scratch.triangleHits = 0u;
+        scratch.firstVisitedShape = UINT32_MAX;
+        scratch.firstVisitedSurface = UINT32_MAX;
+    }
     scratch.overflow = false;
 }
 
@@ -466,6 +469,7 @@ __device__ inline void TransformNewCollisions(
     }
 }
 
+template <bool TrackDiagnostics>
 __device__ inline int EllipsoidMesh(
         const CudaPackedSceneHeader *scene,
         const CudaPackedStaticConfigurationHeader *configuration,
@@ -487,12 +491,14 @@ __device__ inline int EllipsoidMesh(
     const GmBoxAligned ellipsoidBox = TransformBox(
             {{0.0f, 0.0f, 0.0f}, radii},
             ellipsoidToMesh);
-    if (scratch.firstVisitedSurface == UINT32_MAX) {
-        scratch.firstVisitedShape = shapeIndex;
-        scratch.firstVisitedSurface = surfaceIndex;
-        scratch.firstShapeWorld = shapeWorld;
-        scratch.firstEllipsoidBox = ellipsoidBox;
-        scratch.firstSurfaceWorldBounds = surface.worldBounds;
+    if constexpr (TrackDiagnostics) {
+        if (scratch.firstVisitedSurface == UINT32_MAX) {
+            scratch.firstVisitedShape = shapeIndex;
+            scratch.firstVisitedSurface = surfaceIndex;
+            scratch.firstShapeWorld = shapeWorld;
+            scratch.firstEllipsoidBox = ellipsoidBox;
+            scratch.firstSurfaceWorldBounds = surface.worldBounds;
+        }
     }
     const GmIso4 meshToEllipsoid = Inverse(ellipsoidToMesh);
     GmIso4 meshToUnit = meshToEllipsoid;
@@ -518,32 +524,42 @@ __device__ inline int EllipsoidMesh(
     const CudaSceneOctreeCell *cells =
             SceneSection<CudaSceneOctreeCell>(
                     scene, scene->octreeCells);
-    if (scratch.firstVisitedSurface == surfaceIndex &&
-        surface.octreeCellCount != 0u) {
-        scratch.firstMeshRootBounds =
-                cells[surface.firstOctreeCell].bounds;
+    if constexpr (TrackDiagnostics) {
+        if (scratch.firstVisitedSurface == surfaceIndex &&
+            surface.octreeCellCount != 0u) {
+            scratch.firstMeshRootBounds =
+                    cells[surface.firstOctreeCell].bounds;
+        }
     }
     std::uint32_t cell = 0u;
     int hit = 0;
     while (cell < surface.octreeCellCount) {
-        ++scratch.meshCellVisits;
+        if constexpr (TrackDiagnostics) {
+            ++scratch.meshCellVisits;
+        }
         const CudaSceneOctreeCell &entry =
                 cells[surface.firstOctreeCell + cell];
         if (!BoundsIntersect(ellipsoidBox, entry.bounds)) {
             cell += entry.subtreeEntryCount;
             continue;
         }
-        ++scratch.meshCellIntersections;
+        if constexpr (TrackDiagnostics) {
+            ++scratch.meshCellIntersections;
+        }
         ++cell;
         if (!entry.containsTriangle ||
             entry.triangleIndex >= surface.triangleCount) {
             continue;
         }
-        ++scratch.meshTriangleCells;
+        if constexpr (TrackDiagnostics) {
+            ++scratch.meshTriangleCells;
+        }
         const CudaSceneTriangle &triangle =
                 triangles[surface.firstTriangle +
                           entry.triangleIndex];
-        ++scratch.triangleTests;
+        if constexpr (TrackDiagnostics) {
+            ++scratch.triangleTests;
+        }
         const GmVec3 unitVertices[3] = {
                 TransformPoint(
                         meshToUnit,
@@ -606,7 +622,9 @@ __device__ inline int EllipsoidMesh(
                 actorIndex,
         };
         if (query.Collide(unitVertices)) {
-            ++scratch.triangleHits;
+            if constexpr (TrackDiagnostics) {
+                ++scratch.triangleHits;
+            }
             TransformNewCollisions(
                     scratch, firstNew,
                     contactToWorld, normalToWorld);
@@ -890,12 +908,13 @@ __device__ inline void SortForResponse(
 
 }  // namespace detail
 
+template <bool TrackDiagnostics = true>
 __device__ inline Status Detect(
         const CudaPackedSceneHeader *scene,
         const CudaPackedStaticConfigurationHeader *configuration,
         const CudaCandidatePhysicsState &candidate,
         CudaCollisionScratch &scratch) {
-    detail::Clear(scratch);
+    detail::Clear<TrackDiagnostics>(scratch);
     if (scene == nullptr || configuration == nullptr ||
         scene->magic != CudaPackedSceneHeader::Magic ||
         configuration->magic !=
@@ -949,7 +968,9 @@ __device__ inline Status Detect(
             if (range.cellCount <= 1u) continue;
             std::uint32_t index = 0u;
             while (index < range.cellCount) {
-                ++scratch.accelerationCellVisits;
+                if constexpr (TrackDiagnostics) {
+                    ++scratch.accelerationCellVisits;
+                }
                 const CudaSceneAccelerationCell &cell =
                         acceleration[range.firstCell + index];
                 if (!detail::BoundsIntersect(
@@ -964,12 +985,14 @@ __device__ inline Status Detect(
                 }
                 const CudaSceneSurface &surface =
                         surfaces[cell.surfaceIndex];
-                ++scratch.accelerationSurfaceVisits;
+                if constexpr (TrackDiagnostics) {
+                    ++scratch.accelerationSurfaceVisits;
+                }
                 if (surface.type != static_cast<std::uint32_t>(
                             GmSurf::EGmSurfType::Mesh)) {
                     return Status::UnsupportedGeometry;
                 }
-                detail::EllipsoidMesh(
+                detail::EllipsoidMesh<TrackDiagnostics>(
                         scene, configuration, surface,
                         cell.surfaceIndex,
                         surface.actorIndex, shape, shapeIndex,

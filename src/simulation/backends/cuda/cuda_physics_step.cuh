@@ -28,6 +28,7 @@ __device__ inline vehicle::ForceStatus ForcePass(
             candidate, configuration, dt);
 }
 
+template <bool TrackCollisionDiagnostics = true>
 __device__ inline Status CollisionSubstep(
         const CudaPackedSceneHeader *scene,
         const CudaPackedStaticConfigurationHeader *configuration,
@@ -43,11 +44,13 @@ __device__ inline Status CollisionSubstep(
                 static_cast<std::uint32_t>(forceStatus));
     }
     dynamics::PreCollision(candidate.body, dt);
-    collision::Status collisionStatus = collision::Detect(
-            scene, configuration, candidate, scratch);
+    collision::Status collisionStatus =
+            collision::Detect<TrackCollisionDiagnostics>(
+                    scene, configuration, candidate, scratch);
     if (collisionStatus == collision::Status::Success) {
-        collisionStatus = collision::Respond(
-                scene, configuration, candidate, scratch);
+        collisionStatus =
+                collision::Respond<TrackCollisionDiagnostics>(
+                        scene, configuration, candidate, scratch);
     }
     if (collisionStatus != collision::Status::Success) {
         return Status::CollisionFailure;
@@ -56,6 +59,7 @@ __device__ inline Status CollisionSubstep(
     return Status::Success;
 }
 
+template <bool TrackCollisionDiagnostics = true>
 __device__ inline Status Step(
         const CudaPackedSceneHeader *scene,
         const CudaPackedStaticConfigurationHeader *configuration,
@@ -92,16 +96,18 @@ __device__ inline Status Step(
                     dt / exact::FromUnsignedInteger(substeps);
             for (std::uint32_t count = substeps - 1u;
                  count != 0u; --count) {
-                const Status status = CollisionSubstep(
-                        scene, configuration, candidate,
-                        split, scratch);
+                const Status status =
+                        CollisionSubstep<TrackCollisionDiagnostics>(
+                                scene, configuration, candidate,
+                                split, scratch);
                 if (status != Status::Success) return status;
                 remaining -= split;
             }
         }
-        const Status finalStatus = CollisionSubstep(
-                scene, configuration, candidate,
-                remaining, scratch);
+        const Status finalStatus =
+                CollisionSubstep<TrackCollisionDiagnostics>(
+                        scene, configuration, candidate,
+                        remaining, scratch);
         if (finalStatus != Status::Success) {
             return finalStatus;
         }
