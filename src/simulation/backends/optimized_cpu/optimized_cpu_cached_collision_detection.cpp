@@ -5,7 +5,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <new>
+#include <type_traits>
 #include <typeinfo>
+#include <utility>
 
 #include "engine/physics/collision/gm_collision_buffer.h"
 #include "engine/physics/collision/hms_collision_manager.h"
@@ -39,12 +42,66 @@ struct EllipsoidPacketTraversalLane {
     CHmsCollisionBuffer *buffer = nullptr;
     u32 temporalSlotOrdinal = 0u;
     bool collided = false;
+
+    EllipsoidPacketTraversalLane(
+            CPlugTree *treeValue,
+            CPlugSurface *surfaceValue,
+            const GmIso4 &locationValue,
+            const GmBoxAligned &boundsValue,
+            u32 temporalSlotOrdinalValue) noexcept
+        : tree(treeValue),
+          surface(surfaceValue),
+          location(locationValue),
+          bounds(boundsValue),
+          located{},
+          sphereContact(nullptr),
+          buffer(nullptr),
+          temporalSlotOrdinal(temporalSlotOrdinalValue),
+          collided(false) {}
 };
+
+template <typename T, std::size_t Count>
+class UninitializedObjectArray {
+    static_assert(std::is_trivially_destructible_v<T>);
+
+    struct alignas(T) Slot {
+        std::byte bytes[sizeof(T)];
+    };
+
+    static_assert(sizeof(Slot) == sizeof(T));
+    static_assert(alignof(Slot) == alignof(T));
+
+public:
+    UninitializedObjectArray(void) noexcept {}
+
+    template <typename... Arguments>
+    T &ConstructAt(std::size_t index, Arguments &&...arguments) noexcept {
+        return *::new (static_cast<void *>(slots_[index].bytes)) T(
+                std::forward<Arguments>(arguments)...);
+    }
+
+    T &operator[](std::size_t index) noexcept {
+        return *std::launder(
+                reinterpret_cast<T *>(slots_[index].bytes));
+    }
+
+    const T &operator[](std::size_t index) const noexcept {
+        return *std::launder(
+                reinterpret_cast<const T *>(slots_[index].bytes));
+    }
+
+private:
+    std::array<Slot, Count> slots_;
+};
+
+using EllipsoidPacketTraversalLanes = UninitializedObjectArray<
+        EllipsoidPacketTraversalLane,
+        EllipsoidPacketWidth>;
 
 bool CollectEllipsoidPacketTraversalLanes(
         const GmIso4 &parentIso,
         const CPlugTree &tree,
-        std::array<EllipsoidPacketTraversalLane, EllipsoidPacketWidth> *lanes,
+        EllipsoidPacketTraversalLanes *lanes,
         std::size_t *laneCount,
         u32 *nextTemporalSlotOrdinal) {
     const u32 temporalSlotOrdinal = (*nextTemporalSlotOrdinal)++;
@@ -77,12 +134,15 @@ bool CollectEllipsoidPacketTraversalLanes(
         return false;
     }
 
-    EllipsoidPacketTraversalLane &lane = (*lanes)[(*laneCount)++];
-    lane.tree = const_cast<CPlugTree *>(&tree);
-    lane.surface = surface;
-    lane.location = localIso;
-    tree.GetTransformedCollisionBox(parentIso, lane.bounds);
-    lane.temporalSlotOrdinal = temporalSlotOrdinal;
+    GmBoxAligned bounds;
+    tree.GetTransformedCollisionBox(parentIso, bounds);
+    lanes->ConstructAt(
+            (*laneCount)++,
+            const_cast<CPlugTree *>(&tree),
+            surface,
+            localIso,
+            bounds,
+            temporalSlotOrdinal);
     return true;
 }
 
@@ -116,10 +176,14 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
         return false;
     }
 
-    std::array<EllipsoidPacketTraversalLane, EllipsoidPacketWidth> lanes{};
+    // The certified operation stream constructs every node and lane exactly
+    // once before it is read. Raw slots avoid clearing the unused tail of the
+    // fixed-capacity arrays on every packet pass while keeping normal C++
+    // object lifetimes for the active entries.
+    EllipsoidPacketTraversalLanes lanes;
     std::size_t laneCount = 0u;
     if (movingPlan != nullptr) {
-        std::array<
+        UninitializedObjectArray<
                 GmIso4,
                 OptimizedCpuMovingEllipsoidPacketPlan::MaxNodeCount>
                 nodeLocations;
@@ -142,12 +206,15 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
                                                 NoParent
                                 ? movingIso
                                 : nodeLocations[node.parentNodeIndex];
-                GmIso4 &location = nodeLocations[operation.index];
                 if (node.usesLocalTransform) {
-                    location = node.tree->LocalIso();
+                    GmIso4 &location = nodeLocations.ConstructAt(
+                            operation.index,
+                            node.tree->LocalIso());
                     location.Mult(parentLocation);
                 } else {
-                    location = parentLocation;
+                    nodeLocations.ConstructAt(
+                            operation.index,
+                            parentLocation);
                 }
                 continue;
             }
@@ -162,13 +229,16 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
                                             NoParent
                             ? movingIso
                             : nodeLocations[node.parentNodeIndex];
-            EllipsoidPacketTraversalLane &lane = lanes[laneCount++];
-            lane.tree = planLane.tree;
-            lane.surface = planLane.surface;
-            lane.location = nodeLocations[planLane.nodeIndex];
+            GmBoxAligned bounds;
             planLane.tree->GetTransformedCollisionBox(
-                    parentLocation, lane.bounds);
-            lane.temporalSlotOrdinal = planLane.temporalSlotOrdinal;
+                    parentLocation, bounds);
+            lanes.ConstructAt(
+                    laneCount++,
+                    planLane.tree,
+                    planLane.surface,
+                    nodeLocations[planLane.nodeIndex],
+                    bounds,
+                    planLane.temporalSlotOrdinal);
         }
     } else {
         u32 nextTemporalSlotOrdinal = 0u;
@@ -183,8 +253,8 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
         }
     }
 
-    std::array<const u32 *, EllipsoidPacketWidth> candidateCurrent{};
-    std::array<std::size_t, EllipsoidPacketWidth> candidateRemaining{};
+    std::array<const u32 *, EllipsoidPacketWidth> candidateCurrent;
+    std::array<std::size_t, EllipsoidPacketWidth> candidateRemaining;
     for (std::size_t laneIndex = 0u;
          laneIndex < laneCount;
          ++laneIndex) {
@@ -274,7 +344,7 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
                 transforms.CertifiedMeshPacketAt(staticTreeIndex);
         bool packetHandled = false;
         if (certifiedMesh != nullptr) {
-            std::array<u32, EllipsoidPacketWidth> firstNew{};
+            std::array<u32, EllipsoidPacketWidth> firstNew;
             for (std::size_t laneIndex = 0u;
                  laneIndex < laneCount;
                  ++laneIndex) {
