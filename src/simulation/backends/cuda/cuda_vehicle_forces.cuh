@@ -2121,7 +2121,25 @@ __device__ inline void ApplyDirtSlide(
     }
 }
 
-template <bool ReuseSteeringSinCos>
+__device__ inline GmVec3 GroundFeedbackForce(
+        const CudaVehicleState &vehicle,
+        const CudaPackedStaticConfigurationHeader *configuration) {
+    GmVec3 result = {
+            vehicle.gearedDrive.scaledCurrentForce.x *
+                    -configuration->tuning.feedback.forceDivisor,
+            vehicle.gearedDrive.scaledCurrentForce.y *
+                    -configuration->tuning.feedback.forceDivisor,
+            vehicle.gearedDrive.scaledCurrentForce.z *
+                    -configuration->tuning.feedback.forceDivisor,
+    };
+    if (exact::Sqrt(dynamics::detail::Dot(result, result)) <
+        configuration->tuning.gearedDrive.currentForceTorqueMin) {
+        result = {};
+    }
+    return result;
+}
+
+template <bool ReuseWheelPassInvariants>
 __device__ inline ForceStatus ComputeModel6Ground(
         CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration,
@@ -2169,8 +2187,11 @@ __device__ inline ForceStatus ComputeModel6Ground(
     const float sideFade =
             BurnoutSideFade(vehicle, configuration, tick);
     exact::SinCosResult steeringSinCos{};
-    if constexpr (ReuseSteeringSinCos) {
+    GmVec3 sharedFeedbackForce{};
+    if constexpr (ReuseWheelPassInvariants) {
         steeringSinCos = exact::SinCos(visualSteerYaw);
+        sharedFeedbackForce =
+                GroundFeedbackForce(vehicle, configuration);
     }
     for (std::uint32_t index = 0u;
          index < vehicle.wheels.count; ++index) {
@@ -2212,7 +2233,7 @@ __device__ inline ForceStatus ComputeModel6Ground(
             static_cast<std::uint32_t>(
                     VehicleWheelAxle::Front)) {
             exact::SinCosResult sinCos;
-            if constexpr (ReuseSteeringSinCos) {
+            if constexpr (ReuseWheelPassInvariants) {
                 sinCos = steeringSinCos;
             } else {
                 sinCos = exact::SinCos(visualSteerYaw);
@@ -2225,22 +2246,12 @@ __device__ inline ForceStatus ComputeModel6Ground(
                     negativeSine + cosine * sideAxis.z,
             };
         }
-        GmVec3 feedbackForce = {
-                vehicle.gearedDrive.scaledCurrentForce.x *
-                        -configuration->tuning.feedback.
-                                forceDivisor,
-                vehicle.gearedDrive.scaledCurrentForce.y *
-                        -configuration->tuning.feedback.
-                                forceDivisor,
-                vehicle.gearedDrive.scaledCurrentForce.z *
-                        -configuration->tuning.feedback.
-                                forceDivisor,
-        };
-        if (exact::Sqrt(dynamics::detail::Dot(
-                    feedbackForce, feedbackForce)) <
-            configuration->tuning.gearedDrive.
-                    currentForceTorqueMin) {
-            feedbackForce = {};
+        GmVec3 feedbackForce;
+        if constexpr (ReuseWheelPassInvariants) {
+            feedbackForce = sharedFeedbackForce;
+        } else {
+            feedbackForce =
+                    GroundFeedbackForce(vehicle, configuration);
         }
         GmVec3 feedbackTorque =
                 wheel_detail::Cross(lever, feedbackForce);
@@ -2634,7 +2645,7 @@ __device__ inline ForceStatus ComputeModel6Ground(
 
 }  // namespace force_detail
 
-template <bool ReuseSteeringSinCos = false>
+template <bool ReuseWheelPassInvariants = false>
 __device__ inline ForceStatus ComputeForcesModel6(
         CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration,
@@ -2715,7 +2726,7 @@ __device__ inline ForceStatus ComputeForcesModel6(
             candidate, configuration, currentForce);
     const ForceStatus modelStatus =
             force_detail::ComputeModel6Ground<
-                    ReuseSteeringSinCos>(
+                    ReuseWheelPassInvariants>(
                     candidate, configuration, dt, currentForce,
                     slopeA, slopeB, linearSpeed, angularSpeed,
                     visualSteerYaw, hasMaterial, material,

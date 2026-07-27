@@ -16,7 +16,7 @@ enum class Status : std::uint32_t {
     UnsupportedForceBase = 100u,
 };
 
-template <bool ReuseSteeringSinCos = false>
+template <bool ReuseWheelPassInvariants = false>
 __device__ inline vehicle::ForceStatus ForcePass(
         CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration,
@@ -26,13 +26,13 @@ __device__ inline vehicle::ForceStatus ForcePass(
         return vehicle::ForceStatus::Success;
     }
     return vehicle::ComputeForcesModel6<
-            ReuseSteeringSinCos>(
+            ReuseWheelPassInvariants>(
             candidate, configuration, dt);
 }
 
 template <
         bool TrackCollisionDiagnostics = true,
-        bool ReuseSteeringSinCos = false,
+        bool ReuseWheelPassInvariants = false,
         typename Scratch = collision::CudaCollisionScratch>
 __device__ inline Status CollisionSubstep(
         const CudaPackedSceneHeader *scene,
@@ -41,7 +41,7 @@ __device__ inline Status CollisionSubstep(
         float dt,
         Scratch &scratch) {
     const vehicle::ForceStatus forceStatus =
-            ForcePass<ReuseSteeringSinCos>(
+            ForcePass<ReuseWheelPassInvariants>(
                     candidate, configuration, dt);
     if (forceStatus != vehicle::ForceStatus::Success) {
         return static_cast<Status>(
@@ -67,7 +67,7 @@ __device__ inline Status CollisionSubstep(
 
 template <
         bool TrackCollisionDiagnostics = true,
-        bool ReuseSteeringSinCos = false,
+        bool ReuseWheelPassInvariants = false,
         typename Scratch = collision::CudaCollisionScratch>
 __device__ inline Status Step(
         const CudaPackedSceneHeader *scene,
@@ -108,7 +108,7 @@ __device__ inline Status Step(
                 const Status status =
                         CollisionSubstep<
                                 TrackCollisionDiagnostics,
-                                ReuseSteeringSinCos>(
+                                ReuseWheelPassInvariants>(
                                 scene, configuration, candidate,
                                 split, scratch);
                 if (status != Status::Success) return status;
@@ -118,7 +118,7 @@ __device__ inline Status Step(
         const Status finalStatus =
                 CollisionSubstep<
                         TrackCollisionDiagnostics,
-                        ReuseSteeringSinCos>(
+                        ReuseWheelPassInvariants>(
                         scene, configuration, candidate,
                         remaining, scratch);
         if (finalStatus != Status::Success) {
