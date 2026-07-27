@@ -185,6 +185,13 @@ bool OptimizedCpuMovingEllipsoidPacketPlan::TryAppendTree(
         operationCount_ >= operations_.size()) {
         return false;
     }
+    const GmVec3 radii =
+            static_cast<const GmSurfEllipsoid &>(*geometry).radii;
+    if (!(0.0f < radii.x && 0.0f < radii.y && 0.0f < radii.z) ||
+        !std::isfinite(radii.x) || !std::isfinite(radii.y) ||
+        !std::isfinite(radii.z)) {
+        return false;
+    }
 
     const std::uint8_t laneIndex =
             static_cast<std::uint8_t>(laneCount_++);

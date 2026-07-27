@@ -2,6 +2,7 @@
 #include <cfenv>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <memory>
 
 #include "engine/physics/dynamics/hms_corpus.h"
@@ -257,6 +258,33 @@ bool CheckMovingEllipsoidPacketPlan(void) {
         std::fprintf(stderr, "disabled ordinal fixture became active\n");
         return false;
     }
+
+    GmSurfEllipsoid *firstEllipsoid =
+            const_cast<GmSurfEllipsoid *>(
+                    static_cast<const GmSurfEllipsoid *>(
+                            firstLaneSurface->Geometry()));
+    if (firstEllipsoid == nullptr) {
+        std::fprintf(stderr, "missing moving packet ellipsoid fixture\n");
+        return false;
+    }
+    const GmVec3 savedRadii = firstEllipsoid->radii;
+    const std::array<float, 3u> rejectedRadii = {
+        0.0f,
+        std::numeric_limits<float>::infinity(),
+        std::numeric_limits<float>::quiet_NaN(),
+    };
+    for (float rejectedRadius : rejectedRadii) {
+        firstEllipsoid->radii.x = rejectedRadius;
+        OptimizedCpuMovingEllipsoidPacketPlan rejectedPlan;
+        if (rejectedPlan.TryBuild(root) || rejectedPlan.IsFor(root) ||
+            rejectedPlan.LaneCount() != 0u) {
+            std::fprintf(stderr,
+                         "invalid moving packet radius was certified\n");
+            firstEllipsoid->radii = savedRadii;
+            return false;
+        }
+    }
+    firstEllipsoid->radii = savedRadii;
 
     CPlugTree nestedRoot;
     nestedRoot.SetCollisionEnabled(true);

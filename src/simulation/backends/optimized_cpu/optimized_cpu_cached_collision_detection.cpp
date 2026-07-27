@@ -163,6 +163,44 @@ void CompletePacketCollisionMaterials(
     }
 }
 
+inline void PopulateCertifiedPacketLane(
+        OptimizedCpuPreparedEllipsoidMeshPacket &prepared,
+        std::size_t laneIndex,
+        const GmIso4 &ellipsoidWorld,
+        const GmSurfEllipsoid &ellipsoid,
+        CHmsCollisionBuffer *buffer) noexcept {
+    const GmVec3 radii = ellipsoid.radii;
+    prepared.worldXx.values[laneIndex] =
+            ellipsoidWorld.rotation.basisX.x;
+    prepared.worldXy.values[laneIndex] =
+            ellipsoidWorld.rotation.basisY.x;
+    prepared.worldXz.values[laneIndex] =
+            ellipsoidWorld.rotation.basisZ.x;
+    prepared.worldYx.values[laneIndex] =
+            ellipsoidWorld.rotation.basisX.y;
+    prepared.worldYy.values[laneIndex] =
+            ellipsoidWorld.rotation.basisY.y;
+    prepared.worldYz.values[laneIndex] =
+            ellipsoidWorld.rotation.basisZ.y;
+    prepared.worldZx.values[laneIndex] =
+            ellipsoidWorld.rotation.basisX.z;
+    prepared.worldZy.values[laneIndex] =
+            ellipsoidWorld.rotation.basisY.z;
+    prepared.worldZz.values[laneIndex] =
+            ellipsoidWorld.rotation.basisZ.z;
+    prepared.worldTx.values[laneIndex] = ellipsoidWorld.translation.x;
+    prepared.worldTy.values[laneIndex] = ellipsoidWorld.translation.y;
+    prepared.worldTz.values[laneIndex] = ellipsoidWorld.translation.z;
+    prepared.radiiX.values[laneIndex] = radii.x;
+    prepared.radiiY.values[laneIndex] = radii.y;
+    prepared.radiiZ.values[laneIndex] = radii.z;
+    prepared.inverseRadiiX.values[laneIndex] = 1.0f / radii.x;
+    prepared.inverseRadiiY.values[laneIndex] = 1.0f / radii.y;
+    prepared.inverseRadiiZ.values[laneIndex] = 1.0f / radii.z;
+    prepared.materials[laneIndex] = ellipsoid.material;
+    prepared.buffers[laneIndex] = buffer;
+}
+
 #if defined(__GNUC__) && !defined(__clang__)
 __attribute__((hot, noinline,
                optimize("no-inline-functions,no-unroll-loops")))
@@ -294,8 +332,10 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
     // object lifetimes for the active entries.
     EllipsoidPacketTraversalLanes lanes;
     std::size_t laneCount = 0u;
+    const bool directLaneStar =
+            movingPlan != nullptr && movingPlan->IsDirectLaneStar();
     if (movingPlan != nullptr) {
-        laneCount = movingPlan->IsDirectLaneStar()
+        laneCount = directLaneStar
                 ? CollectDirectLaneStarTraversalLanes(
                           movingIso, *movingPlan, &lanes)
                 : CollectCompiledPlanTraversalLanes(
@@ -330,8 +370,11 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
         candidateRemaining[laneIndex] = span.size;
     }
 
+    const bool certifiedFullPacket =
+            directLaneStar && laneCount == EllipsoidPacketWidth;
     std::array<OptimizedCpuEllipsoidMeshPacketLane, EllipsoidPacketWidth>
-            packetLanes{};
+            packetLanes;
+    OptimizedCpuPreparedEllipsoidMeshPacket preparedPacket;
     for (std::size_t laneIndex = 0u;
          laneIndex < laneCount;
          ++laneIndex) {
@@ -349,17 +392,31 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
             &lane.location,
             1,
         };
-        packetLanes[laneIndex] = {&lane.located, lane.buffer};
+        if (certifiedFullPacket) {
+            PopulateCertifiedPacketLane(
+                    preparedPacket,
+                    laneIndex,
+                    lane.location,
+                    static_cast<const GmSurfEllipsoid &>(
+                            *lane.located.surf),
+                    lane.buffer);
+        } else {
+            packetLanes[laneIndex] = {&lane.located, lane.buffer};
+        }
     }
-    OptimizedCpuPreparedEllipsoidMeshPacket preparedPacket;
     const std::uint32_t allLaneMask =
             (1u << static_cast<std::uint32_t>(laneCount)) - 1u;
-    if (!PrepareOptimizedCpuEllipsoidMeshPacket(
-                packetLanes.data(),
-                laneCount,
-                allLaneMask,
-                &preparedPacket)) {
-        return false;
+    if (certifiedFullPacket) {
+        preparedPacket.laneCount = EllipsoidPacketWidth;
+        preparedPacket.preparedMask = allLaneMask;
+    } else {
+        if (!PrepareOptimizedCpuEllipsoidMeshPacket(
+                    packetLanes.data(),
+                    laneCount,
+                    allLaneMask,
+                    &preparedPacket)) {
+            return false;
+        }
     }
     std::uint32_t collidedMask = 0u;
 
