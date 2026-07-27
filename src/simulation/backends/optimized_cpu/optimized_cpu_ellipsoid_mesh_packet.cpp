@@ -495,7 +495,7 @@ struct PacketExecution {
     Iso3x8 meshToEllipsoid;
     Vec3x8 radii;
     Vec3x8 inverseRadii;
-    Iso3x8 meshWorld;
+    const GmIso4 *meshWorldSource = nullptr;
     Boxx8 meshBounds;
     __m256 packetMask;
     Iso3x8 contactToWorld{};
@@ -508,6 +508,7 @@ struct PacketExecution {
             return;
         }
         const Iso3x8 ellipsoidToMesh = Inverse(meshToEllipsoid);
+        const Iso3x8 meshWorld = BroadcastIso(*meshWorldSource);
         contactToWorld = Compose(
                 Compose(DiagonalTransform(radii), ellipsoidToMesh),
                 meshWorld);
@@ -874,7 +875,7 @@ FV_E031_AVX2 bool RunPacketAvx2(
         meshToEllipsoid,
         radii,
         inverseRadii,
-        BroadcastIso(meshIso),
+        &meshIso,
         meshBounds,
         MaskForBits(activeMask),
         {},
