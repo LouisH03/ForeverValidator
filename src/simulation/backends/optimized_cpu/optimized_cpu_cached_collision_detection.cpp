@@ -41,7 +41,6 @@ struct EllipsoidPacketTraversalLane {
     SHmsSphereBufferContact *sphereContact = nullptr;
     CHmsCollisionBuffer *buffer = nullptr;
     u32 temporalSlotOrdinal = 0u;
-    bool collided = false;
 
     EllipsoidPacketTraversalLane(
             CPlugTree *treeValue,
@@ -56,8 +55,7 @@ struct EllipsoidPacketTraversalLane {
           located{},
           sphereContact(nullptr),
           buffer(nullptr),
-          temporalSlotOrdinal(temporalSlotOrdinalValue),
-          collided(false) {}
+          temporalSlotOrdinal(temporalSlotOrdinalValue) {}
 };
 
 template <typename T, std::size_t Count>
@@ -363,6 +361,7 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
                 &preparedPacket)) {
         return false;
     }
+    std::uint32_t collidedMask = 0u;
 
     for (;;) {
         u32 staticTreeIndex = std::numeric_limits<u32>::max();
@@ -427,6 +426,7 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
                             *certifiedMesh,
                             &hitMask);
             if (packetHandled) {
+                collidedMask |= hitMask;
                 for (std::size_t laneIndex = 0u;
                      laneIndex < laneCount;
                      ++laneIndex) {
@@ -444,7 +444,6 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
                             firstNew[laneIndex],
                             lane.tree,
                             record);
-                    lane.collided = true;
                 }
             }
         }
@@ -479,17 +478,16 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
                         firstNew,
                         lane.tree,
                         record);
-                lane.collided = true;
+                collidedMask |= 1u << laneIndex;
             }
         }
     }
 
-    for (std::size_t laneIndex = 0u;
-         laneIndex < laneCount;
-         ++laneIndex) {
-        if (lanes[laneIndex].collided) {
-            zone.AddSphereContactOnce(lanes[laneIndex].sphereContact);
-        }
+    while (collidedMask != 0u) {
+        const unsigned int laneIndex =
+                static_cast<unsigned int>(__builtin_ctz(collidedMask));
+        zone.AddSphereContactOnce(lanes[laneIndex].sphereContact);
+        collidedMask &= collidedMask - 1u;
     }
     return true;
 }
