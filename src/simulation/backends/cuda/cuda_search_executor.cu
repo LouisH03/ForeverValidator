@@ -1582,7 +1582,10 @@ __global__ __launch_bounds__(
             }
         }
         const cuda::physics::Status physicsStatus =
-                cuda::physics::Step<false>(
+                cuda::physics::Step<
+                        false,
+                        MinimumBlocksPerSm ==
+                                ThroughputKernelMinimumBlocksPerSm>(
                         static_cast<const CudaPackedSceneHeader *>(
                                 sceneData),
                         static_cast<const

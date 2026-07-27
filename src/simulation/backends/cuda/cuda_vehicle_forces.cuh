@@ -2121,6 +2121,7 @@ __device__ inline void ApplyDirtSlide(
     }
 }
 
+template <bool ReuseSteeringSinCos>
 __device__ inline ForceStatus ComputeModel6Ground(
         CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration,
@@ -2167,6 +2168,10 @@ __device__ inline ForceStatus ComputeModel6Ground(
 
     const float sideFade =
             BurnoutSideFade(vehicle, configuration, tick);
+    exact::SinCosResult steeringSinCos{};
+    if constexpr (ReuseSteeringSinCos) {
+        steeringSinCos = exact::SinCos(visualSteerYaw);
+    }
     for (std::uint32_t index = 0u;
          index < vehicle.wheels.count; ++index) {
         CudaWheelState &wheel = vehicle.wheels.values[index];
@@ -2206,8 +2211,12 @@ __device__ inline ForceStatus ComputeModel6Ground(
         if (wheel.axle ==
             static_cast<std::uint32_t>(
                     VehicleWheelAxle::Front)) {
-            const exact::SinCosResult sinCos =
-                    exact::SinCos(visualSteerYaw);
+            exact::SinCosResult sinCos;
+            if constexpr (ReuseSteeringSinCos) {
+                sinCos = steeringSinCos;
+            } else {
+                sinCos = exact::SinCos(visualSteerYaw);
+            }
             const float cosine = sinCos.cosine;
             const float negativeSine = -sinCos.sine;
             sideAxis = {
@@ -2625,6 +2634,7 @@ __device__ inline ForceStatus ComputeModel6Ground(
 
 }  // namespace force_detail
 
+template <bool ReuseSteeringSinCos = false>
 __device__ inline ForceStatus ComputeForcesModel6(
         CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration,
@@ -2704,7 +2714,8 @@ __device__ inline ForceStatus ComputeForcesModel6(
     const int waterActive = force_detail::ApplyWaterForces(
             candidate, configuration, currentForce);
     const ForceStatus modelStatus =
-            force_detail::ComputeModel6Ground(
+            force_detail::ComputeModel6Ground<
+                    ReuseSteeringSinCos>(
                     candidate, configuration, dt, currentForce,
                     slopeA, slopeB, linearSpeed, angularSpeed,
                     visualSteerYaw, hasMaterial, material,
