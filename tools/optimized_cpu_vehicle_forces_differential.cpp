@@ -15,6 +15,7 @@
 #include "engine/core/binary32_math.h"
 #include "engine/core/func_keys_real.h"
 #include "engine/scene/scene_vehicle_car.h"
+#include "engine/scene/scene_vehicle_math.h"
 #include "simulation/backends/optimized_cpu/optimized_cpu_compiled_tuning_curve.h"
 #include "simulation/backends/optimized_cpu/optimized_cpu_vehicle_forces.h"
 #include "simulation/runtime/replay_deterministic_execution.h"
@@ -569,7 +570,79 @@ bool RunRoutingCases(OptimizedCpuBinary32MathPath selectedPath) {
     return true;
 }
 
+bool RunQuarterPiSineCases(void) {
+    const int originalRounding = std::fegetround();
+#if defined(__i386__) || defined(__x86_64__)
+    const unsigned int originalMxcsr = _mm_getcsr();
+#endif
+    const int roundingModes[] = {
+        FE_TONEAREST,
+        FE_DOWNWARD,
+        FE_UPWARD,
+        FE_TOWARDZERO,
+    };
+    for (int roundingMode : roundingModes) {
+        if (std::fesetround(roundingMode) != 0) {
+            return Fail("could not set quarter-pi sine rounding mode");
+        }
+        for (unsigned int existingStatus : {0u, 0x1fu}) {
+            std::feclearexcept(FE_ALL_EXCEPT);
+#if defined(__i386__) || defined(__x86_64__)
+            unsigned int referenceMxcsr = _mm_getcsr();
+            referenceMxcsr =
+                    (referenceMxcsr & ~0x3fu) | existingStatus;
+            _mm_setcsr(referenceMxcsr);
+#endif
+            const float reference =
+                    CIsin(SceneVehicleMath::QuarterPi);
+            const int referenceExceptions =
+                    std::fetestexcept(FE_ALL_EXCEPT);
+#if defined(__i386__) || defined(__x86_64__)
+            referenceMxcsr = _mm_getcsr();
+#endif
+
+            std::feclearexcept(FE_ALL_EXCEPT);
+#if defined(__i386__) || defined(__x86_64__)
+            unsigned int candidateMxcsr = _mm_getcsr();
+            candidateMxcsr =
+                    (candidateMxcsr & ~0x3fu) | existingStatus;
+            _mm_setcsr(candidateMxcsr);
+#endif
+            const float candidate = CIsinQuarterPi();
+            const int candidateExceptions =
+                    std::fetestexcept(FE_ALL_EXCEPT);
+#if defined(__i386__) || defined(__x86_64__)
+            candidateMxcsr = _mm_getcsr();
+#endif
+            ++completedFenvCases;
+            if (!Binary32::HaveSameEncoding(reference, candidate) ||
+                referenceExceptions != candidateExceptions
+#if defined(__i386__) || defined(__x86_64__)
+                || (referenceMxcsr & 0x3fu) !=
+                           (candidateMxcsr & 0x3fu)
+#endif
+            ) {
+#if defined(__i386__) || defined(__x86_64__)
+                _mm_setcsr(originalMxcsr);
+#endif
+                std::fesetround(originalRounding);
+                return Fail("quarter-pi sine contract mismatch");
+            }
+        }
+    }
+#if defined(__i386__) || defined(__x86_64__)
+    _mm_setcsr(originalMxcsr);
+#endif
+    if (std::fesetround(originalRounding) != 0) {
+        return Fail("could not restore quarter-pi sine rounding mode");
+    }
+    return true;
+}
+
 bool RunFenvCases(OptimizedCpuBinary32MathPath selectedPath) {
+    if (!RunQuarterPiSineCases()) {
+        return false;
+    }
     if (SelectOptimizedCpuBinary32MathPathForActiveExecution() != selectedPath) {
         return Fail("active selector changed unexpectedly");
     }
