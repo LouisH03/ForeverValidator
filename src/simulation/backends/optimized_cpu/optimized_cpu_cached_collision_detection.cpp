@@ -353,25 +353,46 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
         }
     }
 
+    const bool certifiedFullPacket =
+            directLaneStar && laneCount == EllipsoidPacketWidth;
+    const u32 *sharedCandidateCurrent = nullptr;
+    std::size_t sharedCandidateRemaining = 0u;
     std::array<const u32 *, EllipsoidPacketWidth> candidateCurrent;
     std::array<std::size_t, EllipsoidPacketWidth> candidateRemaining;
-    for (std::size_t laneIndex = 0u;
-         laneIndex < laneCount;
-         ++laneIndex) {
+    if (certifiedFullPacket) {
+        // A direct lane star never emits a surface for its root, so temporal
+        // ordinal zero is reserved. The refreshed root box contains every
+        // direct lane and therefore yields one ordered conservative candidate
+        // span for the whole packet.
+        GmBoxAligned packetBounds;
+        movingTree.GetTransformedCollisionBox(movingIso, packetBounds);
         OptimizedCpuStaticSurfaceTransformGroup::TemporalCandidateSpan span;
         if (!transforms.TemporalCandidateSpanFor(
-                    *lanes[laneIndex].tree,
-                    lanes[laneIndex].temporalSlotOrdinal,
-                    lanes[laneIndex].bounds,
+                    movingTree,
+                    0u,
+                    packetBounds,
                     &span)) {
             return false;
         }
-        candidateCurrent[laneIndex] = span.data;
-        candidateRemaining[laneIndex] = span.size;
+        sharedCandidateCurrent = span.data;
+        sharedCandidateRemaining = span.size;
+    } else {
+        for (std::size_t laneIndex = 0u;
+             laneIndex < laneCount;
+             ++laneIndex) {
+            OptimizedCpuStaticSurfaceTransformGroup::TemporalCandidateSpan span;
+            if (!transforms.TemporalCandidateSpanFor(
+                        *lanes[laneIndex].tree,
+                        lanes[laneIndex].temporalSlotOrdinal,
+                        lanes[laneIndex].bounds,
+                        &span)) {
+                return false;
+            }
+            candidateCurrent[laneIndex] = span.data;
+            candidateRemaining[laneIndex] = span.size;
+        }
     }
 
-    const bool certifiedFullPacket =
-            directLaneStar && laneCount == EllipsoidPacketWidth;
     std::array<OptimizedCpuEllipsoidMeshPacketLane, EllipsoidPacketWidth>
             packetLanes;
     OptimizedCpuPreparedEllipsoidMeshPacket preparedPacket;
@@ -422,36 +443,57 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
     std::uint32_t collidedMask = 0u;
 
     for (;;) {
-        u32 staticTreeIndex = std::numeric_limits<u32>::max();
-        for (std::size_t laneIndex = 0u;
-             laneIndex < laneCount;
-             ++laneIndex) {
-            if (candidateRemaining[laneIndex] != 0u) {
-                staticTreeIndex = std::min(
-                        staticTreeIndex, *candidateCurrent[laneIndex]);
+        u32 staticTreeIndex;
+        if (certifiedFullPacket) {
+            if (sharedCandidateRemaining == 0u) {
+                break;
             }
-        }
-        if (staticTreeIndex == std::numeric_limits<u32>::max()) {
-            break;
+            staticTreeIndex = *sharedCandidateCurrent++;
+            --sharedCandidateRemaining;
+        } else {
+            staticTreeIndex = std::numeric_limits<u32>::max();
+            for (std::size_t laneIndex = 0u;
+                 laneIndex < laneCount;
+                 ++laneIndex) {
+                if (candidateRemaining[laneIndex] != 0u) {
+                    staticTreeIndex = std::min(
+                            staticTreeIndex, *candidateCurrent[laneIndex]);
+                }
+            }
+            if (staticTreeIndex == std::numeric_limits<u32>::max()) {
+                break;
+            }
         }
 
         CHmsCollisionManagerSColOctreeCell *record =
                 &staticTrees[staticTreeIndex];
         std::uint32_t activeMask = 0u;
-        for (std::size_t laneIndex = 0u;
-             laneIndex < laneCount;
-             ++laneIndex) {
-            std::size_t &remaining = candidateRemaining[laneIndex];
-            const u32 *&candidate = candidateCurrent[laneIndex];
-            if (remaining == 0u || *candidate != staticTreeIndex) {
-                continue;
+        if (certifiedFullPacket) {
+            for (std::size_t laneIndex = 0u;
+                 laneIndex < laneCount;
+                 ++laneIndex) {
+                if (OptimizedCpuStaticBoundsOverlap(
+                            lanes[laneIndex].bounds,
+                            record->Bounds())) {
+                    activeMask |= 1u << laneIndex;
+                }
             }
-            ++candidate;
-            --remaining;
-            if (OptimizedCpuStaticBoundsOverlap(
-                        lanes[laneIndex].bounds,
-                        record->Bounds())) {
-                activeMask |= 1u << laneIndex;
+        } else {
+            for (std::size_t laneIndex = 0u;
+                 laneIndex < laneCount;
+                 ++laneIndex) {
+                std::size_t &remaining = candidateRemaining[laneIndex];
+                const u32 *&candidate = candidateCurrent[laneIndex];
+                if (remaining == 0u || *candidate != staticTreeIndex) {
+                    continue;
+                }
+                ++candidate;
+                --remaining;
+                if (OptimizedCpuStaticBoundsOverlap(
+                            lanes[laneIndex].bounds,
+                            record->Bounds())) {
+                    activeMask |= 1u << laneIndex;
+                }
             }
         }
         if (activeMask == 0u) {
