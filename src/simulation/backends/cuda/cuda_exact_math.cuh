@@ -301,6 +301,40 @@ __device__ inline float Cos(float value) {
     return FromDouble(result);
 }
 
+struct SinCosResult {
+    float sine;
+    float cosine;
+};
+
+__device__ inline SinCosResult SinCos(float value) {
+    if (!isfinite(value)) {
+        const float nan = detail::QuietNaN();
+        return {nan, nan};
+    }
+    const detail::ReducedAngle reduced = detail::ReduceAngle(value);
+    double sine = 0.0;
+    double cosine = 0.0;
+    switch (reduced.quadrant) {
+    case 0u:
+        sine = detail::SinPolynomial(reduced.value);
+        cosine = detail::CosPolynomial(reduced.value);
+        break;
+    case 1u:
+        sine = detail::CosPolynomial(reduced.value);
+        cosine = -detail::SinPolynomial(reduced.value);
+        break;
+    case 2u:
+        sine = -detail::SinPolynomial(reduced.value);
+        cosine = -detail::CosPolynomial(reduced.value);
+        break;
+    default:
+        sine = -detail::CosPolynomial(reduced.value);
+        cosine = detail::SinPolynomial(reduced.value);
+        break;
+    }
+    return {FromDouble(sine), FromDouble(cosine)};
+}
+
 __device__ inline float Tan(float value) {
     if (!isfinite(value)) {
         return detail::QuietNaN();

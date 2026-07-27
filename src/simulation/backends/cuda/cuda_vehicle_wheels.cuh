@@ -171,8 +171,9 @@ __device__ inline void UpdateSpeed(
 __device__ inline void RotateVisualY(
         GmMat3 &rotation,
         float angle) {
-    const float sine = exact::Sin(angle);
-    const float cosine = exact::Cos(angle);
+    const exact::SinCosResult sinCos = exact::SinCos(angle);
+    const float sine = sinCos.sine;
+    const float cosine = sinCos.cosine;
     const GmVec3 oldX = dynamics::detail::Row(rotation, 0u);
     const GmVec3 oldZ = dynamics::detail::Row(rotation, 2u);
     const GmVec3 newX = {

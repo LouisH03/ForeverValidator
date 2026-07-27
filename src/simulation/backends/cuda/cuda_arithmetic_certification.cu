@@ -18,6 +18,8 @@ enum ArithmeticOperation : std::uint32_t {
     Sqrt = 0u,
     Sin,
     Cos,
+    SinCosSin,
+    SinCosCos,
     Asin,
     Acos,
     Atan2,
@@ -67,6 +69,10 @@ __global__ void ArithmeticKernel(
             FloatBits(cuda::exact::Sqrt(positive));
     result.bits[Sin] = FloatBits(cuda::exact::Sin(angle));
     result.bits[Cos] = FloatBits(cuda::exact::Cos(angle));
+    const cuda::exact::SinCosResult sinCos =
+            cuda::exact::SinCos(angle);
+    result.bits[SinCosSin] = FloatBits(sinCos.sine);
+    result.bits[SinCosCos] = FloatBits(sinCos.cosine);
     result.bits[Asin] =
             FloatBits(cuda::exact::Asin(signedUnit));
     result.bits[Acos] =
@@ -149,6 +155,8 @@ std::array<std::uint32_t, OperationCount> CpuOutputs(
     result[Sqrt] = Bits(CIsqrt(positive));
     result[Sin] = Bits(CIsin(angle));
     result[Cos] = Bits(CIcos(angle));
+    result[SinCosSin] = result[Sin];
+    result[SinCosCos] = result[Cos];
     result[Asin] = Bits(CIasin(signedUnit));
     result[Acos] = Bits(CIacos(signedUnit));
     result[Atan2] =

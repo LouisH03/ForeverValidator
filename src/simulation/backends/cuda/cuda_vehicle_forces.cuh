@@ -2206,9 +2206,10 @@ __device__ inline ForceStatus ComputeModel6Ground(
         if (wheel.axle ==
             static_cast<std::uint32_t>(
                     VehicleWheelAxle::Front)) {
-            const float cosine = exact::Cos(visualSteerYaw);
-            const float negativeSine =
-                    -exact::Sin(visualSteerYaw);
+            const exact::SinCosResult sinCos =
+                    exact::SinCos(visualSteerYaw);
+            const float cosine = sinCos.cosine;
+            const float negativeSine = -sinCos.sine;
             sideAxis = {
                     cosine * sideAxis.x,
                     cosine * sideAxis.y,
