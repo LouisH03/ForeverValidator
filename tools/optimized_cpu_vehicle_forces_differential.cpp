@@ -52,6 +52,7 @@ std::size_t completedCompiledFallbackCases = 0u;
 std::size_t completedInvalidationCases = 0u;
 std::size_t completedRoutingCases = 0u;
 std::size_t completedFenvCases = 0u;
+std::size_t completedNativeSqrtCases = 0u;
 
 std::uint32_t FloatBits(float value) noexcept {
     std::uint32_t bits = 0u;
@@ -713,7 +714,117 @@ bool RunQuarterPiSineCases(void) {
     return true;
 }
 
+bool RunNativeSqrtScopeCases(void) {
+    const int originalRounding = std::fegetround();
+    if (std::fesetround(FE_TONEAREST) != 0) {
+        return Fail("could not set native sqrt rounding mode");
+    }
+#if defined(__i386__) || defined(__x86_64__)
+    const unsigned int originalMxcsr = _mm_getcsr();
+#endif
+    const std::uint32_t representativeBits[] = {
+        0x00000000u,
+        0x80000000u,
+        0x00000001u,
+        0x007fffffu,
+        0x00800000u,
+        0x3f800000u,
+        0x40000000u,
+        0x40800000u,
+        0x7f7fffffu,
+        0x7f800000u,
+        0xff800000u,
+        0x7fc00000u,
+        0xffc00000u,
+        0x7f800001u,
+        0xbf800000u,
+    };
+    for (std::uint32_t bits : representativeBits) {
+        for (unsigned int existingStatus : {0u, 0x1fu}) {
+            const float input = FloatFromBits(bits);
+            std::feclearexcept(FE_ALL_EXCEPT);
+#if defined(__i386__) || defined(__x86_64__)
+            unsigned int referenceMxcsr = _mm_getcsr();
+            referenceMxcsr =
+                    (referenceMxcsr & ~0x3fu) | existingStatus;
+            _mm_setcsr(referenceMxcsr);
+#endif
+            const float reference = CIsqrt(input);
+            const int referenceExceptions =
+                    std::fetestexcept(FE_ALL_EXCEPT);
+#if defined(__i386__) || defined(__x86_64__)
+            referenceMxcsr = _mm_getcsr();
+#endif
+
+            std::feclearexcept(FE_ALL_EXCEPT);
+#if defined(__i386__) || defined(__x86_64__)
+            unsigned int candidateMxcsr = _mm_getcsr();
+            candidateMxcsr =
+                    (candidateMxcsr & ~0x3fu) | existingStatus;
+            _mm_setcsr(candidateMxcsr);
+#endif
+            float candidate = 0.0f;
+            {
+                Binary32::NativeSqrtScope scope;
+                candidate = CIsqrt(input);
+            }
+            const int candidateExceptions =
+                    std::fetestexcept(FE_ALL_EXCEPT);
+#if defined(__i386__) || defined(__x86_64__)
+            candidateMxcsr = _mm_getcsr();
+#endif
+            ++completedNativeSqrtCases;
+            if (!Binary32::HaveSameEncoding(reference, candidate) ||
+                referenceExceptions != candidateExceptions
+#if defined(__i386__) || defined(__x86_64__)
+                || (referenceMxcsr & 0x3fu) !=
+                           (candidateMxcsr & 0x3fu)
+#endif
+            ) {
+#if defined(__i386__) || defined(__x86_64__)
+                _mm_setcsr(originalMxcsr);
+#endif
+                std::fesetround(originalRounding);
+                return Fail("native sqrt special-value contract mismatch");
+            }
+        }
+    }
+
+    std::uint32_t state = 0x6d2b79f5u;
+    for (std::size_t caseIndex = 0u; caseIndex < 131072u; ++caseIndex) {
+        state = state * 1664525u + 1013904223u;
+        const float input = FloatFromBits(state);
+        std::feclearexcept(FE_ALL_EXCEPT);
+        const float reference = CIsqrt(input);
+        std::feclearexcept(FE_ALL_EXCEPT);
+        float candidate = 0.0f;
+        {
+            Binary32::NativeSqrtScope outer;
+            Binary32::NativeSqrtScope inner;
+            candidate = CIsqrt(input);
+        }
+        ++completedNativeSqrtCases;
+        if (!Binary32::HaveSameEncoding(reference, candidate)) {
+#if defined(__i386__) || defined(__x86_64__)
+            _mm_setcsr(originalMxcsr);
+#endif
+            std::fesetround(originalRounding);
+            return Fail("native sqrt randomized encoding mismatch");
+        }
+    }
+#if defined(__i386__) || defined(__x86_64__)
+    _mm_setcsr(originalMxcsr);
+#endif
+    if (std::fesetround(originalRounding) != 0) {
+        return Fail("could not restore native sqrt rounding mode");
+    }
+    return true;
+}
+
 bool RunFenvCases(OptimizedCpuBinary32MathPath selectedPath) {
+    if (!RunNativeSqrtScopeCases()) {
+        return false;
+    }
     if (!RunQuarterPiSineCases()) {
         return false;
     }
@@ -799,6 +910,7 @@ int main(void) {
             "vehicle_curve_cases=%zu compiled_curve_cases=%zu "
             "compiled_fallback_cases=%zu "
             "invalidation_cases=%zu routing_cases=%zu fenv_cases=%zu "
+            "native_sqrt_cases=%zu "
             "binary32_path=%s result=identical\n",
             completedCurveCases,
             completedCompiledCurveCases,
@@ -806,6 +918,7 @@ int main(void) {
             completedInvalidationCases,
             completedRoutingCases,
             completedFenvCases,
+            completedNativeSqrtCases,
             selectedPath == OptimizedCpuBinary32MathPath::X86Sse2
                     ? "x86_sse2"
                     : "reference");

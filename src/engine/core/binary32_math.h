@@ -12,6 +12,20 @@
 
 namespace Binary32 {
 
+class NativeSqrtScope final {
+public:
+    // Callers must already have established the deterministic round-to-nearest
+    // binary32 environment. The scope is nestable and affects only CIsqrt.
+    NativeSqrtScope(void) noexcept;
+    ~NativeSqrtScope(void);
+
+    NativeSqrtScope(const NativeSqrtScope &) = delete;
+    NativeSqrtScope &operator=(const NativeSqrtScope &) = delete;
+
+private:
+    bool previous_ = false;
+};
+
 // Explicit round-to-nearest-even conversion for algorithms evaluated in
 // double precision before producing a simulation value.
 float FromDouble(double value);
