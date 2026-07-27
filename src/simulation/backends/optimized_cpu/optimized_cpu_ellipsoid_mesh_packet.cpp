@@ -170,16 +170,13 @@ FV_E031_INLINE __m256 Load(const std::array<float, PacketWidth> &values) {
 }
 
 FV_E031_INLINE __m256 MaskForBits(std::uint32_t bits) {
+    const __m256i bitValues = _mm256_setr_epi32(
+            0x01, 0x02, 0x04, 0x08,
+            0x10, 0x20, 0x40, 0x80);
+    const __m256i selected = _mm256_and_si256(
+            _mm256_set1_epi32(static_cast<int>(bits)), bitValues);
     return _mm256_castsi256_ps(
-            _mm256_set_epi32(
-                    (bits & 0x80u) != 0u ? -1 : 0,
-                    (bits & 0x40u) != 0u ? -1 : 0,
-                    (bits & 0x20u) != 0u ? -1 : 0,
-                    (bits & 0x10u) != 0u ? -1 : 0,
-                    (bits & 0x08u) != 0u ? -1 : 0,
-                    (bits & 0x04u) != 0u ? -1 : 0,
-                    (bits & 0x02u) != 0u ? -1 : 0,
-                    (bits & 0x01u) != 0u ? -1 : 0));
+            _mm256_cmpeq_epi32(selected, bitValues));
 }
 
 FV_E031_INLINE std::uint32_t Bits(__m256 mask) {
