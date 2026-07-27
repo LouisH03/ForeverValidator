@@ -2668,7 +2668,8 @@ __device__ inline ForceStatus ComputeForcesModel6(
     }
     force_detail::CreateFakeContacts(
             candidate, configuration);
-    cuda::vehicle::IntegrateVehiclePrefix(
+    cuda::vehicle::IntegrateVehiclePrefix<
+            ReuseWheelPassInvariants>(
             candidate, configuration, dt);
     const bool groundContact =
             force_detail::IsGroundContact(vehicle);

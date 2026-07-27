@@ -170,6 +170,31 @@ __device__ inline void UpdateSpeed(
 
 __device__ inline void RotateVisualY(
         GmMat3 &rotation,
+        const exact::SinCosResult &sinCos) {
+    const float sine = sinCos.sine;
+    const float cosine = sinCos.cosine;
+    const GmVec3 oldX = dynamics::detail::Row(rotation, 0u);
+    const GmVec3 oldZ = dynamics::detail::Row(rotation, 2u);
+    const GmVec3 newX = {
+            oldX.x * cosine + oldZ.x * sine,
+            oldX.y * cosine + oldZ.y * sine,
+            oldX.z * cosine + oldZ.z * sine,
+    };
+    const GmVec3 newZ = {
+            oldX.x * -sine + oldZ.x * cosine,
+            oldX.y * -sine + oldZ.y * cosine,
+            oldX.z * -sine + oldZ.z * cosine,
+    };
+    rotation.basisX.x = newX.x;
+    rotation.basisY.x = newX.y;
+    rotation.basisZ.x = newX.z;
+    rotation.basisX.z = newZ.x;
+    rotation.basisY.z = newZ.y;
+    rotation.basisZ.z = newZ.z;
+}
+
+__device__ inline void RotateVisualY(
+        GmMat3 &rotation,
         float angle) {
     const exact::SinCosResult sinCos = exact::SinCos(angle);
     const float sine = sinCos.sine;
@@ -196,46 +221,98 @@ __device__ inline void RotateVisualY(
 
 }  // namespace wheel_detail
 
+struct WheelVisualInvariants {
+    exact::SinCosResult frontSteerSinCos{};
+    float frontVisualSteerAngle = 0.0f;
+};
+
+__device__ inline WheelVisualInvariants
+ComputeWheelVisualInvariants(
+        const CudaVehicleState &vehicle,
+        const CudaPackedStaticConfigurationHeader *configuration,
+        float vehicleForwardSpeed,
+        float visualSpeedDenominator) {
+    float yaw = 0.0f;
+    if (!(visualSpeedDenominator < 1.0e-5f)) {
+        yaw = -vehicle.controls.currentSteering /
+              visualSpeedDenominator;
+    }
+    float maximumDegrees =
+            wheel_detail::DefaultMaxSteerDegrees;
+    const auto *curves =
+            reinterpret_cast<const CudaTuningCurve *>(
+                    &configuration->tuning.curves);
+    const CudaTuningCurve &curve =
+            curves[static_cast<std::uint32_t>(
+                    CudaTuningCurveId::
+                            WheelVisualSteerAngleFromSpeed)];
+    if (curve.keyCount != 0u) {
+        maximumDegrees = tuning::Evaluate(
+                configuration,
+                CudaTuningCurveId::
+                        WheelVisualSteerAngleFromSpeed,
+                fabsf(vehicleForwardSpeed) * 3.6f);
+    }
+    const float maximumRadians =
+            (maximumDegrees * wheel_detail::Pi) /
+            wheel_detail::DegreesDivisor;
+    return {
+            exact::SinCos(yaw),
+            -vehicle.controls.currentSteering *
+                    maximumRadians,
+    };
+}
+
+template <bool ReuseFrontInvariants = false>
 __device__ inline void UpdateWheelVisual(
         CudaVehicleState &vehicle,
         CudaWheelState &wheel,
         const CudaPackedStaticConfigurationHeader *configuration,
         float vehicleForwardSpeed,
         float dt,
-        float visualSpeedDenominator) {
+        float visualSpeedDenominator,
+        const WheelVisualInvariants &invariants = {}) {
     wheel.realTime.visualRotation = wheel.restPose.rotation;
     float visualSteerAngle = 0.0f;
     if (wheel.axle ==
         static_cast<std::uint32_t>(VehicleWheelAxle::Front)) {
-        float yaw = 0.0f;
-        if (!(visualSpeedDenominator < 1.0e-5f)) {
-            yaw = -vehicle.controls.currentSteering /
-                  visualSpeedDenominator;
-        }
-        wheel_detail::RotateVisualY(
-                wheel.realTime.visualRotation, yaw);
-        float maximumDegrees =
-                wheel_detail::DefaultMaxSteerDegrees;
-        const auto *curves =
-                reinterpret_cast<const CudaTuningCurve *>(
-                        &configuration->tuning.curves);
-        const CudaTuningCurve &curve =
-                curves[static_cast<std::uint32_t>(
+        if constexpr (ReuseFrontInvariants) {
+            wheel_detail::RotateVisualY(
+                    wheel.realTime.visualRotation,
+                    invariants.frontSteerSinCos);
+            visualSteerAngle =
+                    invariants.frontVisualSteerAngle;
+        } else {
+            float yaw = 0.0f;
+            if (!(visualSpeedDenominator < 1.0e-5f)) {
+                yaw = -vehicle.controls.currentSteering /
+                      visualSpeedDenominator;
+            }
+            wheel_detail::RotateVisualY(
+                    wheel.realTime.visualRotation, yaw);
+            float maximumDegrees =
+                    wheel_detail::DefaultMaxSteerDegrees;
+            const auto *curves =
+                    reinterpret_cast<const CudaTuningCurve *>(
+                            &configuration->tuning.curves);
+            const CudaTuningCurve &curve =
+                    curves[static_cast<std::uint32_t>(
+                            CudaTuningCurveId::
+                                    WheelVisualSteerAngleFromSpeed)];
+            if (curve.keyCount != 0u) {
+                maximumDegrees = tuning::Evaluate(
+                        configuration,
                         CudaTuningCurveId::
-                                WheelVisualSteerAngleFromSpeed)];
-        if (curve.keyCount != 0u) {
-            maximumDegrees = tuning::Evaluate(
-                    configuration,
-                    CudaTuningCurveId::
-                            WheelVisualSteerAngleFromSpeed,
-                    fabsf(vehicleForwardSpeed) * 3.6f);
+                                WheelVisualSteerAngleFromSpeed,
+                        fabsf(vehicleForwardSpeed) * 3.6f);
+            }
+            const float maximumRadians =
+                    (maximumDegrees * wheel_detail::Pi) /
+                    wheel_detail::DegreesDivisor;
+            visualSteerAngle =
+                    -vehicle.controls.currentSteering *
+                    maximumRadians;
         }
-        const float maximumRadians =
-                (maximumDegrees * wheel_detail::Pi) /
-                wheel_detail::DegreesDivisor;
-        visualSteerAngle =
-                -vehicle.controls.currentSteering *
-                maximumRadians;
     }
     wheel.realTime.targetVisualSteerAngle = visualSteerAngle;
     wheel_detail::UpdateSpeed(
@@ -298,6 +375,7 @@ __device__ inline void IntegrateWheelSuspension(
     wheel.surfaceMovedByUpdate = true;
 }
 
+template <bool ReuseWheelPassInvariants = false>
 __device__ inline void IntegrateVehiclePrefix(
     CudaCandidatePhysicsState &candidate,
     const CudaPackedStaticConfigurationHeader *configuration,
@@ -316,11 +394,18 @@ __device__ inline void IntegrateVehiclePrefix(
                 fabsf(forwardSpeed) *
                         configuration->tuning.visual.wheelSpeedScale +
                 configuration->tuning.visual.wheelSpeedBase;
+        WheelVisualInvariants invariants;
+        if constexpr (ReuseWheelPassInvariants) {
+            invariants = ComputeWheelVisualInvariants(
+                    vehicle, configuration,
+                    forwardSpeed, denominator);
+        }
         for (std::uint32_t index = 0u;
              index < vehicle.wheels.count; ++index) {
-            UpdateWheelVisual(
+            UpdateWheelVisual<ReuseWheelPassInvariants>(
                     vehicle, vehicle.wheels.values[index],
-                    configuration, forwardSpeed, dt, denominator);
+                    configuration, forwardSpeed, dt, denominator,
+                    invariants);
         }
     }
     if (vehicle.integration.integrateWheels) {
