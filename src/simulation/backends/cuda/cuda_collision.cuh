@@ -791,9 +791,11 @@ __device__ inline int EllipsoidMesh(
         if constexpr (!UseMeshCellCache) {
             ++cell;
         }
-        if (!entry.containsTriangle ||
-            entry.triangleIndex >= surface.triangleCount) {
-            continue;
+        if constexpr (!UseMeshCellCache) {
+            if (!entry.containsTriangle ||
+                entry.triangleIndex >= surface.triangleCount) {
+                continue;
+            }
         }
         if constexpr (TrackDiagnostics) {
             ++scratch.meshTriangleCells;
