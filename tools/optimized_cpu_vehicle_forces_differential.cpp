@@ -414,6 +414,80 @@ public:
     unsigned calls = 0u;
 };
 
+bool RunPhysicsCallbackEnsureCases(void) {
+    CSceneVehicleCar car;
+    CHmsItem *item = car.HmsItem();
+    car.EnableAbsorbContactCallback(1);
+    car.EnablePhysicsUpdates(1);
+    CHmsItem::CCallback *canonicalCompute =
+            item->CallbackGet(CHmsItem::ECallback_ComputeForces);
+    CHmsItem::CCallback *canonicalAfter =
+            item->CallbackGet(CHmsItem::ECallback_AfterContacts);
+    CHmsItem::CCallback *canonicalAbsorb =
+            item->CallbackGet(CHmsItem::ECallback_AbsorbContact);
+    ++completedRoutingCases;
+    car.EnsurePhysicsCallbacks(1, 1);
+    if (item->CallbackGet(CHmsItem::ECallback_ComputeForces) !=
+                    canonicalCompute ||
+        item->CallbackGet(CHmsItem::ECallback_AfterContacts) !=
+                    canonicalAfter ||
+        item->CallbackGet(CHmsItem::ECallback_AbsorbContact) !=
+                    canonicalAbsorb) {
+        return Fail("matching callback configuration changed identity");
+    }
+
+    CustomComputeForcesCallback custom;
+    item->CallbackSet(CHmsItem::ECallback_ComputeForces, &custom);
+    item->CallbackSet(CHmsItem::ECallback_AfterContacts, nullptr);
+    item->CallbackSet(CHmsItem::ECallback_AbsorbContact, nullptr);
+    ++completedRoutingCases;
+    car.EnsurePhysicsCallbacks(1, 1);
+    if (item->CallbackGet(CHmsItem::ECallback_ComputeForces) !=
+                    canonicalCompute ||
+        item->CallbackGet(CHmsItem::ECallback_AfterContacts) !=
+                    canonicalAfter ||
+        item->CallbackGet(CHmsItem::ECallback_AbsorbContact) !=
+                    canonicalAbsorb) {
+        return Fail("callback ensure did not repair canonical identities");
+    }
+
+    ++completedRoutingCases;
+    car.EnsurePhysicsCallbacks(0, 0);
+    if (car.IsAbsorbContactEnabled() != 0 ||
+        car.ArePhysicsUpdatesEnabled() != 0 ||
+        item->CallbackGet(CHmsItem::ECallback_ComputeForces) != nullptr ||
+        item->CallbackGet(CHmsItem::ECallback_AfterContacts) != nullptr ||
+        item->CallbackGet(CHmsItem::ECallback_AbsorbContact) != nullptr) {
+        return Fail("callback ensure did not disable callbacks");
+    }
+
+    ++completedRoutingCases;
+    car.EnsurePhysicsCallbacks(1, 1);
+    if (car.IsAbsorbContactEnabled() == 0 ||
+        car.ArePhysicsUpdatesEnabled() == 0 ||
+        item->CallbackGet(CHmsItem::ECallback_ComputeForces) !=
+                    canonicalCompute ||
+        item->CallbackGet(CHmsItem::ECallback_AfterContacts) !=
+                    canonicalAfter ||
+        item->CallbackGet(CHmsItem::ECallback_AbsorbContact) !=
+                    canonicalAbsorb) {
+        return Fail("callback ensure did not restore callbacks");
+    }
+
+    CHmsItem trigger;
+    car.AttachTriggerPhysicsItem(trigger);
+    CHmsItem::CCallback *triggerCompute =
+            trigger.CallbackGet(CHmsItem::ECallback_ComputeForces);
+    trigger.CallbackSet(CHmsItem::ECallback_ComputeForces, &custom);
+    ++completedRoutingCases;
+    car.EnsurePhysicsCallbacks(1, 1);
+    if (trigger.CallbackGet(CHmsItem::ECallback_ComputeForces) !=
+            triggerCompute) {
+        return Fail("callback ensure did not repair trigger callback");
+    }
+    return true;
+}
+
 class DerivedCar final : public CSceneVehicleCar {};
 class DerivedTuning final : public CSceneVehicleCarTuning {};
 
@@ -716,6 +790,7 @@ int main(void) {
     if (!RunFenvCases(selectedPath) || !RunCurveCases(selectedPath) ||
         !RunCompiledCurveInvalidationCases() ||
         !RunRoutingCases(selectedPath) ||
+        !RunPhysicsCallbackEnsureCases() ||
         !RunWheelObserverContractCases()) {
         return 1;
     }

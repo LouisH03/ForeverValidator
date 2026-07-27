@@ -290,8 +290,9 @@ ReplaySimulationRuntime::StepOptimizedCpuNativeBinary32(
     }
 
     CSceneVehicleCar &car = state.vehicle.Car();
-    car.EnableAbsorbContactCallback(1);
-    car.EnablePhysicsUpdates(!tick.actions.suppressVehicleForceCallbacks);
+    car.EnsurePhysicsCallbacks(
+            1,
+            tick.actions.suppressVehicleForceCallbacks ? 0 : 1);
     CHmsItem *enabledItem = car.HmsItem();
     CHmsItem::CCallback *enabledComputeForcesCallback =
             enabledItem != nullptr
