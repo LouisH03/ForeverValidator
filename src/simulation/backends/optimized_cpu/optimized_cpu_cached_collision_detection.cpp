@@ -396,6 +396,8 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
     std::array<OptimizedCpuEllipsoidMeshPacketLane, EllipsoidPacketWidth>
             packetLanes;
     OptimizedCpuPreparedEllipsoidMeshPacket preparedPacket;
+    forevervalidator::simulation::OptimizedCpuStaticBoundsPacket8
+            packedLaneBounds;
     for (std::size_t laneIndex = 0u;
          laneIndex < laneCount;
          ++laneIndex) {
@@ -415,6 +417,7 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
             1,
         };
         if (certifiedFullPacket) {
+            packedLaneBounds.SetLane(laneIndex, lane.bounds);
             PopulateCertifiedPacketLane(
                     preparedPacket,
                     laneIndex,
@@ -441,6 +444,19 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
         }
     }
     std::uint32_t collidedMask = 0u;
+#if defined(__i386__) || defined(__x86_64__)
+    // The packed test evaluates all three axes for every lane instead of
+    // scalar z/y short-circuiting. The bounded-arithmetic certificate excludes
+    // invalid, overflowing, and underflowing operands, leaving only FE_INEXACT
+    // as a possible extra sticky status bit. Use SIMD only after that bit is
+    // already set, so observable floating status remains unchanged.
+    const bool usePacketBoundsOverlap = certifiedFullPacket &&
+            (_mm_getcsr() & _MM_EXCEPT_INEXACT) != 0u &&
+            transforms.BroadPhaseArithmeticIsBoundedFor(
+                    movingTree, movingIso);
+#else
+    const bool usePacketBoundsOverlap = false;
+#endif
 
     for (;;) {
         u32 staticTreeIndex;
@@ -468,7 +484,11 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
         CHmsCollisionManagerSColOctreeCell *record =
                 &staticTrees[staticTreeIndex];
         std::uint32_t activeMask = 0u;
-        if (certifiedFullPacket) {
+        if (usePacketBoundsOverlap) {
+            activeMask = forevervalidator::simulation::
+                    OptimizedCpuStaticBoundsOverlapPacket8(
+                            packedLaneBounds, record->Bounds());
+        } else if (certifiedFullPacket) {
             for (std::size_t laneIndex = 0u;
                  laneIndex < laneCount;
                  ++laneIndex) {
