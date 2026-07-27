@@ -892,35 +892,38 @@ FV_E031_AVX2 bool RunPacketAvx2(
     // runtime subtree-end stack and pop loop.
     std::array<TraversalMask, PacketTraversalCapacity> traversalMasks;
 
-    for (u32 cellIndex = 0u;
-         cellIndex < hierarchy.count;) {
-        const OptimizedCpuStaticMeshPacketCell &cell =
-                hierarchy.packetCells[cellIndex];
-        const std::size_t traversalDepth = cell.depth;
+    // The sidecar's topology certificate guarantees that every subtree skip
+    // remains within this contiguous descriptor range.
+    const OptimizedCpuStaticMeshPacketCell *cell = hierarchy.packetCells;
+    const OptimizedCpuStaticMeshPacketCell *const cellEnd =
+            cell + hierarchy.count;
+    while (cell != cellEnd) {
+        const std::size_t traversalDepth = cell->depth;
         const __m256 parentMask = traversalDepth == 0u
                 ? execution.packetMask
                 : traversalMasks[traversalDepth - 1u].value;
         __m256 laneMask = BoundsMask(
                 execution.meshBounds,
-                cell.bounds,
+                cell->bounds,
                 parentMask);
         std::uint32_t laneBits = Bits(laneMask);
         if (laneBits == 0u) {
-            cellIndex += cell.subtreeEntryCount;
+            cell += cell->subtreeEntryCount;
             continue;
         }
-        if (!cell.ContainsTriangle()) {
+        if (!cell->ContainsTriangle()) {
             if (traversalDepth == traversalMasks.size()) {
                 return false;
             }
             traversalMasks[traversalDepth].value = laneMask;
-            ++cellIndex;
+            ++cell;
             continue;
         }
 
-        ++cellIndex;
+        const u32 triangleIndex = cell->triangleIndex;
+        ++cell;
         const OptimizedCpuStaticMeshTriangleData &triangle =
-                triangles.TriangleAt(cell.triangleIndex);
+                triangles.TriangleAt(triangleIndex);
         // BoundsMask and every parent mask use canonical all-zero/all-one
         // lanes, so converting through movemask and rebuilding the vector is
         // redundant. Preserve the exact mask produced by the bounds test.
