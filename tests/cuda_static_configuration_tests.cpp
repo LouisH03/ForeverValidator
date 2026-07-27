@@ -127,6 +127,29 @@ int main() {
         std::cerr << "static configuration packing failed\n";
         return 1;
     }
+    const auto *packedShapes =
+            reinterpret_cast<const CudaVehicleCollisionShape *>(
+                    packed.data() + header.collisionShapes.offset);
+    for (std::uint32_t traversal = 0u;
+         traversal < header.collisionShapes.count;
+         ++traversal) {
+        if (packedShapes[traversal].traversalOrder != traversal) {
+            std::cerr << "collision shapes were not packed in traversal order\n";
+            return 1;
+        }
+    }
+    for (std::uint32_t wheel = 0u; wheel < 4u; ++wheel) {
+        if (packedShapes[wheel].wheelIndex != wheel ||
+            packedShapes[wheel].parentShapeIndex != 4u) {
+            std::cerr << "packed wheel collision mapping changed\n";
+            return 1;
+        }
+    }
+    if (packedShapes[4].wheelIndex != UINT32_MAX ||
+        packedShapes[4].archiveOrder != 0u) {
+        std::cerr << "packed body collision mapping changed\n";
+        return 1;
+    }
 
     CudaStaticConfigurationBuildLimits limits;
     limits.maximumCurveKeys = 1u;

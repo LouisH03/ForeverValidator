@@ -33,6 +33,7 @@ __device__ inline vehicle::ForceStatus ForcePass(
 template <
         bool TrackCollisionDiagnostics = true,
         bool ReuseWheelPassInvariants = false,
+        bool TrustedInputs = false,
         typename Scratch = collision::CudaCollisionScratch>
 __device__ inline Status CollisionSubstep(
         const CudaPackedSceneHeader *scene,
@@ -51,11 +52,15 @@ __device__ inline Status CollisionSubstep(
     }
     dynamics::PreCollision(candidate.body, dt);
     collision::Status collisionStatus =
-            collision::Detect<TrackCollisionDiagnostics>(
+            collision::Detect<
+                    TrackCollisionDiagnostics,
+                    TrustedInputs>(
                     scene, configuration, candidate, scratch);
     if (collisionStatus == collision::Status::Success) {
         collisionStatus =
-                collision::Respond<TrackCollisionDiagnostics>(
+                collision::Respond<
+                        TrackCollisionDiagnostics,
+                        TrustedInputs>(
                         scene, configuration, candidate, scratch);
     }
     if (collisionStatus != collision::Status::Success) {
@@ -68,6 +73,7 @@ __device__ inline Status CollisionSubstep(
 template <
         bool TrackCollisionDiagnostics = true,
         bool ReuseWheelPassInvariants = false,
+        bool TrustedInputs = false,
         typename Scratch = collision::CudaCollisionScratch>
 __device__ inline Status Step(
         const CudaPackedSceneHeader *scene,
@@ -108,7 +114,8 @@ __device__ inline Status Step(
                 const Status status =
                         CollisionSubstep<
                                 TrackCollisionDiagnostics,
-                                ReuseWheelPassInvariants>(
+                                ReuseWheelPassInvariants,
+                                TrustedInputs>(
                                 scene, configuration, candidate,
                                 split, scratch);
                 if (status != Status::Success) return status;
@@ -118,7 +125,8 @@ __device__ inline Status Step(
         const Status finalStatus =
                 CollisionSubstep<
                         TrackCollisionDiagnostics,
-                        ReuseWheelPassInvariants>(
+                        ReuseWheelPassInvariants,
+                        TrustedInputs>(
                         scene, configuration, candidate,
                         remaining, scratch);
         if (finalStatus != Status::Success) {

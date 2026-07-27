@@ -314,7 +314,10 @@ bool CudaHostStaticConfiguration::Valid(
         const CudaVehicleCollisionShape &shape = collisionShapes[index];
         if ((shape.parentShapeIndex != UINT32_MAX &&
              shape.parentShapeIndex >= index) ||
-            shape.archiveOrder != index) {
+            shape.archiveOrder != index ||
+            (shape.wheelIndex != UINT32_MAX &&
+             shape.wheelIndex >=
+                     VehicleWheelSetDefinition::OfficialWheelCount)) {
             return false;
         }
     }
@@ -390,9 +393,24 @@ CudaStaticConfigurationBuildResult BuildCudaHostStaticConfiguration(
             shape.surfaceMaterial =
                     static_cast<std::uint32_t>(
                             sourceShape.shape.surfaceMaterial);
-            shape.wheelRole = sourceShape.wheelRole.has_value()
-                    ? static_cast<std::uint32_t>(*sourceShape.wheelRole)
-                    : UINT32_MAX;
+            shape.wheelIndex = UINT32_MAX;
+            if (sourceShape.wheelRole.has_value()) {
+                for (std::uint32_t wheel = 0u;
+                     wheel <
+                             VehicleWheelSetDefinition::
+                                     OfficialWheelCount;
+                     ++wheel) {
+                    if (result.wheels.wheels[wheel].collisionRole ==
+                        *sourceShape.wheelRole) {
+                        shape.wheelIndex = wheel;
+                        break;
+                    }
+                }
+                if (shape.wheelIndex == UINT32_MAX) {
+                    return CudaStaticConfigurationBuildResult::
+                            InvalidSource;
+                }
+            }
             shape.parentShapeIndex =
                     sourceShape.parentShapeIndex.has_value()
                     ? static_cast<std::uint32_t>(
@@ -559,11 +577,39 @@ bool PackCudaStaticConfiguration(
         packed.zoneAngularDampingCoefficient =
                 source.zoneAngularDampingCoefficient;
         packed.water = source.water;
+        // Collision detection is traversal ordered; make its hot lookup
+        // direct while retaining archive identity for diagnostics.
+        std::vector<CudaVehicleCollisionShape> packedCollisionShapes =
+                source.collisionShapes;
+        std::sort(
+                packedCollisionShapes.begin(),
+                packedCollisionShapes.end(),
+                [](const CudaVehicleCollisionShape &left,
+                   const CudaVehicleCollisionShape &right) {
+                    return left.traversalOrder <
+                            right.traversalOrder;
+                });
+        std::vector<std::uint32_t> packedIndexByArchiveOrder(
+                packedCollisionShapes.size());
+        for (std::uint32_t index = 0u;
+             index < packedCollisionShapes.size(); ++index) {
+            packedIndexByArchiveOrder[
+                    packedCollisionShapes[index].archiveOrder] =
+                    index;
+        }
+        for (CudaVehicleCollisionShape &shape :
+             packedCollisionShapes) {
+            if (shape.parentShapeIndex != UINT32_MAX) {
+                shape.parentShapeIndex =
+                        packedIndexByArchiveOrder[
+                                shape.parentShapeIndex];
+            }
+        }
         std::vector<std::byte> bytes(sizeof(packed), std::byte{0});
         if (!AppendSection(source.curveKeys, bytes, packed.curveKeys) ||
             !AppendSection(source.transmissionValues, bytes,
                            packed.transmissionValues) ||
-            !AppendSection(source.collisionShapes, bytes,
+            !AppendSection(packedCollisionShapes, bytes,
                            packed.collisionShapes) ||
             !AppendSection(source.materials, bytes, packed.materials) ||
             !AppendSection(source.materialIndexByNaturalId, bytes,

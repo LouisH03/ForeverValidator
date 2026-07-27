@@ -156,7 +156,7 @@ struct CudaVehicleCollisionShape {
     GmBoxAligned localBounds{};
     GmLocalMaterialIndex localMaterial{};
     std::uint32_t surfaceMaterial = 0u;
-    std::uint32_t wheelRole = UINT32_MAX;
+    std::uint32_t wheelIndex = UINT32_MAX;
     std::uint32_t parentShapeIndex = UINT32_MAX;
     std::uint32_t archiveOrder = 0u;
     std::uint32_t traversalOrder = 0u;
@@ -186,7 +186,7 @@ struct CudaWaterGrid {
 };
 
 struct CudaHostStaticConfiguration {
-    static constexpr std::uint32_t SchemaVersion = 1u;
+    static constexpr std::uint32_t SchemaVersion = 2u;
 
     std::uint32_t schemaVersion = SchemaVersion;
     std::uint64_t deterministicHash = 0u;
@@ -227,7 +227,7 @@ struct CudaStaticConfigurationSection {
 };
 
 struct CudaPackedStaticConfigurationHeader {
-    static constexpr std::uint32_t SchemaVersion = 1u;
+    static constexpr std::uint32_t SchemaVersion = 2u;
     static constexpr std::uint64_t Magic = 0x4656435544414346ull;
 
     std::uint64_t magic = Magic;

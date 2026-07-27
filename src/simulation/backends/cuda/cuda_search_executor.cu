@@ -1588,7 +1588,8 @@ __global__ __launch_bounds__(
                 cuda::physics::Step<
                         false,
                         MinimumBlocksPerSm ==
-                                ThroughputKernelMinimumBlocksPerSm>(
+                                ThroughputKernelMinimumBlocksPerSm,
+                        true>(
                         static_cast<const CudaPackedSceneHeader *>(
                                 sceneData),
                         static_cast<const
@@ -1748,7 +1749,7 @@ __global__ void CaptureSearchWinnerStateKernel(
             }
         }
         const cuda::physics::Status physicsStatus =
-                cuda::physics::Step<false>(
+                cuda::physics::Step<false, false, true>(
                         static_cast<const CudaPackedSceneHeader *>(
                                 sceneData),
                         static_cast<const

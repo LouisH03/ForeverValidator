@@ -371,6 +371,58 @@ __device__ inline bool BoundsIntersect(
              fabsf(candidate.center.x - query.center.x));
 }
 
+__device__ inline bool BoundsContain(
+        const GmBoxAligned &outer,
+        const GmBoxAligned &inner) {
+    constexpr float FloatEpsilon =
+            1.1920928955078125e-7f;
+    const float slack =
+            8.0f * FloatEpsilon *
+            (1.0f +
+             fabsf(outer.center.x) +
+             fabsf(outer.center.y) +
+             fabsf(outer.center.z) +
+             fabsf(inner.center.x) +
+             fabsf(inner.center.y) +
+             fabsf(inner.center.z) +
+             outer.halfExtents.x +
+             outer.halfExtents.y +
+             outer.halfExtents.z +
+             inner.halfExtents.x +
+             inner.halfExtents.y +
+             inner.halfExtents.z);
+    return fabsf(inner.center.x - outer.center.x) +
+                           inner.halfExtents.x + slack <=
+                    outer.halfExtents.x &&
+            fabsf(inner.center.y - outer.center.y) +
+                            inner.halfExtents.y + slack <=
+                    outer.halfExtents.y &&
+            fabsf(inner.center.z - outer.center.z) +
+                            inner.halfExtents.z + slack <=
+                    outer.halfExtents.z;
+}
+
+__device__ inline GmBoxAligned ExpandBoundsAlong(
+        const GmBoxAligned &bounds,
+        const GmVec3 &travel,
+        float margin) {
+    return {
+            {
+                    bounds.center.x + travel.x * 0.5f,
+                    bounds.center.y + travel.y * 0.5f,
+                    bounds.center.z + travel.z * 0.5f,
+            },
+            {
+                    bounds.halfExtents.x +
+                            fabsf(travel.x) * 0.5f + margin,
+                    bounds.halfExtents.y +
+                            fabsf(travel.y) * 0.5f + margin,
+                    bounds.halfExtents.z +
+                            fabsf(travel.z) * 0.5f + margin,
+            },
+    };
+}
+
 __device__ inline std::uint16_t LocalMaterialIndex(
         GmLocalMaterialIndex value) {
     std::uint16_t result = 0u;
@@ -588,7 +640,7 @@ __device__ inline int EllipsoidMesh(
             ellipsoidToMesh);
     if constexpr (TrackDiagnostics) {
         if (scratch.firstVisitedSurface == UINT32_MAX) {
-            scratch.firstVisitedShape = shapeIndex;
+            scratch.firstVisitedShape = shape.archiveOrder;
             scratch.firstVisitedSurface = surfaceIndex;
             scratch.firstShapeWorld = shapeWorld;
             scratch.firstEllipsoidBox = ellipsoidBox;
@@ -700,7 +752,7 @@ __device__ inline int EllipsoidMesh(
                 scratch,
                 {},
                 1.0f,
-                shape.wheelRole != UINT32_MAX &&
+                shape.wheelIndex != UINT32_MAX &&
                                 configuration->tuning.contactResponse.
                                         singleMaterial <
                                         EPlugSurfaceMaterialId_Count
@@ -790,24 +842,13 @@ __device__ inline GmIso4 BodyPose(
 
 __device__ inline GmIso4 ShapeBodyPose(
         const CudaVehicleCollisionShape &shape,
-        const CudaPackedStaticConfigurationHeader *configuration,
         const CudaCandidatePhysicsState &candidate) {
-    if (shape.wheelRole == UINT32_MAX) {
+    if (shape.wheelIndex == UINT32_MAX) {
         return shape.bodyPose;
     }
-    const VehicleWheelDefinition *wheelDefinitions =
-            reinterpret_cast<const VehicleWheelDefinition *>(
-                    &configuration->wheels.wheels);
-    for (std::uint32_t wheel = 0u;
-         wheel < candidate.vehicle.wheels.count &&
-         wheel < VehicleWheelSetDefinition::OfficialWheelCount;
-         ++wheel) {
-        if (static_cast<std::uint32_t>(
-                    wheelDefinitions[wheel].collisionRole) ==
-            shape.wheelRole) {
-            return candidate.vehicle.wheels.values[wheel].
-                    currentPose;
-        }
+    if (shape.wheelIndex < candidate.vehicle.wheels.count) {
+        return candidate.vehicle.wheels.values[
+                shape.wheelIndex].currentPose;
     }
     return shape.bodyPose;
 }
@@ -1008,6 +1049,7 @@ __device__ inline void SortForResponse(
 
 template <
         bool TrackDiagnostics = true,
+        bool TrustedInputs = false,
         typename Scratch = CudaCollisionScratch>
 __device__ inline Status Detect(
         const CudaPackedSceneHeader *scene,
@@ -1015,11 +1057,13 @@ __device__ inline Status Detect(
         const CudaCandidatePhysicsState &candidate,
         Scratch &scratch) {
     detail::Clear<TrackDiagnostics>(scratch);
-    if (scene == nullptr || configuration == nullptr ||
-        scene->magic != CudaPackedSceneHeader::Magic ||
-        configuration->magic !=
-                CudaPackedStaticConfigurationHeader::Magic) {
-        return Status::InvalidScene;
+    if constexpr (!TrustedInputs) {
+        if (scene == nullptr || configuration == nullptr ||
+            scene->magic != CudaPackedSceneHeader::Magic ||
+            configuration->magic !=
+                    CudaPackedStaticConfigurationHeader::Magic) {
+            return Status::InvalidScene;
+        }
     }
     const CudaSceneSurface *surfaces =
             detail::SceneSection<CudaSceneSurface>(
@@ -1034,26 +1078,33 @@ __device__ inline Status Detect(
     const GmIso4 bodyPose = detail::BodyPose(candidate.body);
 
     if constexpr (!TrackDiagnostics) {
-        constexpr std::uint32_t CachedShapeCount = 5u;
+        // A contained live bound can only visit an ordered subset of the
+        // cached broad-phase query, so reusing its hits preserves exact
+        // contact discovery and response ordering.
+        constexpr std::uint32_t CachedShapeCount = 8u;
+        constexpr float SurfaceCacheMargin = 0.125f;
+        constexpr float SurfaceCacheHorizonTicks = 4.0f;
+        const std::uint32_t collisionShapeCount =
+                configuration->collisionShapes.count;
+        const float surfaceCacheHorizon =
+                __int2float_rn(static_cast<std::int32_t>(
+                        candidate.world.schemePeriodMs)) *
+                (0.001f * SurfaceCacheHorizonTicks);
+        const GmVec3 surfaceCacheTravel = detail::Scale(
+                candidate.body.current.linearSpeed,
+                surfaceCacheHorizon);
         bool useSurfaceCache =
                 scratch.surfaceCacheEnabled &&
-                configuration->collisionShapes.count ==
-                        CachedShapeCount &&
-                scratch.shapeCapacity >= CachedShapeCount;
+                (collisionShapeCount == 5u ||
+                 collisionShapeCount == CachedShapeCount) &&
+                scratch.shapeCapacity >= collisionShapeCount;
+        bool refreshSurfaceCache = !scratch.surfaceCacheValid;
         if (useSurfaceCache) {
             for (std::uint32_t traversal = 0u;
                  traversal < configuration->collisionShapes.count;
                  ++traversal) {
-                std::uint32_t shapeIndex = UINT32_MAX;
-                for (std::uint32_t index = 0u;
-                     index < configuration->collisionShapes.count;
-                     ++index) {
-                    if (shapes[index].traversalOrder == traversal) {
-                        shapeIndex = index;
-                        break;
-                    }
-                }
-                if (shapeIndex == UINT32_MAX ||
+                const std::uint32_t shapeIndex = traversal;
+                if (shapes[shapeIndex].traversalOrder != traversal ||
                     shapes[shapeIndex].surfaceType !=
                             static_cast<std::uint32_t>(
                                     GmSurf::EGmSurfType::Ellipsoid)) {
@@ -1064,18 +1115,30 @@ __device__ inline Status Detect(
                         detail::Compose(
                                 detail::ShapeBodyPose(
                                         shapes[shapeIndex],
-                                        configuration,
                                         candidate),
                                 bodyPose);
                 detail::ShapeWorldAt(scratch, traversal) =
                         shapeWorld;
-                detail::MovingBoundsAt(scratch, traversal) =
+                const GmBoxAligned movingBounds =
                         detail::TransformBox(
                                 shapes[shapeIndex].localBounds,
                                 shapeWorld);
+                if (!refreshSurfaceCache &&
+                    !detail::BoundsContain(
+                            detail::MovingBoundsAt(
+                                    scratch, traversal),
+                            movingBounds)) {
+                    refreshSurfaceCache = true;
+                }
+                if (refreshSurfaceCache) {
+                    detail::MovingBoundsAt(scratch, traversal) =
+                            detail::ExpandBoundsAlong(
+                                    movingBounds, surfaceCacheTravel,
+                                    SurfaceCacheMargin);
+                }
             }
         }
-        if (useSurfaceCache) {
+        if (useSurfaceCache && refreshSurfaceCache) {
             scratch.surfaceHitCount = 0u;
             constexpr std::uint32_t TargetGroups[] = {
                     1u, 3u, 4u};
@@ -1083,7 +1146,16 @@ __device__ inline Status Detect(
                 const CudaSceneAccelerationRange range =
                         scene->accelerationGroups[group - 1u];
                 if (range.cellCount <= 1u) continue;
-                std::uint32_t cursors[CachedShapeCount]{};
+                std::uint32_t cursors[CachedShapeCount];
+#pragma unroll
+                for (std::uint32_t traversal = 0u;
+                     traversal < CachedShapeCount;
+                     ++traversal) {
+                    cursors[traversal] =
+                            traversal < collisionShapeCount
+                            ? 0u
+                            : range.cellCount;
+                }
                 for (;;) {
                     std::uint32_t index = range.cellCount;
 #pragma unroll
@@ -1139,21 +1211,13 @@ __device__ inline Status Detect(
                 }
                 if (!useSurfaceCache) break;
             }
+            scratch.surfaceCacheValid = useSurfaceCache;
         }
         if (useSurfaceCache) {
             for (std::uint32_t traversal = 0u;
                  traversal < configuration->collisionShapes.count;
                  ++traversal) {
-                std::uint32_t shapeIndex = UINT32_MAX;
-                for (std::uint32_t index = 0u;
-                     index < configuration->collisionShapes.count;
-                     ++index) {
-                    if (shapes[index].traversalOrder ==
-                        traversal) {
-                        shapeIndex = index;
-                        break;
-                    }
-                }
+                const std::uint32_t shapeIndex = traversal;
                 const CudaVehicleCollisionShape &shape =
                         shapes[shapeIndex];
                 for (std::uint32_t hitIndex = 0u;
@@ -1199,15 +1263,8 @@ __device__ inline Status Detect(
     for (std::uint32_t traversal = 0u;
          traversal < configuration->collisionShapes.count;
          ++traversal) {
-        std::uint32_t shapeIndex = UINT32_MAX;
-        for (std::uint32_t index = 0u;
-             index < configuration->collisionShapes.count; ++index) {
-            if (shapes[index].traversalOrder == traversal) {
-                shapeIndex = index;
-                break;
-            }
-        }
-        if (shapeIndex == UINT32_MAX) {
+        const std::uint32_t shapeIndex = traversal;
+        if (shapes[shapeIndex].traversalOrder != traversal) {
             return Status::InvalidScene;
         }
         const CudaVehicleCollisionShape &shape =
@@ -1219,7 +1276,7 @@ __device__ inline Status Detect(
         const GmIso4 shapeWorld =
                 detail::Compose(
                         detail::ShapeBodyPose(
-                                shape, configuration, candidate),
+                                shape, candidate),
                         bodyPose);
         const GmBoxAligned movingBounds =
                 detail::TransformBox(

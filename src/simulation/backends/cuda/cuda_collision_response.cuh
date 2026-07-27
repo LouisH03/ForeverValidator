@@ -82,21 +82,10 @@ __device__ inline GmVec3 SpeedAtPoint(
 
 __device__ inline std::uint32_t WheelIndexForShape(
         const CudaVehicleCollisionShape &shape,
-        const CudaPackedStaticConfigurationHeader *configuration,
         const CudaCandidatePhysicsState &candidate) {
-    if (shape.wheelRole == UINT32_MAX) return UINT32_MAX;
-    const VehicleWheelDefinition *definitions =
-            reinterpret_cast<const VehicleWheelDefinition *>(
-                    &configuration->wheels.wheels);
-    for (std::uint32_t wheel = 0u;
-         wheel < candidate.vehicle.wheels.count; ++wheel) {
-        if (static_cast<std::uint32_t>(
-                    definitions[wheel].collisionRole) ==
-            shape.wheelRole) {
-            return wheel;
-        }
-    }
-    return UINT32_MAX;
+    return shape.wheelIndex < candidate.vehicle.wheels.count
+            ? shape.wheelIndex
+            : UINT32_MAX;
 }
 
 __device__ inline Contact MakeVehicleContact(
@@ -130,7 +119,7 @@ __device__ inline Contact MakeVehicleContact(
             actor.worldPose.rotation.basisZ);
     contact.peerCorpusId = actor.installationOrder + 1u;
     contact.wheelIndex = WheelIndexForShape(
-            shape, configuration, candidate);
+            shape, candidate);
     return contact;
 }
 
@@ -795,14 +784,17 @@ __device__ inline void AbsorbVehicle(
 
 template <
         bool TrackDiagnostics = true,
+        bool TrustedInputs = false,
         typename Scratch = CudaCollisionScratch>
 __device__ inline Status Respond(
         const CudaPackedSceneHeader *scene,
         const CudaPackedStaticConfigurationHeader *configuration,
         CudaCandidatePhysicsState &candidate,
         Scratch &scratch) {
-    if (scene == nullptr || configuration == nullptr) {
-        return Status::InvalidScene;
+    if constexpr (!TrustedInputs) {
+        if (scene == nullptr || configuration == nullptr) {
+            return Status::InvalidScene;
+        }
     }
     const CudaSceneActor *actors =
             detail::SceneSection<CudaSceneActor>(

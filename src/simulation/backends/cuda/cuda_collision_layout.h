@@ -75,6 +75,7 @@ struct CudaCollisionSearchScratch {
     std::uint32_t slot;
     std::uint32_t stride;
     std::uint32_t shapeCapacity;
+    bool surfaceCacheValid = false;
 };
 
 }  // namespace forevervalidator::simulation::cuda::collision
