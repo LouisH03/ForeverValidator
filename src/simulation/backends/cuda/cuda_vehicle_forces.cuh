@@ -2188,10 +2188,27 @@ __device__ inline ForceStatus ComputeModel6Ground(
             BurnoutSideFade(vehicle, configuration, tick);
     exact::SinCosResult steeringSinCos{};
     GmVec3 sharedFeedbackForce{};
+    float sharedMaximumSideFriction = 0.0f;
+    float sharedBurnoutRollover = 0.0f;
     if constexpr (ReuseWheelPassInvariants) {
         steeringSinCos = exact::SinCos(visualSteerYaw);
         sharedFeedbackForce =
                 GroundFeedbackForce(vehicle, configuration);
+        sharedMaximumSideFriction =
+                tuning::EvaluateSpeed(
+                        configuration,
+                        CudaTuningCurveId::
+                                MaxSideFrictionFromSpeed,
+                        linearSpeed.z);
+        if (vehicle.gearedDrive.burnoutPhase ==
+            CSceneVehicleCarBurnoutPhase_TimedSpin) {
+            sharedBurnoutRollover =
+                    tuning::EvaluateSpeed(
+                            configuration,
+                            CudaTuningCurveId::
+                                    BurnoutRolloverFromSpeed,
+                            linearSpeed.z);
+        }
     }
     for (std::uint32_t index = 0u;
          index < vehicle.wheels.count; ++index) {
@@ -2267,12 +2284,18 @@ __device__ inline ForceStatus ComputeModel6Ground(
         AddTorque(candidate, feedbackTorque);
         if (vehicle.gearedDrive.burnoutPhase ==
             CSceneVehicleCarBurnoutPhase_TimedSpin) {
+            float rollover;
+            if constexpr (ReuseWheelPassInvariants) {
+                rollover = sharedBurnoutRollover;
+            } else {
+                rollover = tuning::EvaluateSpeed(
+                        configuration,
+                        CudaTuningCurveId::
+                                BurnoutRolloverFromSpeed,
+                        linearSpeed.z);
+            }
             AddTorque(candidate, {
-                    tuning::EvaluateSpeed(
-                            configuration,
-                            CudaTuningCurveId::
-                                    BurnoutRolloverFromSpeed,
-                            linearSpeed.z),
+                    rollover,
                     0.0f,
                     0.0f,
             });
@@ -2305,13 +2328,21 @@ __device__ inline ForceStatus ComputeModel6Ground(
                 ? configuration->tuning.gearedDrive.
                           lowSpeedBSlippingGripScale
                 : 1.0f;
+        float maximumSideFriction;
+        if constexpr (ReuseWheelPassInvariants) {
+            maximumSideFriction =
+                    sharedMaximumSideFriction;
+        } else {
+            maximumSideFriction =
+                    tuning::EvaluateSpeed(
+                            configuration,
+                            CudaTuningCurveId::
+                                    MaxSideFrictionFromSpeed,
+                            linearSpeed.z);
+        }
         const float maximum =
                 wheelMaterial->blendableValues.w * slopeA *
-                tuning::EvaluateSpeed(
-                        configuration,
-                        CudaTuningCurveId::
-                                MaxSideFrictionFromSpeed,
-                        linearSpeed.z) *
+                maximumSideFriction *
                 slipGrip * lowSpeedGrip * damper;
         const float sideSpeed =
                 dynamics::detail::Dot(linearSpeed, sideAxis);
@@ -2408,6 +2439,15 @@ __device__ inline ForceStatus ComputeModel6Ground(
     });
     const float steerRamp =
             SteerAssistRamp(configuration, linearSpeed);
+    float sharedSteeringDriveTorque = 0.0f;
+    if constexpr (ReuseWheelPassInvariants) {
+        sharedSteeringDriveTorque =
+                tuning::EvaluateSpeed(
+                        configuration,
+                        CudaTuningCurveId::
+                                SteeringDriveTorqueFromSpeed,
+                        linearSpeed.z);
+    }
     float sideLimit = 0.0f;
     float sideRequested = 0.0f;
     for (std::uint32_t index = 0u;
@@ -2426,13 +2466,20 @@ __device__ inline ForceStatus ComputeModel6Ground(
                 0.5f;
         const float wheelSpeed =
                 linearSpeed.x + angularSpeed.y * halfTrack;
+        float maximumSideFriction;
+        if constexpr (ReuseWheelPassInvariants) {
+            maximumSideFriction =
+                    sharedMaximumSideFriction;
+        } else {
+            maximumSideFriction =
+                    tuning::EvaluateSpeed(
+                            configuration,
+                            CudaTuningCurveId::
+                                    MaxSideFrictionFromSpeed,
+                            linearSpeed.z);
+        }
         const float maximum =
-                tuning::EvaluateSpeed(
-                        configuration,
-                        CudaTuningCurveId::
-                                MaxSideFrictionFromSpeed,
-                        linearSpeed.z) *
-                material.w;
+                maximumSideFriction * material.w;
         float requested =
                 -configuration->tuning.gearedDrive.
                          lateralForceScale *
@@ -2457,14 +2504,22 @@ __device__ inline ForceStatus ComputeModel6Ground(
                         sideForceToDriveTorqueScale *
                 requested;
         if (front) {
+            float steeringDriveTorque;
+            if constexpr (ReuseWheelPassInvariants) {
+                steeringDriveTorque =
+                        sharedSteeringDriveTorque;
+            } else {
+                steeringDriveTorque =
+                        tuning::EvaluateSpeed(
+                                configuration,
+                                CudaTuningCurveId::
+                                        SteeringDriveTorqueFromSpeed,
+                                linearSpeed.z);
+            }
             float assist =
                     steerRamp *
                     vehicle.controls.currentSteering *
-                    tuning::EvaluateSpeed(
-                            configuration,
-                            CudaTuningCurveId::
-                                    SteeringDriveTorqueFromSpeed,
-                            linearSpeed.z);
+                    steeringDriveTorque;
             if (vehicle.engine.useLowSpeedGateB) {
                 assist = -assist;
             }
