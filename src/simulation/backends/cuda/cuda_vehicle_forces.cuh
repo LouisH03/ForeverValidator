@@ -189,10 +189,36 @@ __device__ inline void AddCentralForce(
             candidate.vehicle.forceAccumulators.force.z;
 }
 
+__device__ inline GmVec3 WorldCenterOfMass(
+        const CudaCandidatePhysicsState &candidate) {
+    const CHmsDyna::CHmsStateDyna &state =
+            candidate.body.current;
+    const GmMat3 &rotation = state.rotation;
+    const GmVec3 &position = state.position;
+    const GmVec3 &localCenter =
+            candidate.body.parameters.localCenterOfMass;
+    return {
+            ((rotation.basisY.x * localCenter.y +
+              rotation.basisX.x * localCenter.x) +
+             rotation.basisZ.x * localCenter.z) +
+                    position.x,
+            ((rotation.basisY.y * localCenter.y +
+              rotation.basisX.y * localCenter.x) +
+             rotation.basisZ.y * localCenter.z) +
+                    position.y,
+            ((rotation.basisY.z * localCenter.y +
+              rotation.basisX.z * localCenter.x) +
+             rotation.basisZ.z * localCenter.z) +
+                    position.z,
+    };
+}
+
+template <bool ReuseWorldCenter = false>
 __device__ inline void AddForceAtPoint(
         CudaCandidatePhysicsState &candidate,
         const GmVec3 &localForce,
-        const GmVec3 &localPoint) {
+        const GmVec3 &localPoint,
+        const GmVec3 &sharedWorldCenter = {}) {
     const GmVec3 worldForce =
             LocalToWorld(candidate.body, localForce);
     CHmsDyna::CHmsStateDyna &state =
@@ -216,22 +242,12 @@ __device__ inline void AddForceAtPoint(
              rotation.basisZ.z * localPoint.z) +
                     position.z,
     };
-    const GmVec3 &localCenter =
-            candidate.body.parameters.localCenterOfMass;
-    const GmVec3 worldCenter = {
-            ((rotation.basisY.x * localCenter.y +
-              rotation.basisX.x * localCenter.x) +
-             rotation.basisZ.x * localCenter.z) +
-                    position.x,
-            ((rotation.basisY.y * localCenter.y +
-              rotation.basisX.y * localCenter.x) +
-             rotation.basisZ.y * localCenter.z) +
-                    position.y,
-            ((rotation.basisY.z * localCenter.y +
-              rotation.basisX.z * localCenter.x) +
-             rotation.basisZ.z * localCenter.z) +
-                    position.z,
-    };
+    GmVec3 worldCenter;
+    if constexpr (ReuseWorldCenter) {
+        worldCenter = sharedWorldCenter;
+    } else {
+        worldCenter = WorldCenterOfMass(candidate);
+    }
     const float rx =
             worldPoint.x - worldCenter.x;
     const float ry =
@@ -1357,10 +1373,12 @@ __device__ inline float SignNonNegative(float value) {
     return value < 0.0f ? -1.0f : 1.0f;
 }
 
+template <bool ReuseWorldCenter = false>
 __device__ inline void WheelSuspensionForce(
         CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration,
-        CudaWheelState &wheel) {
+        CudaWheelState &wheel,
+        const GmVec3 &sharedWorldCenter = {}) {
     if (!wheel.realTime.contactPresent) return;
     float forceY = 0.0f;
     if (configuration->tuning.wheelForceMode ==
@@ -1393,9 +1411,9 @@ __device__ inline void WheelSuspensionForce(
                         wheelDamperCoef *
                         wheel.realTime.damperVelocity;
     }
-    AddForceAtPoint(
+    AddForceAtPoint<ReuseWorldCenter>(
             candidate, {0.0f, forceY, 0.0f},
-            wheel.forceApplicationPoint);
+            wheel.forceApplicationPoint, sharedWorldCenter);
 }
 
 __device__ inline float BurnoutPhase(
@@ -2188,12 +2206,15 @@ __device__ inline ForceStatus ComputeModel6Ground(
             BurnoutSideFade(vehicle, configuration, tick);
     exact::SinCosResult steeringSinCos{};
     GmVec3 sharedFeedbackForce{};
+    GmVec3 sharedWorldCenter{};
     float sharedMaximumSideFriction = 0.0f;
     float sharedBurnoutRollover = 0.0f;
     if constexpr (ReuseWheelPassInvariants) {
         steeringSinCos = exact::SinCos(visualSteerYaw);
         sharedFeedbackForce =
                 GroundFeedbackForce(vehicle, configuration);
+        sharedWorldCenter =
+                WorldCenterOfMass(candidate);
         sharedMaximumSideFriction =
                 tuning::EvaluateSpeed(
                         configuration,
@@ -2213,7 +2234,9 @@ __device__ inline ForceStatus ComputeModel6Ground(
     for (std::uint32_t index = 0u;
          index < vehicle.wheels.count; ++index) {
         CudaWheelState &wheel = vehicle.wheels.values[index];
-        WheelSuspensionForce(candidate, configuration, wheel);
+        WheelSuspensionForce<ReuseWheelPassInvariants>(
+                candidate, configuration, wheel,
+                sharedWorldCenter);
         if (!wheel.realTime.contactPresent ||
             !(configuration->tuning.gearedDrive.
                       lateralForceScale >= 0.0f)) {
