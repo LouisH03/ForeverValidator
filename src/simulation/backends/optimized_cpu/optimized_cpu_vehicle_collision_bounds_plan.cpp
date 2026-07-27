@@ -7,6 +7,62 @@
 
 namespace forevervalidator::simulation {
 
+namespace {
+
+// The plan only accepts geometry boxes that are valid for tree refresh.
+// GmBoxAligned::SetMult applies absolute rotation elements to non-negative
+// half-extents, so a finite transformed child remains valid. Preserve the
+// authoritative ordered union arithmetic while avoiding the generic invalid-
+// box guards and out-of-line call on every certified child.
+inline void AddCertifiedBox(GmBoxAligned &merged,
+                            const GmBoxAligned &other) noexcept {
+    if (other.halfExtents.x < 0.0f) {
+        // Defensive parity for a corrupted runtime transform. The certified
+        // vehicle path never takes this branch.
+        merged.AddValidPlugTreeBox(other);
+        return;
+    }
+
+    GmVec3 minPoint = {
+        merged.center.x - merged.halfExtents.x,
+        merged.center.y - merged.halfExtents.y,
+        merged.center.z - merged.halfExtents.z,
+    };
+    GmVec3 maxPoint = {
+        merged.center.x + merged.halfExtents.x,
+        merged.center.y + merged.halfExtents.y,
+        merged.center.z + merged.halfExtents.z,
+    };
+    float otherX = other.center.x - other.halfExtents.x;
+    float otherY = other.center.y - other.halfExtents.y;
+    float otherZ = other.center.z - other.halfExtents.z;
+    if (minPoint.x > otherX) {
+        minPoint.x = otherX;
+    }
+    if (minPoint.y > otherY) {
+        minPoint.y = otherY;
+    }
+    if (minPoint.z > otherZ) {
+        minPoint.z = otherZ;
+    }
+
+    otherX = other.center.x + other.halfExtents.x;
+    otherY = other.center.y + other.halfExtents.y;
+    otherZ = other.center.z + other.halfExtents.z;
+    if (maxPoint.x < otherX) {
+        maxPoint.x = otherX;
+    }
+    if (maxPoint.y < otherY) {
+        maxPoint.y = otherY;
+    }
+    if (maxPoint.z < otherZ) {
+        maxPoint.z = otherZ;
+    }
+    merged.SetMinMax(minPoint, maxPoint);
+}
+
+}  // namespace
+
 bool OptimizedCpuVehicleCollisionBoundsPlan::TryBuild(
         CPlugTree &root) noexcept {
     OptimizedCpuVehicleCollisionBoundsPlan candidate;
@@ -97,7 +153,7 @@ void OptimizedCpuVehicleCollisionBoundsPlan::RefreshUnchecked(
         if (childIndex == 0u) {
             merged = childBounds;
         } else {
-            merged.AddValidPlugTreeBox(childBounds);
+            AddCertifiedBox(merged, childBounds);
         }
     }
 
