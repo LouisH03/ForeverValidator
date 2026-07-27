@@ -321,6 +321,21 @@ bool OptimizedCpuStaticMeshTriangleSidecar::TryBuild(
         rebuilt.sourceTriangleCount_ = triangles.size();
         rebuilt.sourceCellCount_ = cells.size();
         rebuilt.maximumTraversalDepth_ = maximumTraversalDepth;
+        rebuilt.packetCells_.resize(cells.size());
+        for (std::size_t cellIndex = 0u;
+             cellIndex < cells.size();
+             ++cellIndex) {
+            const GmMeshOctreeCell &source = cells[cellIndex];
+            OptimizedCpuStaticMeshPacketCell &packet =
+                    rebuilt.packetCells_[cellIndex];
+            packet.bounds = source.Bounds();
+            packet.subtreeEntryCount = source.SubtreeEntryCount();
+            packet.depth = traversalDepths[cellIndex];
+            if (source.ContainsTriangle()) {
+                packet.triangleIndex = source.TriangleIndex();
+                packet.containsTriangle = 1u;
+            }
+        }
         rebuilt.traversalDepths_ = std::move(traversalDepths);
         if (triangles.size() > rebuilt.triangles_.max_size()) {
             Clear();
@@ -428,6 +443,7 @@ void OptimizedCpuStaticMeshTriangleSidecar::Clear(void) noexcept {
     sourceCellCount_ = 0u;
     maximumTraversalDepth_ = 0u;
     traversalDepths_.clear();
+    packetCells_.clear();
     triangles_.clear();
     directTrianglePostings_.clear();
     triangleGrid_.Clear();
@@ -450,5 +466,6 @@ bool OptimizedCpuStaticMeshTriangleSidecar::IsFor(
            sourceTriangleCount_ == triangles.size() &&
            sourceCellCount_ == cells.size() &&
            traversalDepths_.size() == cells.size() &&
+           packetCells_.size() == cells.size() &&
            triangles_.size() == triangles.size();
 }

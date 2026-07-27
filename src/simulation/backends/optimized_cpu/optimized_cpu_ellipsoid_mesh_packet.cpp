@@ -848,7 +848,7 @@ FV_E031_AVX2 bool RunPacketAvx2(
         const OptimizedCpuStaticMeshTriangleSidecar &triangles,
         const OptimizedCpuStaticMeshTriangleHierarchyView &hierarchy,
         std::uint32_t *hitMask) noexcept {
-    if (hierarchy.cells == nullptr || hierarchy.depths == nullptr ||
+    if (hierarchy.packetCells == nullptr ||
         hierarchy.count == 0u ||
         hierarchy.maximumTraversalDepth > PacketTraversalCapacity) {
         return false;
@@ -894,18 +894,19 @@ FV_E031_AVX2 bool RunPacketAvx2(
 
     for (u32 cellIndex = 0u;
          cellIndex < hierarchy.count;) {
-        const GmMeshOctreeCell &cell = hierarchy.cells[cellIndex];
-        const std::size_t traversalDepth = hierarchy.depths[cellIndex];
+        const OptimizedCpuStaticMeshPacketCell &cell =
+                hierarchy.packetCells[cellIndex];
+        const std::size_t traversalDepth = cell.depth;
         const __m256 parentMask = traversalDepth == 0u
                 ? execution.packetMask
                 : traversalMasks[traversalDepth - 1u].value;
         __m256 laneMask = BoundsMask(
                 execution.meshBounds,
-                cell.Bounds(),
+                cell.bounds,
                 parentMask);
         std::uint32_t laneBits = Bits(laneMask);
         if (laneBits == 0u) {
-            cellIndex += cell.SubtreeEntryCount();
+            cellIndex += cell.subtreeEntryCount;
             continue;
         }
         if (!cell.ContainsTriangle()) {
@@ -919,7 +920,7 @@ FV_E031_AVX2 bool RunPacketAvx2(
 
         ++cellIndex;
         const OptimizedCpuStaticMeshTriangleData &triangle =
-                triangles.TriangleAt(cell.TriangleIndex());
+                triangles.TriangleAt(cell.triangleIndex);
         // BoundsMask and every parent mask use canonical all-zero/all-one
         // lanes, so converting through movemask and rebuilding the vector is
         // redundant. Preserve the exact mask produced by the bounds test.

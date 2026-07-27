@@ -481,6 +481,7 @@ bool RunTraversalDepthCases(void) {
         nestedSidecar.MaximumTraversalDepth() != 3u ||
         !nestedSidecar.TriangleHierarchyView(&hierarchy) ||
         hierarchy.depths == nullptr ||
+        hierarchy.packetCells == nullptr ||
         hierarchy.maximumTraversalDepth != 3u) {
         std::fprintf(stderr, "nested traversal certificate differs\n");
         return false;
@@ -489,9 +490,20 @@ bool RunTraversalDepthCases(void) {
     for (std::size_t cellIndex = 0u;
          cellIndex < expectedDepths.size();
          ++cellIndex) {
-        if (hierarchy.depths[cellIndex] != expectedDepths[cellIndex]) {
+        const GmMeshOctreeCell &source = nested[cellIndex];
+        const OptimizedCpuStaticMeshPacketCell &packet =
+                hierarchy.packetCells[cellIndex];
+        if (hierarchy.depths[cellIndex] != expectedDepths[cellIndex] ||
+            packet.depth != expectedDepths[cellIndex] ||
+            std::memcmp(&packet.bounds,
+                        &source.Bounds(),
+                        sizeof(packet.bounds)) != 0 ||
+            packet.subtreeEntryCount != source.SubtreeEntryCount() ||
+            packet.ContainsTriangle() != source.ContainsTriangle() ||
+            (source.ContainsTriangle() &&
+             packet.triangleIndex != source.TriangleIndex())) {
             std::fprintf(stderr,
-                         "nested traversal cell %zu depth differs\n",
+                         "nested traversal cell %zu descriptor differs\n",
                          cellIndex);
             return false;
         }

@@ -425,6 +425,29 @@ bool RunPackets(const GmSurfMesh &mesh,
                 }
             }
 
+            OptimizedCpuCertifiedStaticMeshPacket missingPacketCells =
+                    certifiedMesh;
+            missingPacketCells.hierarchy.packetCells = nullptr;
+            std::uint32_t missingPacketCellsHitMask = 0xffffffffu;
+            if (GmCollision_PreparedEllipsoidPacket_Mesh_InlineMathOptimizedCpuNativeBinary32WithCertifiedStaticMesh(
+                        certifiedPrepared,
+                        activeMask,
+                        missingPacketCells,
+                        &missingPacketCellsHitMask) ||
+                missingPacketCellsHitMask != 0u) {
+                std::fprintf(stderr,
+                             "certified packet accepted missing packet cells\n");
+                return false;
+            }
+            for (std::size_t lane = 0u; lane < PacketWidth; ++lane) {
+                if (certifiedBuffers[lane].Collisions().size() !=
+                    collisionCountsBefore[lane]) {
+                    std::fprintf(stderr,
+                                 "missing packet cells emitted collisions\n");
+                    return false;
+                }
+            }
+
             OptimizedCpuCertifiedStaticMeshPacket missingDepths =
                     certifiedMesh;
             missingDepths.hierarchy.depths = nullptr;

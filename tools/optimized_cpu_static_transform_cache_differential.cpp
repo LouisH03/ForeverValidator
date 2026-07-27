@@ -78,6 +78,20 @@ struct OptimizedCpuStaticMeshTriangleSidecarTestAccess {
         return rejected && cache.CertifyForAdvance(zone) &&
                 cache.IsCertifiedFor(zone);
     }
+
+    static bool RejectsPacketCellBackingMutation(
+            OptimizedCpuStaticMeshTriangleSidecar &sidecar,
+            OptimizedCpuStaticSurfaceTransformCache &cache,
+            const CHmsCollisionManagerSZone &zone) {
+        std::vector<OptimizedCpuStaticMeshPacketCell> saved =
+                std::move(sidecar.packetCells_);
+        sidecar.packetCells_.assign(saved.size(), {});
+        const bool rejected = !cache.CertifyForAdvance(zone) &&
+                !cache.IsCertifiedFor(zone);
+        sidecar.packetCells_ = std::move(saved);
+        return rejected && cache.CertifyForAdvance(zone) &&
+                cache.IsCertifiedFor(zone);
+    }
 };
 
 namespace {
@@ -448,6 +462,9 @@ int main(void) {
                         *mutableSidecar, cache, firstZone) ||
         !OptimizedCpuStaticMeshTriangleSidecarTestAccess::
                 RejectsTraversalDepthBackingMutation(
+                        *mutableSidecar, cache, firstZone) ||
+        !OptimizedCpuStaticMeshTriangleSidecarTestAccess::
+                RejectsPacketCellBackingMutation(
                         *mutableSidecar, cache, firstZone)) {
         std::fprintf(stderr, "advance sidecar certificate differs\n");
         return 1;
@@ -665,6 +682,6 @@ int main(void) {
         return 1;
     }
 
-    std::printf("static_transform_cache_cases=41 result=identical\n");
+    std::printf("static_transform_cache_cases=42 result=identical\n");
     return 0;
 }
