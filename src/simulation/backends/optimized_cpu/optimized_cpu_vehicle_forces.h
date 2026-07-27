@@ -10,6 +10,7 @@ class CFuncKeysReal;
 class CPlugTree;
 class CSceneVehicleCar;
 class CSceneVehicleCarTuning;
+class CSceneVehicleCarWheelSurfaceObserver;
 struct CHmsCorpus;
 
 namespace forevervalidator::simulation {
@@ -45,10 +46,12 @@ private:
     CHmsItem *item_ = nullptr;
     CSceneVehicleCarTuning *tuning_ = nullptr;
     CPlugTree *collisionTree_ = nullptr;
+    CSceneVehicleCarWheelSurfaceObserver *wheelSurfaceObserver_ = nullptr;
     CHmsItem::CCallback *canonicalCallback_ = nullptr;
     std::unique_ptr<OptimizedCpuCompiledModel6Tuning> compiledModel6_;
     OptimizedCpuVehicleCollisionBoundsPlan collisionBoundsPlan_;
     bool collisionBoundsPlanAttempted_ = false;
+    bool wheelSurfaceObserverPreservesDynamics_ = true;
     bool stableEligible_ = false;
     bool tickEligible_ = false;
 };

@@ -21,6 +21,25 @@
 
 namespace {
 
+class ConservativeWheelObserver final
+        : public CSceneVehicleCarWheelSurfaceObserver {
+public:
+    void OnWheelSurfaceUpdated(
+            CSceneVehicleCar &,
+            CSceneVehicleCar::SSimulationWheel &) override {}
+};
+
+class PreservingWheelObserver final
+        : public CSceneVehicleCarWheelSurfaceObserver {
+public:
+    bool PreservesVehicleDynamics(void) const noexcept override {
+        return true;
+    }
+    void OnWheelSurfaceUpdated(
+            CSceneVehicleCar &,
+            CSceneVehicleCar::SSimulationWheel &) override {}
+};
+
 using forevervalidator::simulation::OptimizedCpuBinary32MathPath;
 using forevervalidator::simulation::OptimizedCpuEvaluateVehicleCurveForDifferential;
 using forevervalidator::simulation::OptimizedCpuVehicleForceContext;
@@ -48,6 +67,31 @@ float FloatFromBits(std::uint32_t bits) noexcept {
 bool Fail(const std::string &message) {
     std::fprintf(stderr, "vehicle_forces_differential: %s\n", message.c_str());
     return false;
+}
+
+bool RunWheelObserverContractCases(void) {
+    CSceneVehicleCar car;
+    ++completedRoutingCases;
+    if (!car.WheelSurfaceObserverPreservesDynamics()) {
+        return Fail("null wheel observer did not preserve dynamics");
+    }
+
+    ConservativeWheelObserver conservative;
+    car.BindWheelSurfaceObserver(conservative);
+    ++completedRoutingCases;
+    if (car.WheelSurfaceObserverPreservesDynamics()) {
+        return Fail("conservative wheel observer certified dynamics");
+    }
+
+    PreservingWheelObserver preserving;
+    car.BindWheelSurfaceObserver(preserving);
+    ++completedRoutingCases;
+    if (!car.WheelSurfaceObserverPreservesDynamics()) {
+        return Fail("preserving wheel observer lost its certificate");
+    }
+
+    car.ClearWheelSurfaceObserver();
+    return true;
 }
 
 float EvaluateReference(
@@ -598,7 +642,8 @@ int main(void) {
 
     if (!RunFenvCases(selectedPath) || !RunCurveCases(selectedPath) ||
         !RunCompiledCurveInvalidationCases() ||
-        !RunRoutingCases(selectedPath)) {
+        !RunRoutingCases(selectedPath) ||
+        !RunWheelObserverContractCases()) {
         return 1;
     }
 

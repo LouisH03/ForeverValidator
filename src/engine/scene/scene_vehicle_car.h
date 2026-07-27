@@ -308,6 +308,7 @@ public:
   void BindTurboSound(CSceneSoundSource &source, CHmsSoundSource &sound);
   void BindWheelSurfaceObserver(CSceneVehicleCarWheelSurfaceObserver &observer);
   void ClearWheelSurfaceObserver(void);
+  bool WheelSurfaceObserverPreservesDynamics(void) const noexcept;
   RuntimeClone CaptureRuntimeClone(void) const;
   bool CanRestoreRuntimeClone(const RuntimeClone &clone) const noexcept;
   void RestoreRuntimeClone(const RuntimeClone &clone) noexcept;
@@ -732,6 +733,11 @@ struct CSceneVehicleCar::SSimulationWheel {
 class CSceneVehicleCarWheelSurfaceObserver {
 public:
   virtual ~CSceneVehicleCarWheelSurfaceObserver() = default;
+  // This capability must remain stable while the observer is bound. Returning
+  // true certifies that OnWheelSurfaceUpdated does not change vehicle dynamics.
+  virtual bool PreservesVehicleDynamics(void) const noexcept {
+    return false;
+  }
   virtual void
   OnWheelSurfaceUpdated(CSceneVehicleCar &car,
                         CSceneVehicleCar::SSimulationWheel &wheel) = 0;
