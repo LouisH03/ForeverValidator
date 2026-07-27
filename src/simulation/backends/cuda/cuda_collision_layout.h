@@ -9,6 +9,7 @@ namespace forevervalidator::simulation::cuda::collision {
 
 constexpr std::uint32_t CollisionCapacity = 512u;
 constexpr std::uint32_t ShapeCollisionCapacity = 256u;
+constexpr std::uint32_t SurfaceHitCapacity = 128u;
 
 enum class Status : std::uint32_t {
     Success,
@@ -28,6 +29,11 @@ struct CudaCollision {
     std::uint32_t movingShapeIndex = UINT32_MAX;
     std::uint32_t staticSurfaceIndex = UINT32_MAX;
     std::uint32_t staticActorIndex = UINT32_MAX;
+};
+
+struct CudaCollisionSurfaceHit {
+    std::uint32_t surfaceIndex = UINT32_MAX;
+    std::uint32_t shapeMask = 0u;
 };
 
 struct CudaCollisionScratch {
@@ -58,11 +64,17 @@ struct CudaCollisionScratch {
 struct CudaCollisionSearchScratch {
     std::uint32_t collisionCount;
     std::uint32_t shapeCollisionCount;
+    std::uint32_t surfaceHitCount;
     bool overflow;
+    bool surfaceCacheEnabled;
     CudaCollision *collisionStorage;
     CudaCollision *shapeCollisionStorage;
+    GmIso4 *shapeWorldStorage;
+    GmBoxAligned *movingBoundsStorage;
+    CudaCollisionSurfaceHit *surfaceHitStorage;
     std::uint32_t slot;
     std::uint32_t stride;
+    std::uint32_t shapeCapacity;
 };
 
 }  // namespace forevervalidator::simulation::cuda::collision

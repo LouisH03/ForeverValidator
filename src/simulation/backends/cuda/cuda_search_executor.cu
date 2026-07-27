@@ -1481,7 +1481,12 @@ __global__ __launch_bounds__(
         DeviceSample *scores,
         cuda::collision::CudaCollision *collisionScratch,
         cuda::collision::CudaCollision *shapeCollisionScratch,
+        GmIso4 *shapeWorldScratch,
+        GmBoxAligned *movingBoundsScratch,
+        cuda::collision::CudaCollisionSurfaceHit *
+                surfaceHitScratch,
         std::uint32_t scratchStride,
+        std::uint32_t shapeCapacity,
         const std::uint32_t *cancellation) {
     const std::uint32_t slot =
             blockIdx.x * blockDim.x + threadIdx.x;
@@ -1508,11 +1513,18 @@ __global__ __launch_bounds__(
     cuda::collision::CudaCollisionSearchScratch candidateScratch{
             0u,
             0u,
+            0u,
             false,
+            MinimumBlocksPerSm ==
+                    ThroughputKernelMinimumBlocksPerSm,
             collisionScratch,
             shapeCollisionScratch,
+            shapeWorldScratch,
+            movingBoundsScratch,
+            surfaceHitScratch,
             slot,
-            scratchStride};
+            scratchStride,
+            shapeCapacity};
     DeviceControlState controlState;
     std::uint32_t eventCursor = 0u;
     while (eventCursor < eventCount &&
@@ -1638,7 +1650,12 @@ __global__ void CaptureSearchWinnerStateKernel(
         DeviceCandidateStatus *statuses,
         cuda::collision::CudaCollision *collisionScratch,
         cuda::collision::CudaCollision *shapeCollisionScratch,
+        GmIso4 *shapeWorldScratch,
+        GmBoxAligned *movingBoundsScratch,
+        cuda::collision::CudaCollisionSurfaceHit *
+                surfaceHitScratch,
         std::uint32_t scratchStride,
+        std::uint32_t shapeCapacity,
         CudaCandidateState *capturedWinnerState) {
     if (blockIdx.x != 0u || threadIdx.x != 0u) {
         return;
@@ -1664,11 +1681,17 @@ __global__ void CaptureSearchWinnerStateKernel(
     cuda::collision::CudaCollisionSearchScratch candidateScratch{
             0u,
             0u,
+            0u,
             false,
+            true,
             collisionScratch,
             shapeCollisionScratch,
+            shapeWorldScratch,
+            movingBoundsScratch,
+            surfaceHitScratch,
             slot,
-            scratchStride};
+            scratchStride,
+            shapeCapacity};
     CudaCandidateState state = *branchState;
     state.candidateId =
             static_cast<std::uint32_t>(winner.candidateId);
@@ -1844,6 +1867,7 @@ struct CudaSearchExecutor::Impl {
     CudaSearchExecutorConfiguration configuration;
     std::uint32_t timelineTickCount = 0u;
     std::uint32_t evaluationTickCount = 0u;
+    std::uint32_t collisionShapeCount = 0u;
     std::uint64_t residentBytes = 0u;
     std::uint64_t initialUploadBytes = 0u;
     bool baselineEvaluated = false;
@@ -1873,6 +1897,10 @@ struct CudaSearchExecutor::Impl {
     DeviceAllocation<std::byte> reductionTemporary;
     DeviceAllocation<cuda::collision::CudaCollision> collisionScratch;
     DeviceAllocation<cuda::collision::CudaCollision> shapeCollisionScratch;
+    DeviceAllocation<GmIso4> shapeWorldScratch;
+    DeviceAllocation<GmBoxAligned> movingBoundsScratch;
+    DeviceAllocation<cuda::collision::CudaCollisionSurfaceHit>
+            surfaceHitScratch;
     MappedCancellation cancellation;
     DeviceAllocation<DeviceSample> globalBestSample;
     DeviceAllocation<CudaCandidateState> globalBestState;
@@ -1906,6 +1934,9 @@ struct CudaSearchExecutor::Impl {
         ADD_BYTES(reductionTemporary);
         ADD_BYTES(collisionScratch);
         ADD_BYTES(shapeCollisionScratch);
+        ADD_BYTES(shapeWorldScratch);
+        ADD_BYTES(movingBoundsScratch);
+        ADD_BYTES(surfaceHitScratch);
         ADD_BYTES(cancellation);
         ADD_BYTES(globalBestSample);
         ADD_BYTES(globalBestState);
@@ -2029,6 +2060,12 @@ struct CudaSearchExecutor::Impl {
         const std::uint64_t shapeCollisionSlots64 =
                 static_cast<std::uint64_t>(candidateCount) *
                 cuda::collision::ShapeCollisionCapacity;
+        const std::uint64_t shapeQuerySlots64 =
+                static_cast<std::uint64_t>(candidateCount) *
+                collisionShapeCount;
+        const std::uint64_t surfaceHitSlots64 =
+                static_cast<std::uint64_t>(candidateCount) *
+                cuda::collision::SurfaceHitCapacity;
         if (eventSlots64 >
                     std::numeric_limits<std::size_t>::max() ||
             scoreSlots64 >
@@ -2036,6 +2073,10 @@ struct CudaSearchExecutor::Impl {
             collisionSlots64 >
                     std::numeric_limits<std::size_t>::max() ||
             shapeCollisionSlots64 >
+                    std::numeric_limits<std::size_t>::max() ||
+            shapeQuerySlots64 >
+                    std::numeric_limits<std::size_t>::max() ||
+            surfaceHitSlots64 >
                     std::numeric_limits<std::size_t>::max()) {
             if (diagnostic != nullptr) {
                 *diagnostic =
@@ -2053,6 +2094,10 @@ struct CudaSearchExecutor::Impl {
                 static_cast<std::size_t>(collisionSlots64);
         const std::size_t shapeCollisionSlots =
                 static_cast<std::size_t>(shapeCollisionSlots64);
+        const std::size_t shapeQuerySlots =
+                static_cast<std::size_t>(shapeQuerySlots64);
+        const std::size_t surfaceHitSlots =
+                static_cast<std::size_t>(surfaceHitSlots64);
         DeviceAllocation<DeviceSample> nextCandidateBestSamples;
         DeviceAllocation<DeviceMt19937> nextRandomStates;
         DeviceAllocation<CudaSearchInputEvent> nextCandidateEvents;
@@ -2069,6 +2114,10 @@ struct CudaSearchExecutor::Impl {
                 nextCollisionScratch;
         DeviceAllocation<cuda::collision::CudaCollision>
                 nextShapeCollisionScratch;
+        DeviceAllocation<GmIso4> nextShapeWorldScratch;
+        DeviceAllocation<GmBoxAligned> nextMovingBoundsScratch;
+        DeviceAllocation<cuda::collision::CudaCollisionSurfaceHit>
+                nextSurfaceHitScratch;
         if (!nextCandidateBestSamples.Allocate(candidates) ||
             !nextRandomStates.Allocate(candidates) ||
             !nextCandidateEvents.Allocate(eventSlots) ||
@@ -2082,7 +2131,10 @@ struct CudaSearchExecutor::Impl {
             !nextScores.Allocate(scoreSlots) ||
             !nextCollisionScratch.Allocate(collisionSlots) ||
             !nextShapeCollisionScratch.Allocate(
-                    shapeCollisionSlots)) {
+                    shapeCollisionSlots) ||
+            !nextShapeWorldScratch.Allocate(shapeQuerySlots) ||
+            !nextMovingBoundsScratch.Allocate(shapeQuerySlots) ||
+            !nextSurfaceHitScratch.Allocate(surfaceHitSlots)) {
             static_cast<void>(cudaGetLastError());
             if (diagnostic != nullptr) {
                 *diagnostic =
@@ -2128,6 +2180,10 @@ struct CudaSearchExecutor::Impl {
         collisionScratch = std::move(nextCollisionScratch);
         shapeCollisionScratch =
                 std::move(nextShapeCollisionScratch);
+        shapeWorldScratch = std::move(nextShapeWorldScratch);
+        movingBoundsScratch =
+                std::move(nextMovingBoundsScratch);
+        surfaceHitScratch = std::move(nextSurfaceHitScratch);
         configuration.maximumBatchSize = candidateCount;
         UpdateResidentBytes();
         if (diagnostic != nullptr) {
@@ -2277,7 +2333,11 @@ struct CudaSearchExecutor::Impl {
                         scores.Get(),
                         collisionScratch.Get(),
                         shapeCollisionScratch.Get(),
+                        shapeWorldScratch.Get(),
+                        movingBoundsScratch.Get(),
+                        surfaceHitScratch.Get(),
                         configuration.maximumBatchSize,
+                        collisionShapeCount,
                         cancellation.Get());
             };
             if (useThroughputKernel) {
@@ -2333,7 +2393,11 @@ struct CudaSearchExecutor::Impl {
                 statuses.Get(),
                 collisionScratch.Get(),
                 shapeCollisionScratch.Get(),
+                shapeWorldScratch.Get(),
+                movingBoundsScratch.Get(),
+                surfaceHitScratch.Get(),
                 configuration.maximumBatchSize,
+                collisionShapeCount,
                 capturedWinnerState.Get());
         cudaEventRecord(winnerStateCaptured.Get());
         FinalizeSearchBatchKernel<<<1u, 1u>>>(
@@ -2567,6 +2631,27 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
             }
             return {};
         }
+        CudaPackedStaticConfigurationHeader packedConfiguration{};
+        const cudaError_t configurationCopyError = cudaMemcpy(
+                &packedConfiguration,
+                configuration.deviceStaticConfiguration,
+                sizeof(packedConfiguration),
+                cudaMemcpyDeviceToHost);
+        if (configurationCopyError != cudaSuccess ||
+            packedConfiguration.magic !=
+                    CudaPackedStaticConfigurationHeader::Magic ||
+            packedConfiguration.schemaVersion !=
+                    CudaPackedStaticConfigurationHeader::
+                            SchemaVersion) {
+            if (diagnostic != nullptr) {
+                *diagnostic = configurationCopyError != cudaSuccess
+                        ? CudaFailure(
+                                  "reading CUDA static configuration",
+                                  configurationCopyError)
+                        : "invalid CUDA static configuration header";
+            }
+            return {};
+        }
         const std::uint64_t candidateEvents =
                 static_cast<std::uint64_t>(
                         configuration.maximumBatchSize) *
@@ -2584,12 +2669,24 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
                 static_cast<std::uint64_t>(
                         configuration.maximumBatchSize) *
                 cuda::collision::ShapeCollisionCapacity;
+        const std::uint64_t shapeQueryCount =
+                static_cast<std::uint64_t>(
+                        configuration.maximumBatchSize) *
+                packedConfiguration.collisionShapes.count;
+        const std::uint64_t surfaceHitCount =
+                static_cast<std::uint64_t>(
+                        configuration.maximumBatchSize) *
+                cuda::collision::SurfaceHitCapacity;
         if (candidateEvents >
                     std::numeric_limits<std::size_t>::max() ||
             scoreCount > std::numeric_limits<std::size_t>::max() ||
             collisionCount >
                     std::numeric_limits<std::size_t>::max() ||
             shapeCollisionCount >
+                    std::numeric_limits<std::size_t>::max() ||
+            shapeQueryCount >
+                    std::numeric_limits<std::size_t>::max() ||
+            surfaceHitCount >
                     std::numeric_limits<std::size_t>::max()) {
             if (diagnostic != nullptr) {
                 *diagnostic = "CUDA search buffer dimensions overflow";
@@ -2603,6 +2700,8 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
                 configuration.baselineTicks.size());
         impl->evaluationTickCount =
                 static_cast<std::uint32_t>(evaluationTicks);
+        impl->collisionShapeCount =
+                packedConfiguration.collisionShapes.count;
         const std::size_t candidates =
                 configuration.maximumBatchSize;
         const std::size_t eventSlots =
@@ -2613,6 +2712,10 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
                 static_cast<std::size_t>(collisionCount);
         const std::size_t shapeCollisionSlots =
                 static_cast<std::size_t>(shapeCollisionCount);
+        const std::size_t shapeQuerySlots =
+                static_cast<std::size_t>(shapeQueryCount);
+        const std::size_t surfaceHitSlots =
+                static_cast<std::size_t>(surfaceHitCount);
         if (!impl->branchState.Allocate(1u) ||
             !impl->baselineTicks.Allocate(
                     configuration.baselineTicks.size()) ||
@@ -2639,6 +2742,9 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
             !impl->collisionScratch.Allocate(collisionSlots) ||
             !impl->shapeCollisionScratch.Allocate(
                     shapeCollisionSlots) ||
+            !impl->shapeWorldScratch.Allocate(shapeQuerySlots) ||
+            !impl->movingBoundsScratch.Allocate(shapeQuerySlots) ||
+            !impl->surfaceHitScratch.Allocate(surfaceHitSlots) ||
             !impl->cancellation.Allocate() ||
             !impl->globalBestSample.Allocate(1u) ||
             !impl->globalBestState.Allocate(1u) ||

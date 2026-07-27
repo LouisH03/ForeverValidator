@@ -74,6 +74,42 @@ __device__ inline const CudaCollision &ShapeCollisionAt(
             scratch.slot];
 }
 
+__device__ inline GmIso4 &ShapeWorldAt(
+        CudaCollisionSearchScratch &scratch,
+        std::uint32_t traversal) {
+    return scratch.shapeWorldStorage[
+            static_cast<std::uint64_t>(traversal) *
+                    scratch.stride +
+            scratch.slot];
+}
+
+__device__ inline GmBoxAligned &MovingBoundsAt(
+        CudaCollisionSearchScratch &scratch,
+        std::uint32_t traversal) {
+    return scratch.movingBoundsStorage[
+            static_cast<std::uint64_t>(traversal) *
+                    scratch.stride +
+            scratch.slot];
+}
+
+__device__ inline const GmBoxAligned &MovingBoundsAt(
+        const CudaCollisionSearchScratch &scratch,
+        std::uint32_t traversal) {
+    return scratch.movingBoundsStorage[
+            static_cast<std::uint64_t>(traversal) *
+                    scratch.stride +
+            scratch.slot];
+}
+
+__device__ inline CudaCollisionSurfaceHit &SurfaceHitAt(
+        CudaCollisionSearchScratch &scratch,
+        std::uint32_t index) {
+    return scratch.surfaceHitStorage[
+            static_cast<std::uint64_t>(index) *
+                    scratch.stride +
+            scratch.slot];
+}
+
 template <bool TrackDiagnostics, typename Scratch>
 __device__ inline void Clear(Scratch &scratch) {
     scratch.collisionCount = 0u;
@@ -996,6 +1032,169 @@ __device__ inline Status Detect(
                     configuration,
                     configuration->collisionShapes);
     const GmIso4 bodyPose = detail::BodyPose(candidate.body);
+
+    if constexpr (!TrackDiagnostics) {
+        constexpr std::uint32_t CachedShapeCount = 5u;
+        bool useSurfaceCache =
+                scratch.surfaceCacheEnabled &&
+                configuration->collisionShapes.count ==
+                        CachedShapeCount &&
+                scratch.shapeCapacity >= CachedShapeCount;
+        if (useSurfaceCache) {
+            for (std::uint32_t traversal = 0u;
+                 traversal < configuration->collisionShapes.count;
+                 ++traversal) {
+                std::uint32_t shapeIndex = UINT32_MAX;
+                for (std::uint32_t index = 0u;
+                     index < configuration->collisionShapes.count;
+                     ++index) {
+                    if (shapes[index].traversalOrder == traversal) {
+                        shapeIndex = index;
+                        break;
+                    }
+                }
+                if (shapeIndex == UINT32_MAX ||
+                    shapes[shapeIndex].surfaceType !=
+                            static_cast<std::uint32_t>(
+                                    GmSurf::EGmSurfType::Ellipsoid)) {
+                    useSurfaceCache = false;
+                    break;
+                }
+                const GmIso4 shapeWorld =
+                        detail::Compose(
+                                detail::ShapeBodyPose(
+                                        shapes[shapeIndex],
+                                        configuration,
+                                        candidate),
+                                bodyPose);
+                detail::ShapeWorldAt(scratch, traversal) =
+                        shapeWorld;
+                detail::MovingBoundsAt(scratch, traversal) =
+                        detail::TransformBox(
+                                shapes[shapeIndex].localBounds,
+                                shapeWorld);
+            }
+        }
+        if (useSurfaceCache) {
+            scratch.surfaceHitCount = 0u;
+            constexpr std::uint32_t TargetGroups[] = {
+                    1u, 3u, 4u};
+            for (std::uint32_t group : TargetGroups) {
+                const CudaSceneAccelerationRange range =
+                        scene->accelerationGroups[group - 1u];
+                if (range.cellCount <= 1u) continue;
+                std::uint32_t cursors[CachedShapeCount]{};
+                for (;;) {
+                    std::uint32_t index = range.cellCount;
+#pragma unroll
+                    for (std::uint32_t traversal = 0u;
+                         traversal < CachedShapeCount;
+                         ++traversal) {
+                        if (cursors[traversal] < index) {
+                            index = cursors[traversal];
+                        }
+                    }
+                    if (index >= range.cellCount) break;
+                    const CudaSceneAccelerationCell &cell =
+                            acceleration[
+                                    range.firstCell + index];
+                    std::uint32_t shapeMask = 0u;
+#pragma unroll
+                    for (std::uint32_t traversal = 0u;
+                         traversal < CachedShapeCount;
+                         ++traversal) {
+                        if (cursors[traversal] != index) {
+                            continue;
+                        }
+                        const bool intersects =
+                                detail::BoundsIntersect(
+                                        detail::MovingBoundsAt(
+                                                scratch,
+                                                traversal),
+                                        cell.bounds);
+                        cursors[traversal] = index +
+                                (intersects
+                                         ? 1u
+                                         : cell.subtreeEntryCount);
+                        if (intersects) {
+                            shapeMask |= 1u << traversal;
+                        }
+                    }
+                    if (shapeMask == 0u ||
+                        cell.surfaceIndex == UINT32_MAX ||
+                        cell.surfaceIndex >=
+                                scene->surfaces.count) {
+                        continue;
+                    }
+                    if (scratch.surfaceHitCount >=
+                        SurfaceHitCapacity) {
+                        useSurfaceCache = false;
+                        break;
+                    }
+                    detail::SurfaceHitAt(
+                            scratch,
+                            scratch.surfaceHitCount++) = {
+                            cell.surfaceIndex,
+                            shapeMask};
+                }
+                if (!useSurfaceCache) break;
+            }
+        }
+        if (useSurfaceCache) {
+            for (std::uint32_t traversal = 0u;
+                 traversal < configuration->collisionShapes.count;
+                 ++traversal) {
+                std::uint32_t shapeIndex = UINT32_MAX;
+                for (std::uint32_t index = 0u;
+                     index < configuration->collisionShapes.count;
+                     ++index) {
+                    if (shapes[index].traversalOrder ==
+                        traversal) {
+                        shapeIndex = index;
+                        break;
+                    }
+                }
+                const CudaVehicleCollisionShape &shape =
+                        shapes[shapeIndex];
+                for (std::uint32_t hitIndex = 0u;
+                     hitIndex < scratch.surfaceHitCount;
+                     ++hitIndex) {
+                    const CudaCollisionSurfaceHit hit =
+                            detail::SurfaceHitAt(
+                                    scratch, hitIndex);
+                    if ((hit.shapeMask &
+                         (1u << traversal)) == 0u) {
+                        continue;
+                    }
+                    const CudaSceneSurface &surface =
+                            surfaces[hit.surfaceIndex];
+                    if (surface.type !=
+                        static_cast<std::uint32_t>(
+                                GmSurf::EGmSurfType::Mesh)) {
+                        return Status::UnsupportedGeometry;
+                    }
+                    detail::EllipsoidMesh<false>(
+                            scene, configuration, surface,
+                            hit.surfaceIndex, surface.actorIndex,
+                            shape, shapeIndex,
+                            detail::ShapeWorldAt(
+                                    scratch, traversal),
+                            scratch);
+                    if (scratch.overflow) {
+                        return Status::Overflow;
+                    }
+                }
+                detail::MergeShapeContacts(scratch);
+                if (scratch.overflow) {
+                    return Status::Overflow;
+                }
+            }
+            detail::SortForResponse(scratch);
+            return scratch.overflow
+                    ? Status::Overflow
+                    : Status::Success;
+        }
+    }
 
     for (std::uint32_t traversal = 0u;
          traversal < configuration->collisionShapes.count;
