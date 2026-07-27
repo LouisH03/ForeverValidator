@@ -34,6 +34,12 @@ struct ArithmeticOutputs {
     std::uint32_t bits[OperationCount]{};
 };
 
+struct SquareRootMismatch {
+    std::uint32_t input = UINT32_MAX;
+    std::uint32_t expected = 0u;
+    std::uint32_t actual = 0u;
+};
+
 __device__ std::uint32_t FloatBits(float value) {
     return __float_as_uint(value);
 }
@@ -82,6 +88,36 @@ __global__ void ArithmeticKernel(
             (bits & 0xffu) + ((bits >> 8u) & 0x3ffu));
     result.bits[RandomState] = randomState;
     outputs[index] = result;
+}
+
+__global__ void ExhaustiveSquareRootKernel(
+        SquareRootMismatch *mismatch) {
+    const std::uint64_t first =
+            static_cast<std::uint64_t>(blockIdx.x) * blockDim.x +
+            threadIdx.x;
+    const std::uint64_t stride =
+            static_cast<std::uint64_t>(gridDim.x) * blockDim.x;
+    constexpr std::uint64_t LastNonnegative = 0x7f800000ull;
+    for (std::uint64_t bits = first;
+         bits <= LastNonnegative;
+         bits += stride) {
+        const float value =
+                __uint_as_float(static_cast<std::uint32_t>(bits));
+        const std::uint32_t expected = __float_as_uint(
+                __double2float_rn(
+                        sqrt(static_cast<double>(value))));
+        const std::uint32_t actual =
+                __float_as_uint(sqrtf(value));
+        if (expected != actual &&
+            atomicCAS(
+                    &mismatch->input,
+                    UINT32_MAX,
+                    static_cast<std::uint32_t>(bits)) ==
+                    UINT32_MAX) {
+            mismatch->expected = expected;
+            mismatch->actual = actual;
+        }
+    }
 }
 
 std::uint32_t Bits(float value) {
@@ -159,6 +195,7 @@ CudaArithmeticCertification CertifyCudaArithmetic(
         }
         std::uint32_t *deviceInputs = nullptr;
         ArithmeticOutputs *deviceOutputs = nullptr;
+        SquareRootMismatch *deviceSquareRootMismatch = nullptr;
         cudaError_t error = cudaMalloc(
                 reinterpret_cast<void **>(&deviceInputs),
                 inputs.size() * sizeof(inputs[0]));
@@ -166,6 +203,18 @@ CudaArithmeticCertification CertifyCudaArithmetic(
             error = cudaMalloc(
                     reinterpret_cast<void **>(&deviceOutputs),
                     outputs.size() * sizeof(outputs[0]));
+        }
+        if (error == cudaSuccess) {
+            error = cudaMalloc(
+                    reinterpret_cast<void **>(
+                            &deviceSquareRootMismatch),
+                    sizeof(*deviceSquareRootMismatch));
+        }
+        if (error == cudaSuccess) {
+            error = cudaMemset(
+                    deviceSquareRootMismatch,
+                    0xff,
+                    sizeof(*deviceSquareRootMismatch));
         }
         if (error == cudaSuccess) {
             error = cudaMemcpy(
@@ -182,11 +231,25 @@ CudaArithmeticCertification CertifyCudaArithmetic(
             error = cudaGetLastError();
         }
         if (error == cudaSuccess) {
+            ExhaustiveSquareRootKernel<<<4096u, 256u>>>(
+                    deviceSquareRootMismatch);
+            error = cudaGetLastError();
+        }
+        if (error == cudaSuccess) {
             error = cudaMemcpy(
                     outputs.data(), deviceOutputs,
                     outputs.size() * sizeof(outputs[0]),
                     cudaMemcpyDeviceToHost);
         }
+        SquareRootMismatch squareRootMismatch;
+        if (error == cudaSuccess) {
+            error = cudaMemcpy(
+                    &squareRootMismatch,
+                    deviceSquareRootMismatch,
+                    sizeof(squareRootMismatch),
+                    cudaMemcpyDeviceToHost);
+        }
+        cudaFree(deviceSquareRootMismatch);
         cudaFree(deviceOutputs);
         cudaFree(deviceInputs);
         if (error != cudaSuccess) {
@@ -194,6 +257,19 @@ CudaArithmeticCertification CertifyCudaArithmetic(
                     "CUDA arithmetic certification failed: ") +
                     cudaGetErrorString(error);
             return result;
+        }
+        constexpr std::uint64_t NonnegativeBinary32Values =
+                0x7f800001ull;
+        result.checkedValues += NonnegativeBinary32Values;
+        if (squareRootMismatch.input != UINT32_MAX) {
+            ++result.mismatchedValues;
+            result.firstMismatchOperation = Sqrt;
+            result.firstMismatchInput =
+                    squareRootMismatch.input;
+            result.expectedBits =
+                    squareRootMismatch.expected;
+            result.actualBits =
+                    squareRootMismatch.actual;
         }
         for (std::uint32_t index = 0u;
              index < sampleCount;

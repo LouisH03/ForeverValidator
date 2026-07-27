@@ -239,6 +239,9 @@ __device__ inline std::uint32_t TruncateToUint32Modulo(float value) {
 }
 
 __device__ inline float Sqrt(float value) {
+    if (value >= 0.0f) {
+        return sqrtf(value);
+    }
     return FromDouble(sqrt(static_cast<double>(value)));
 }
 
