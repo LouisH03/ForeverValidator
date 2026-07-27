@@ -338,9 +338,12 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
          laneIndex < laneCount;
          ++laneIndex) {
         EllipsoidPacketTraversalLane &lane = lanes[laneIndex];
-        lane.buffer = zone.ChooseCollisionOutputBuffer(
-                lane.tree, lane.surface, &lane.sphereContact);
-        if (lane.buffer == nullptr || lane.sphereContact == nullptr) {
+        if (!lane.surface->UsesSphereContactBuffer()) {
+            return false;
+        }
+        lane.sphereContact = zone.EnsureTreeSphereContact(lane.tree);
+        lane.buffer = lane.sphereContact;
+        if (lane.buffer == nullptr) {
             return false;
         }
         lane.located = {
