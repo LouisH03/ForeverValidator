@@ -23,7 +23,7 @@
 #include "simulation/backends/optimized_cpu/optimized_cpu_static_bounds_overlap.h"
 
 #if defined(__i386__) || defined(__x86_64__)
-#include <xmmintrin.h>
+#include <immintrin.h>
 #endif
 
 using forevervalidator::simulation::OptimizedCpuStaticBoundsOverlap;
@@ -95,6 +95,97 @@ private:
 using EllipsoidPacketTraversalLanes = UninitializedObjectArray<
         EllipsoidPacketTraversalLane,
         EllipsoidPacketWidth>;
+
+#if defined(__i386__) || defined(__x86_64__)
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((target("avx2"), always_inline))
+#endif
+inline __m256 DirectLaneDot3(
+        __m256 x,
+        __m256 y,
+        __m256 z,
+        float coefficientX,
+        float coefficientY,
+        float coefficientZ) noexcept {
+    const __m256 xy = _mm256_add_ps(
+            _mm256_mul_ps(_mm256_set1_ps(coefficientX), x),
+            _mm256_mul_ps(_mm256_set1_ps(coefficientY), y));
+    return _mm256_add_ps(
+            xy,
+            _mm256_mul_ps(_mm256_set1_ps(coefficientZ), z));
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((target("avx2"), always_inline))
+#endif
+inline __m256 DirectLaneAbsoluteBroadcast(float value) noexcept {
+    return _mm256_and_ps(
+            _mm256_set1_ps(value),
+            _mm256_castsi256_ps(_mm256_set1_epi32(0x7fffffff)));
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((target("avx2"), always_inline))
+#endif
+inline __m256 DirectLaneAbsoluteDot3(
+        __m256 x,
+        __m256 y,
+        __m256 z,
+        float coefficientX,
+        float coefficientY,
+        float coefficientZ) noexcept {
+    const __m256 xy = _mm256_add_ps(
+            _mm256_mul_ps(DirectLaneAbsoluteBroadcast(coefficientX), x),
+            _mm256_mul_ps(DirectLaneAbsoluteBroadcast(coefficientY), y));
+    return _mm256_add_ps(
+            xy,
+            _mm256_mul_ps(
+                    DirectLaneAbsoluteBroadcast(coefficientZ), z));
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((target("avx2"), always_inline))
+#endif
+inline __m256i DirectLaneBoundedValueMask(__m256 values) noexcept {
+    const __m256i magnitude = _mm256_and_si256(
+            _mm256_castps_si256(values),
+            _mm256_set1_epi32(0x7fffffff));
+    const __m256i exponent = _mm256_srli_epi32(magnitude, 23);
+    const __m256i zero = _mm256_cmpeq_epi32(
+            magnitude, _mm256_setzero_si256());
+    const __m256i atLeastMinimum = _mm256_cmpgt_epi32(
+            exponent, _mm256_set1_epi32(66));
+    const __m256i atMostMaximum = _mm256_cmpgt_epi32(
+            _mm256_set1_epi32(188), exponent);
+    return _mm256_or_si256(
+            zero,
+            _mm256_and_si256(atLeastMinimum, atMostMaximum));
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((target("avx2"), always_inline))
+#endif
+inline bool DirectLaneBoxValuesAreBounded(
+        __m256 centerX,
+        __m256 centerY,
+        __m256 centerZ,
+        __m256 halfX,
+        __m256 halfY,
+        __m256 halfZ) noexcept {
+    __m256i bounded = DirectLaneBoundedValueMask(centerX);
+    bounded = _mm256_and_si256(
+            bounded, DirectLaneBoundedValueMask(centerY));
+    bounded = _mm256_and_si256(
+            bounded, DirectLaneBoundedValueMask(centerZ));
+    bounded = _mm256_and_si256(
+            bounded, DirectLaneBoundedValueMask(halfX));
+    bounded = _mm256_and_si256(
+            bounded, DirectLaneBoundedValueMask(halfY));
+    bounded = _mm256_and_si256(
+            bounded, DirectLaneBoundedValueMask(halfZ));
+    return _mm256_movemask_epi8(bounded) == -1;
+}
+#endif
 
 bool CollectEllipsoidPacketTraversalLanes(
         const GmIso4 &parentIso,
@@ -201,6 +292,126 @@ inline void PopulateCertifiedPacketLane(
     prepared.buffers[laneIndex] = buffer;
 }
 
+#if defined(__i386__) || defined(__x86_64__)
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((hot, noinline, target("avx2"),
+               optimize("no-inline-functions,no-unroll-loops")))
+#elif defined(__clang__)
+__attribute__((hot, noinline, target("avx2")))
+#endif
+std::size_t CollectDirectLaneStarTraversalLanesAvx2(
+        const GmIso4 &rootLocation,
+        const OptimizedCpuMovingEllipsoidPacketPlan &movingPlan,
+        EllipsoidPacketTraversalLanes *lanes) {
+    const auto *planNodes = movingPlan.NodeData();
+    const auto *planLanes = movingPlan.LaneData();
+    alignas(32) float sourceCenterX[EllipsoidPacketWidth];
+    alignas(32) float sourceCenterY[EllipsoidPacketWidth];
+    alignas(32) float sourceCenterZ[EllipsoidPacketWidth];
+    alignas(32) float sourceHalfX[EllipsoidPacketWidth];
+    alignas(32) float sourceHalfY[EllipsoidPacketWidth];
+    alignas(32) float sourceHalfZ[EllipsoidPacketWidth];
+    for (std::size_t laneIndex = 0u;
+         laneIndex < EllipsoidPacketWidth;
+         ++laneIndex) {
+        const GmBoxAligned &source = planLanes[laneIndex].tree->Box();
+        sourceCenterX[laneIndex] = source.center.x;
+        sourceCenterY[laneIndex] = source.center.y;
+        sourceCenterZ[laneIndex] = source.center.z;
+        sourceHalfX[laneIndex] = source.halfExtents.x;
+        sourceHalfY[laneIndex] = source.halfExtents.y;
+        sourceHalfZ[laneIndex] = source.halfExtents.z;
+    }
+
+    const __m256 centerX = _mm256_load_ps(sourceCenterX);
+    const __m256 centerY = _mm256_load_ps(sourceCenterY);
+    const __m256 centerZ = _mm256_load_ps(sourceCenterZ);
+    const __m256 halfX = _mm256_load_ps(sourceHalfX);
+    const __m256 halfY = _mm256_load_ps(sourceHalfY);
+    const __m256 halfZ = _mm256_load_ps(sourceHalfZ);
+    if (!DirectLaneBoxValuesAreBounded(
+                centerX,
+                centerY,
+                centerZ,
+                halfX,
+                halfY,
+                halfZ)) {
+        return 0u;
+    }
+    const GmMat3 &rotation = rootLocation.rotation;
+
+    __m256 transformedCenterX = DirectLaneDot3(
+            centerX, centerY, centerZ,
+            rotation.basisX.x, rotation.basisY.x, rotation.basisZ.x);
+    __m256 transformedCenterY = DirectLaneDot3(
+            centerX, centerY, centerZ,
+            rotation.basisX.y, rotation.basisY.y, rotation.basisZ.y);
+    __m256 transformedCenterZ = DirectLaneDot3(
+            centerX, centerY, centerZ,
+            rotation.basisX.z, rotation.basisY.z, rotation.basisZ.z);
+    transformedCenterX = _mm256_add_ps(
+            transformedCenterX,
+            _mm256_set1_ps(rootLocation.translation.x));
+    transformedCenterY = _mm256_add_ps(
+            transformedCenterY,
+            _mm256_set1_ps(rootLocation.translation.y));
+    transformedCenterZ = _mm256_add_ps(
+            transformedCenterZ,
+            _mm256_set1_ps(rootLocation.translation.z));
+    const __m256 transformedHalfX = DirectLaneAbsoluteDot3(
+            halfX, halfY, halfZ,
+            rotation.basisX.x, rotation.basisY.x, rotation.basisZ.x);
+    const __m256 transformedHalfY = DirectLaneAbsoluteDot3(
+            halfX, halfY, halfZ,
+            rotation.basisX.y, rotation.basisY.y, rotation.basisZ.y);
+    const __m256 transformedHalfZ = DirectLaneAbsoluteDot3(
+            halfX, halfY, halfZ,
+            rotation.basisX.z, rotation.basisY.z, rotation.basisZ.z);
+
+    _mm256_store_ps(sourceCenterX, transformedCenterX);
+    _mm256_store_ps(sourceCenterY, transformedCenterY);
+    _mm256_store_ps(sourceCenterZ, transformedCenterZ);
+    _mm256_store_ps(sourceHalfX, transformedHalfX);
+    _mm256_store_ps(sourceHalfY, transformedHalfY);
+    _mm256_store_ps(sourceHalfZ, transformedHalfZ);
+
+    for (std::size_t laneIndex = 0u;
+         laneIndex < EllipsoidPacketWidth;
+         ++laneIndex) {
+        const OptimizedCpuMovingEllipsoidPacketPlan::Lane &planLane =
+                planLanes[laneIndex];
+        const OptimizedCpuMovingEllipsoidPacketPlan::Node &node =
+                planNodes[laneIndex + 1u];
+        GmIso4 location = node.usesLocalTransform
+                ? node.tree->LocalIso()
+                : rootLocation;
+        if (node.usesLocalTransform) {
+            location.Mult(rootLocation);
+        }
+        const GmBoxAligned bounds = {
+            {
+                sourceCenterX[laneIndex],
+                sourceCenterY[laneIndex],
+                sourceCenterZ[laneIndex],
+            },
+            {
+                sourceHalfX[laneIndex],
+                sourceHalfY[laneIndex],
+                sourceHalfZ[laneIndex],
+            },
+        };
+        lanes->ConstructAt(
+                laneIndex,
+                planLane.tree,
+                planLane.surface,
+                location,
+                bounds,
+                planLane.temporalSlotOrdinal);
+    }
+    return EllipsoidPacketWidth;
+}
+#endif
+
 #if defined(__GNUC__) && !defined(__clang__)
 __attribute__((hot, noinline,
                optimize("no-inline-functions,no-unroll-loops")))
@@ -210,6 +421,7 @@ __attribute__((hot, noinline))
 std::size_t CollectDirectLaneStarTraversalLanes(
         const GmIso4 &movingIso,
         const OptimizedCpuMovingEllipsoidPacketPlan &movingPlan,
+        bool boundsArithmeticIsBounded,
         EllipsoidPacketTraversalLanes *lanes) {
     const auto *planNodes = movingPlan.NodeData();
     const auto *planLanes = movingPlan.LaneData();
@@ -223,6 +435,15 @@ std::size_t CollectDirectLaneStarTraversalLanes(
     }
 
     const std::size_t laneCount = movingPlan.LaneCount();
+#if defined(__i386__) || defined(__x86_64__)
+    if (boundsArithmeticIsBounded &&
+        laneCount == EllipsoidPacketWidth) {
+        return CollectDirectLaneStarTraversalLanesAvx2(
+                rootLocation, movingPlan, lanes);
+    }
+#else
+    (void)boundsArithmeticIsBounded;
+#endif
     for (std::size_t laneIndex = 0u;
          laneIndex < laneCount;
          ++laneIndex) {
@@ -334,10 +555,27 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
     std::size_t laneCount = 0u;
     const bool directLaneStar =
             movingPlan != nullptr && movingPlan->IsDirectLaneStar();
+    const bool directLaneFullPlan = directLaneStar &&
+            movingPlan->LaneCount() == EllipsoidPacketWidth;
+#if defined(__i386__) || defined(__x86_64__)
+    const bool directLaneBoundsArithmeticIsBounded =
+            directLaneFullPlan &&
+            transforms.BroadPhaseArithmeticIsBoundedFor(
+                    movingTree, movingIso);
+#else
+    const bool directLaneBoundsArithmeticIsBounded = false;
+#endif
+    if (directLaneFullPlan &&
+        !directLaneBoundsArithmeticIsBounded) {
+        return false;
+    }
     if (movingPlan != nullptr) {
         laneCount = directLaneStar
                 ? CollectDirectLaneStarTraversalLanes(
-                          movingIso, *movingPlan, &lanes)
+                          movingIso,
+                          *movingPlan,
+                          directLaneBoundsArithmeticIsBounded,
+                          &lanes)
                 : CollectCompiledPlanTraversalLanes(
                           movingIso, *movingPlan, &lanes);
     } else {
@@ -351,6 +589,9 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
             laneCount < 2u) {
             return false;
         }
+    }
+    if (laneCount < 2u) {
+        return false;
     }
 
     const bool certifiedFullPacket =
@@ -452,8 +693,7 @@ bool DetectEllipsoidPacketAgainstStaticGroup(
     // already set, so observable floating status remains unchanged.
     const bool usePacketBoundsOverlap = certifiedFullPacket &&
             (_mm_getcsr() & _MM_EXCEPT_INEXACT) != 0u &&
-            transforms.BroadPhaseArithmeticIsBoundedFor(
-                    movingTree, movingIso);
+            directLaneBoundsArithmeticIsBounded;
 #else
     const bool usePacketBoundsOverlap = false;
 #endif
@@ -763,6 +1003,37 @@ void DetectNativeBinary32CachedColdFallback(
 }
 
 }  // namespace
+
+bool OptimizedCpuCollectDirectLaneStarBoundsForDifferential(
+        const GmIso4 &movingIso,
+        const OptimizedCpuMovingEllipsoidPacketPlan &movingPlan,
+        bool boundsArithmeticIsBounded,
+        std::array<GmBoxAligned,
+                   OptimizedCpuMovingEllipsoidPacketPlan::MaxLaneCount>
+                *bounds) noexcept {
+    if (bounds == nullptr || !boundsArithmeticIsBounded ||
+        !movingPlan.IsDirectLaneStar() ||
+        movingPlan.LaneCount() !=
+                OptimizedCpuMovingEllipsoidPacketPlan::MaxLaneCount ||
+        !OptimizedCpuEllipsoidMeshPacketAvailable()) {
+        return false;
+    }
+    EllipsoidPacketTraversalLanes lanes;
+    if (CollectDirectLaneStarTraversalLanes(
+                movingIso,
+                movingPlan,
+                boundsArithmeticIsBounded,
+                &lanes) !=
+        OptimizedCpuMovingEllipsoidPacketPlan::MaxLaneCount) {
+        return false;
+    }
+    for (std::size_t laneIndex = 0u;
+         laneIndex < OptimizedCpuMovingEllipsoidPacketPlan::MaxLaneCount;
+         ++laneIndex) {
+        (*bounds)[laneIndex] = lanes[laneIndex].bounds;
+    }
+    return true;
+}
 
 void CHmsCollisionManager::SZone::DetectCollisionsCorpusOptimizedCpuCached(
         CHmsCollisionBuffer &collisionBuffer,

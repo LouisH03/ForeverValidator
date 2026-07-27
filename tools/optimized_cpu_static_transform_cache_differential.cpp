@@ -2,8 +2,10 @@
 #include <cfenv>
 #include <cstdio>
 #include <cstring>
+#include <cstdint>
 #include <limits>
 #include <memory>
+#include <random>
 
 #include "engine/physics/dynamics/hms_corpus.h"
 #include "engine/physics/dynamics/hms_item.h"
@@ -12,6 +14,10 @@
 #include "engine/scene/plug_solid.h"
 #include "simulation/backends/optimized_cpu/optimized_cpu_static_surface_transform_cache.h"
 #include "simulation/runtime/replay_deterministic_execution.h"
+
+#if defined(__i386__) || defined(__x86_64__)
+#include <xmmintrin.h>
+#endif
 
 struct OptimizedCpuStaticMeshTriangleSidecarTestAccess {
     static bool RejectsSourceMeshMutation(
@@ -99,6 +105,16 @@ namespace {
 
 bool SameBits(const GmIso4 &lhs, const GmIso4 &rhs) {
     return std::memcmp(&lhs, &rhs, sizeof(lhs)) == 0;
+}
+
+bool SameBits(const GmBoxAligned &lhs, const GmBoxAligned &rhs) {
+    return std::memcmp(&lhs, &rhs, sizeof(lhs)) == 0;
+}
+
+float FloatFromBits(std::uint32_t bits) {
+    float value = 0.0f;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
 }
 
 bool CheckTemporalSpan(
@@ -317,6 +333,298 @@ bool CheckMovingEllipsoidPacketPlan(void) {
     return true;
 }
 
+bool CheckDirectLaneBoundsTransform(void) {
+    if (!OptimizedCpuEllipsoidMeshPacketAvailable()) {
+        return true;
+    }
+
+    constexpr std::size_t LaneCount =
+            OptimizedCpuMovingEllipsoidPacketPlan::MaxLaneCount;
+    std::vector<CMwNodRef<CPlugSurfaceGeom>> geometries;
+    std::vector<CMwNodRef<CPlugSurface>> surfaces;
+    std::array<CPlugTree *, LaneCount> laneTrees{};
+    CPlugTree root;
+    root.SetCollisionEnabled(true);
+    root.SetTreeBounds({{0.0f, 0.0f, 0.0f}, {8.0f, 8.0f, 8.0f}});
+    for (std::size_t laneIndex = 0u;
+         laneIndex < LaneCount;
+         ++laneIndex) {
+        CMwNodRef<CPlugSurfaceGeom> geometry =
+                MakeMwNod<CPlugSurfaceGeom>();
+        auto ellipsoid = std::make_unique<GmSurfEllipsoid>();
+        ellipsoid->radii = {0.5f, 0.75f, 1.0f};
+        geometry->SetGmSurf(std::move(ellipsoid));
+        CMwNodRef<CPlugSurface> surface = MakeMwNod<CPlugSurface>();
+        surface->SetGeometry(geometry.Get());
+        auto tree = std::make_unique<CPlugTree>();
+        tree->SetCollisionEnabled(true);
+        tree->SetSurface(surface.Get());
+        tree->SetTreeBounds(surface->GeomBox());
+        laneTrees[laneIndex] = tree.get();
+        root.AddOwnedChild(std::move(tree));
+        geometries.push_back(geometry);
+        surfaces.push_back(surface);
+    }
+
+    OptimizedCpuMovingEllipsoidPacketPlan plan;
+    if (!plan.TryBuild(root) || !plan.IsDirectLaneStar() ||
+        plan.LaneCount() != LaneCount) {
+        std::fprintf(stderr,
+                     "direct lane bounds fixture was not certified\n");
+        return false;
+    }
+
+    const auto checkOutputs = [&](const char *phase,
+                                  std::size_t caseIndex,
+                                  const GmIso4 &transform,
+                                  bool boundsArithmeticIsBounded) {
+        std::array<GmBoxAligned, LaneCount> reference{};
+        std::array<GmBoxAligned, LaneCount> candidate{};
+        for (std::size_t laneIndex = 0u;
+             laneIndex < LaneCount;
+             ++laneIndex) {
+            laneTrees[laneIndex]->GetTransformedCollisionBox(
+                    transform, reference[laneIndex]);
+        }
+        if (!OptimizedCpuCollectDirectLaneStarBoundsForDifferential(
+                    transform,
+                    plan,
+                    boundsArithmeticIsBounded,
+                    &candidate)) {
+            std::fprintf(stderr,
+                         "direct lane bounds production path unavailable\n");
+            return false;
+        }
+        for (std::size_t laneIndex = 0u;
+             laneIndex < LaneCount;
+             ++laneIndex) {
+            if (!SameBits(reference[laneIndex], candidate[laneIndex])) {
+                std::fprintf(stderr,
+                             "direct lane bounds differ phase=%s case=%zu "
+                             "lane=%zu\n",
+                             phase,
+                             caseIndex,
+                             laneIndex);
+                const float *referenceValues =
+                        reinterpret_cast<const float *>(&reference[laneIndex]);
+                const float *candidateValues =
+                        reinterpret_cast<const float *>(&candidate[laneIndex]);
+                for (std::size_t component = 0u;
+                     component < 6u;
+                     ++component) {
+                    std::uint32_t referenceBits = 0u;
+                    std::uint32_t candidateBits = 0u;
+                    std::memcpy(&referenceBits,
+                                &referenceValues[component],
+                                sizeof(referenceBits));
+                    std::memcpy(&candidateBits,
+                                &candidateValues[component],
+                                sizeof(candidateBits));
+                    std::fprintf(stderr,
+                                 " component=%zu ref=%08x cand=%08x\n",
+                                 component,
+                                 referenceBits,
+                                 candidateBits);
+                }
+                return false;
+            }
+        }
+        return true;
+    };
+
+    std::mt19937 random(0x5e17a11u);
+    std::uniform_real_distribution<float> matrixValue(-4.0f, 4.0f);
+    std::uniform_real_distribution<float> translationValue(-1000.0f,
+                                                            1000.0f);
+    std::uniform_real_distribution<float> centerValue(-500.0f, 500.0f);
+    std::uniform_real_distribution<float> extentValue(-25.0f, 25.0f);
+    constexpr std::size_t RandomCaseCount = 4096u;
+    for (std::size_t caseIndex = 0u;
+         caseIndex < RandomCaseCount;
+         ++caseIndex) {
+        GmIso4 transform;
+        transform.rotation.basisX = {
+            matrixValue(random), matrixValue(random), matrixValue(random)};
+        transform.rotation.basisY = {
+            matrixValue(random), matrixValue(random), matrixValue(random)};
+        transform.rotation.basisZ = {
+            matrixValue(random), matrixValue(random), matrixValue(random)};
+        transform.translation = {
+            translationValue(random),
+            translationValue(random),
+            translationValue(random),
+        };
+        for (CPlugTree *tree : laneTrees) {
+            tree->SetTreeBounds({
+                {
+                    centerValue(random),
+                    centerValue(random),
+                    centerValue(random),
+                },
+                {
+                    extentValue(random),
+                    extentValue(random),
+                    extentValue(random),
+                },
+            });
+        }
+        if (!checkOutputs("random", caseIndex, transform, true)) {
+            return false;
+        }
+    }
+
+    const std::array<std::uint32_t, 12u> specialBits = {
+        0x00000000u,
+        0x80000000u,
+        0x00000001u,
+        0x007fffffu,
+        0x00800000u,
+        0x3f800000u,
+        0xbf800000u,
+        0x7f7fffffu,
+        0xff7fffffu,
+        0x7f800000u,
+        0x7fc12345u,
+        0xffc54321u,
+    };
+    constexpr std::size_t SpecialCaseCount = 48u;
+    for (std::size_t caseIndex = 0u;
+         caseIndex < SpecialCaseCount;
+         ++caseIndex) {
+        const auto value = [&](std::size_t offset) {
+            return FloatFromBits(
+                    specialBits[(caseIndex + offset) % specialBits.size()]);
+        };
+        GmIso4 transform;
+        transform.rotation.basisX = {value(0u), value(1u), value(2u)};
+        transform.rotation.basisY = {value(3u), value(4u), value(5u)};
+        transform.rotation.basisZ = {value(6u), value(7u), value(8u)};
+        transform.translation = {value(9u), value(10u), value(11u)};
+        for (std::size_t laneIndex = 0u;
+             laneIndex < LaneCount;
+             ++laneIndex) {
+            laneTrees[laneIndex]->SetTreeBounds({
+                {
+                    value(laneIndex + 1u),
+                    value(laneIndex + 2u),
+                    value(laneIndex + 3u),
+                },
+                {
+                    value(laneIndex + 4u),
+                    value(laneIndex + 5u),
+                    value(laneIndex + 6u),
+                },
+            });
+        }
+        std::array<GmBoxAligned, LaneCount> rejectedOutput{};
+        if (OptimizedCpuCollectDirectLaneStarBoundsForDifferential(
+                    transform, plan, false, &rejectedOutput)) {
+            std::fprintf(stderr,
+                         "unbounded direct lane bounds were accepted\n");
+            return false;
+        }
+        if (OptimizedCpuCollectDirectLaneStarBoundsForDifferential(
+                    transform, plan, true, &rejectedOutput)) {
+            std::fprintf(stderr,
+                         "live unbounded direct lane bounds were accepted\n");
+            return false;
+        }
+    }
+
+    const int originalRounding = std::fegetround();
+#if defined(__i386__) || defined(__x86_64__)
+    const unsigned int originalMxcsr = _mm_getcsr();
+#endif
+    const int roundingModes[] = {
+        FE_TONEAREST,
+        FE_DOWNWARD,
+        FE_UPWARD,
+        FE_TOWARDZERO,
+    };
+    std::size_t floatingEnvironmentCases = 0u;
+    for (int roundingMode : roundingModes) {
+        if (std::fesetround(roundingMode) != 0) {
+            return false;
+        }
+#if defined(__i386__) || defined(__x86_64__)
+        const unsigned int control = _mm_getcsr() & ~0x3fu;
+        for (unsigned int initialStatus : {0u, 0x05u, 0x3fu}) {
+            GmIso4 transform = FirstTransform();
+            for (std::size_t laneIndex = 0u;
+                 laneIndex < LaneCount;
+                 ++laneIndex) {
+                laneTrees[laneIndex]->SetTreeBounds({
+                    {
+                        static_cast<float>(laneIndex) - 3.5f,
+                        0.125f * static_cast<float>(laneIndex + 1u),
+                        -17.0f + static_cast<float>(laneIndex),
+                    },
+                    {
+                        0.25f + static_cast<float>(laneIndex),
+                        1.0f / static_cast<float>(laneIndex + 3u),
+                        2.0f + 0.5f * static_cast<float>(laneIndex),
+                    },
+                });
+            }
+
+            std::array<GmBoxAligned, LaneCount> reference{};
+            std::array<GmBoxAligned, LaneCount> candidate{};
+            std::feclearexcept(FE_ALL_EXCEPT);
+            _mm_setcsr(control | initialStatus);
+            for (std::size_t laneIndex = 0u;
+                 laneIndex < LaneCount;
+                 ++laneIndex) {
+                laneTrees[laneIndex]->GetTransformedCollisionBox(
+                        transform, reference[laneIndex]);
+            }
+            const int referenceExceptions =
+                    std::fetestexcept(FE_ALL_EXCEPT);
+            const unsigned int referenceMxcsr = _mm_getcsr() & 0x3fu;
+
+            std::feclearexcept(FE_ALL_EXCEPT);
+            _mm_setcsr(control | initialStatus);
+            if (!OptimizedCpuCollectDirectLaneStarBoundsForDifferential(
+                        transform, plan, true, &candidate)) {
+                _mm_setcsr(originalMxcsr);
+                std::fesetround(originalRounding);
+                return false;
+            }
+            const int candidateExceptions =
+                    std::fetestexcept(FE_ALL_EXCEPT);
+            const unsigned int candidateMxcsr = _mm_getcsr() & 0x3fu;
+            ++floatingEnvironmentCases;
+            for (std::size_t laneIndex = 0u;
+                 laneIndex < LaneCount;
+                 ++laneIndex) {
+                if (!SameBits(reference[laneIndex], candidate[laneIndex]) ||
+                    referenceExceptions != candidateExceptions ||
+                    referenceMxcsr != candidateMxcsr) {
+                    std::fprintf(
+                            stderr,
+                            "direct lane bounds fenv case differs\n");
+                    _mm_setcsr(originalMxcsr);
+                    std::fesetround(originalRounding);
+                    return false;
+                }
+            }
+        }
+#endif
+    }
+#if defined(__i386__) || defined(__x86_64__)
+    _mm_setcsr(originalMxcsr);
+#endif
+    if (std::fesetround(originalRounding) != 0) {
+        return false;
+    }
+    std::printf(
+            "direct_lane_bounds_random_cases=%zu special_cases=%zu "
+            "fenv_cases=%zu result=identical\n",
+            RandomCaseCount,
+            SpecialCaseCount,
+            floatingEnvironmentCases);
+    return true;
+}
+
 }  // namespace
 
 int main(void) {
@@ -325,7 +633,8 @@ int main(void) {
         std::fprintf(stderr, "could not establish deterministic execution\n");
         return 1;
     }
-    if (!CheckMovingEllipsoidPacketPlan()) {
+    if (!CheckMovingEllipsoidPacketPlan() ||
+        !CheckDirectLaneBoundsTransform()) {
         return 1;
     }
 

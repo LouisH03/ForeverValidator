@@ -232,3 +232,15 @@ private:
     std::vector<const GmSurfMesh *> unavailableTriangleSidecarMeshes_;
     OptimizedCpuMovingEllipsoidPacketPlan movingEllipsoidPacketPlan_;
 };
+
+// Focused differential hook for the fixed-width direct-star collector. This
+// invokes the same production lane path and exposes only its transformed
+// bounds, allowing exact arithmetic and floating-status comparison against
+// eight scalar GmBoxAligned::SetMult calls.
+bool OptimizedCpuCollectDirectLaneStarBoundsForDifferential(
+        const GmIso4 &movingIso,
+        const OptimizedCpuMovingEllipsoidPacketPlan &movingPlan,
+        bool boundsArithmeticIsBounded,
+        std::array<GmBoxAligned,
+                   OptimizedCpuMovingEllipsoidPacketPlan::MaxLaneCount>
+                *bounds) noexcept;
