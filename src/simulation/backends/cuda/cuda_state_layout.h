@@ -142,6 +142,9 @@ struct CudaRacePhysicsState {
     std::uint32_t replayPlayMode = 0u;
     std::uint32_t replayNbLaps = 1u;
     ReplayRaceProgress progress{};
+};
+
+struct CudaStuntState {
     bool replayStuntsEnabled = false;
     bool replayStuntStateAvailable = false;
     std::uint32_t replayStuntsTimeLimitMs = 0u;
@@ -169,11 +172,12 @@ struct CudaRacePhysicsState {
 };
 
 struct CudaRaceState : CudaRacePhysicsState {
+    CudaStuntState stunts{};
     CudaFixedArray<ReplayStuntEvent, 2048u> stuntEvents{};
 };
 
 struct CudaCandidatePhysicsState {
-    static constexpr std::uint32_t SchemaVersion = 4u;
+    static constexpr std::uint32_t SchemaVersion = 5u;
 
     std::uint32_t schemaVersion = SchemaVersion;
     std::uint32_t candidateId = 0u;
@@ -191,12 +195,13 @@ struct CudaCandidatePhysicsState {
 };
 
 struct CudaCandidateState : CudaCandidatePhysicsState {
+    CudaStuntState stunts{};
     CudaFixedArray<ReplayStuntEvent, 2048u> stuntEvents{};
 };
 
 static_assert(std::is_standard_layout_v<CudaCandidatePhysicsState>);
 static_assert(std::is_trivially_copyable_v<CudaCandidatePhysicsState>);
-static_assert(sizeof(CudaCandidatePhysicsState) < 16u * 1024u);
+static_assert(sizeof(CudaCandidatePhysicsState) < 8u * 1024u);
 static_assert(std::is_trivially_copyable_v<CudaCandidateState>);
 static_assert(sizeof(CudaCandidateState) < 192u * 1024u);
 

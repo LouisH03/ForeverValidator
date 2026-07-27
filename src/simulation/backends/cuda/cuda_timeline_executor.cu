@@ -238,7 +238,8 @@ __global__ void ExecuteTimelineKernel(
                                 configurationData))) {
                 ++result.executedRespawnCount;
                 ++state.incrementalRespawnCount;
-                cuda::stunts::ApplyRespawnPenalty(state.race);
+                cuda::stunts::ApplyRespawnPenalty(
+                        state.stunts);
             }
         }
         const cuda::physics::Status physicsStatus =

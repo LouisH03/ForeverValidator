@@ -215,6 +215,7 @@ CudaStateConversionResult EncodeVehicle(
 CudaStateConversionResult EncodeRace(
         const CTrackManiaRace::RuntimeClone &source,
         CudaRacePhysicsState &destination,
+        CudaStuntState &stunts,
         CudaFixedArray<ReplayStuntEvent, 2048u> &stuntEvents) {
     if (source.checkpointSlotsPassed.size() >
         std::size(destination.checkpointSlotsPassed.values)) {
@@ -242,48 +243,48 @@ CudaStateConversionResult EncodeRace(
             static_cast<std::uint32_t>(source.replayPlayMode);
     destination.replayNbLaps = source.replayNbLaps;
     destination.progress = source.progress;
-    destination.replayStuntsEnabled = source.replayStuntsEnabled;
-    destination.replayStuntStateAvailable =
+    stunts.replayStuntsEnabled = source.replayStuntsEnabled;
+    stunts.replayStuntStateAvailable =
             source.replayStuntStateAvailable;
-    destination.replayStuntsTimeLimitMs =
+    stunts.replayStuntsTimeLimitMs =
             source.replayStuntsTimeLimitMs;
-    destination.replayStuntsRaceStartTimeMs =
+    stunts.replayStuntsRaceStartTimeMs =
             source.replayStuntsRaceStartTimeMs;
-    destination.replayStuntState = source.replayStuntState;
+    stunts.replayStuntState = source.replayStuntState;
     std::copy(source.replayStuntInputHistory.begin(),
               source.replayStuntInputHistory.end(),
-              destination.stuntInputHistory);
-    destination.stuntInputHistorySize =
+              stunts.stuntInputHistory);
+    stunts.stuntInputHistorySize =
             static_cast<std::uint32_t>(
                     source.replayStuntInputHistorySize);
     std::copy(source.replayStuntLocationHistory.begin(),
               source.replayStuntLocationHistory.end(),
-              destination.stuntLocationHistory);
-    destination.stuntLocationHistorySize =
+              stunts.stuntLocationHistory);
+    stunts.stuntLocationHistorySize =
             static_cast<std::uint32_t>(
                     source.replayStuntLocationHistorySize);
-    destination.stuntPreviousLocation =
+    stunts.stuntPreviousLocation =
             source.replayStuntPreviousLocation;
-    destination.stuntTakeoffLocation =
+    stunts.stuntTakeoffLocation =
             source.replayStuntTakeoffLocation;
-    destination.stuntRotation = source.replayStuntRotation;
-    destination.stuntLandingDirection =
+    stunts.stuntRotation = source.replayStuntRotation;
+    stunts.stuntLandingDirection =
             source.replayStuntLandingDirection;
-    destination.stuntTakeoffTick = source.replayStuntTakeoffTick;
-    destination.stuntLandingTick = source.replayStuntLandingTick;
-    destination.stuntPreviousLandingTick =
+    stunts.stuntTakeoffTick = source.replayStuntTakeoffTick;
+    stunts.stuntLandingTick = source.replayStuntLandingTick;
+    stunts.stuntPreviousLandingTick =
             source.replayStuntPreviousLandingTick;
-    destination.stuntChain = source.replayStuntChain;
-    destination.stuntComboWindowMs = source.replayStuntComboWindowMs;
-    destination.stuntInProgress = source.replayStuntInProgress;
-    destination.stuntMasterJump = source.replayStuntMasterJump;
-    destination.stuntBadLanding = source.replayStuntBadLanding;
+    stunts.stuntChain = source.replayStuntChain;
+    stunts.stuntComboWindowMs = source.replayStuntComboWindowMs;
+    stunts.stuntInProgress = source.replayStuntInProgress;
+    stunts.stuntMasterJump = source.replayStuntMasterJump;
+    stunts.stuntBadLanding = source.replayStuntBadLanding;
     EncodeOptional(source.replayStuntScoreAtTimeLimit,
-                   destination.stuntScoreAtTimeLimit);
+                   stunts.stuntScoreAtTimeLimit);
     std::copy(source.replayStuntFigureScores.begin(),
               source.replayStuntFigureScores.end(),
-              destination.stuntFigureScores);
-    destination.stuntsScore = source.stuntsScore;
+              stunts.stuntFigureScores);
+    stunts.stuntsScore = source.stuntsScore;
     stuntEvents.count =
             static_cast<std::uint32_t>(source.stuntEvents.size());
     for (std::size_t index = 0u;
@@ -389,6 +390,7 @@ void DecodeVehicle(const CudaVehicleState &source,
 
 void DecodeRace(
                 const CudaRacePhysicsState &source,
+                const CudaStuntState &stunts,
                 const CudaFixedArray<ReplayStuntEvent, 2048u>
                         &stuntEvents,
                 CTrackManiaRace::RuntimeClone &destination) {
@@ -408,46 +410,46 @@ void DecodeRace(
             static_cast<EChallengePlayMode>(source.replayPlayMode);
     destination.replayNbLaps = source.replayNbLaps;
     destination.progress = source.progress;
-    destination.replayStuntsEnabled = source.replayStuntsEnabled;
+    destination.replayStuntsEnabled = stunts.replayStuntsEnabled;
     destination.replayStuntStateAvailable =
-            source.replayStuntStateAvailable;
+            stunts.replayStuntStateAvailable;
     destination.replayStuntsTimeLimitMs =
-            source.replayStuntsTimeLimitMs;
+            stunts.replayStuntsTimeLimitMs;
     destination.replayStuntsRaceStartTimeMs =
-            source.replayStuntsRaceStartTimeMs;
-    destination.replayStuntState = source.replayStuntState;
-    std::copy(std::begin(source.stuntInputHistory),
-              std::end(source.stuntInputHistory),
+            stunts.replayStuntsRaceStartTimeMs;
+    destination.replayStuntState = stunts.replayStuntState;
+    std::copy(std::begin(stunts.stuntInputHistory),
+              std::end(stunts.stuntInputHistory),
               destination.replayStuntInputHistory.begin());
     destination.replayStuntInputHistorySize =
-            source.stuntInputHistorySize;
-    std::copy(std::begin(source.stuntLocationHistory),
-              std::end(source.stuntLocationHistory),
+            stunts.stuntInputHistorySize;
+    std::copy(std::begin(stunts.stuntLocationHistory),
+              std::end(stunts.stuntLocationHistory),
               destination.replayStuntLocationHistory.begin());
     destination.replayStuntLocationHistorySize =
-            source.stuntLocationHistorySize;
+            stunts.stuntLocationHistorySize;
     destination.replayStuntPreviousLocation =
-            source.stuntPreviousLocation;
+            stunts.stuntPreviousLocation;
     destination.replayStuntTakeoffLocation =
-            source.stuntTakeoffLocation;
-    destination.replayStuntRotation = source.stuntRotation;
+            stunts.stuntTakeoffLocation;
+    destination.replayStuntRotation = stunts.stuntRotation;
     destination.replayStuntLandingDirection =
-            source.stuntLandingDirection;
-    destination.replayStuntTakeoffTick = source.stuntTakeoffTick;
-    destination.replayStuntLandingTick = source.stuntLandingTick;
+            stunts.stuntLandingDirection;
+    destination.replayStuntTakeoffTick = stunts.stuntTakeoffTick;
+    destination.replayStuntLandingTick = stunts.stuntLandingTick;
     destination.replayStuntPreviousLandingTick =
-            source.stuntPreviousLandingTick;
-    destination.replayStuntChain = source.stuntChain;
-    destination.replayStuntComboWindowMs = source.stuntComboWindowMs;
-    destination.replayStuntInProgress = source.stuntInProgress;
-    destination.replayStuntMasterJump = source.stuntMasterJump;
-    destination.replayStuntBadLanding = source.stuntBadLanding;
+            stunts.stuntPreviousLandingTick;
+    destination.replayStuntChain = stunts.stuntChain;
+    destination.replayStuntComboWindowMs = stunts.stuntComboWindowMs;
+    destination.replayStuntInProgress = stunts.stuntInProgress;
+    destination.replayStuntMasterJump = stunts.stuntMasterJump;
+    destination.replayStuntBadLanding = stunts.stuntBadLanding;
     destination.replayStuntScoreAtTimeLimit =
-            DecodeOptional(source.stuntScoreAtTimeLimit);
-    std::copy(std::begin(source.stuntFigureScores),
-              std::end(source.stuntFigureScores),
+            DecodeOptional(stunts.stuntScoreAtTimeLimit);
+    std::copy(std::begin(stunts.stuntFigureScores),
+              std::end(stunts.stuntFigureScores),
               destination.replayStuntFigureScores.begin());
-    destination.stuntsScore = source.stuntsScore;
+    destination.stuntsScore = stunts.stuntsScore;
     destination.stuntEvents.assign(
             stuntEvents.values,
             stuntEvents.values + stuntEvents.count);
@@ -463,7 +465,8 @@ CudaStateConversionResult EncodeCudaRaceState(
     }
     *destination = CudaRaceState{};
     return EncodeRace(
-            source, *destination, destination->stuntEvents);
+            source, *destination, destination->stunts,
+            destination->stuntEvents);
 }
 
 CudaStateConversionResult DecodeCudaRaceState(
@@ -482,7 +485,9 @@ CudaStateConversionResult DecodeCudaRaceState(
     }
     try {
         CTrackManiaRace::RuntimeClone result;
-        DecodeRace(source, source.stuntEvents, result);
+        DecodeRace(
+                source, source.stunts,
+                source.stuntEvents, result);
         *destination = std::move(result);
         return CudaStateConversionResult::Success;
     } catch (const std::bad_alloc &) {
@@ -522,6 +527,7 @@ CudaStateConversionResult EncodeCudaCandidateState(
     }
     return EncodeRace(
             source.race, destination->race,
+            destination->stunts,
             destination->stuntEvents);
 }
 
@@ -556,7 +562,8 @@ CudaStateConversionResult DecodeCudaCandidateState(
         DecodeBody(source.body, result.runtime.body);
         DecodeVehicle(source.vehicle, result.runtime.vehicle);
         DecodeRace(
-                source.race, source.stuntEvents,
+                source.race, source.stunts,
+                source.stuntEvents,
                 result.race);
         result.incrementalRespawnCount =
                 source.incrementalRespawnCount;

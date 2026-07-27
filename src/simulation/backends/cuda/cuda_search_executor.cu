@@ -1578,7 +1578,10 @@ __global__ __launch_bounds__(
                                 CudaPackedStaticConfigurationHeader *>(
                                 configurationData))) {
                 ++state.incrementalRespawnCount;
-                cuda::stunts::ApplyRespawnPenalty(state.race);
+                if constexpr (SimulateStunts) {
+                    cuda::stunts::ApplyRespawnPenalty(
+                            state.stunts);
+                }
             }
         }
         const cuda::physics::Status physicsStatus =
@@ -1740,7 +1743,8 @@ __global__ void CaptureSearchWinnerStateKernel(
                                 CudaPackedStaticConfigurationHeader *>(
                                 configurationData))) {
                 ++state.incrementalRespawnCount;
-                cuda::stunts::ApplyRespawnPenalty(state.race);
+                cuda::stunts::ApplyRespawnPenalty(
+                        state.stunts);
             }
         }
         const cuda::physics::Status physicsStatus =

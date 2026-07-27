@@ -2410,7 +2410,7 @@ PhysicsSandboxCudaSearchSession::Impl::Convert(
     }
     view.respawnCount = best.state.incrementalRespawnCount;
     if (best.state.stuntsEnabled) {
-        view.stuntsScore = best.state.race.stuntsScore;
+        view.stuntsScore = best.state.stunts.stuntsScore;
     }
     result.bestState = view;
 

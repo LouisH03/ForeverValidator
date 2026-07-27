@@ -76,10 +76,10 @@ std::optional<std::size_t> SelectCudaTimelineWinner(
                 static_cast<std::uint32_t>(
                         EChallengePlayMode::Stunts);
         if (stunts &&
-            left.finalState.race.stuntsScore !=
-                    right.finalState.race.stuntsScore) {
-            return left.finalState.race.stuntsScore >
-                   right.finalState.race.stuntsScore;
+            left.finalState.stunts.stuntsScore !=
+                    right.finalState.stunts.stuntsScore) {
+            return left.finalState.stunts.stuntsScore >
+                   right.finalState.stunts.stuntsScore;
         }
         const ReplayRaceProgress &leftRace =
                 left.finalState.race.progress;

@@ -29,7 +29,7 @@ __global__ void ExecuteStuntCommandsKernel(
                     *race, commands[index].state);
             break;
         case CudaStuntCommandKind::RespawnPenalty:
-            cuda::stunts::ApplyRespawnPenalty(*race);
+            cuda::stunts::ApplyRespawnPenalty(race->stunts);
             break;
         case CudaStuntCommandKind::TimePenalty:
             status = cuda::stunts::ApplyTimePenalty(

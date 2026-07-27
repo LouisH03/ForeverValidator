@@ -60,9 +60,9 @@ int main() {
                 static_cast<std::uint32_t>(
                         EChallengePlayMode::Stunts);
     }
-    ranked[0].finalState.race.stuntsScore = 100u;
-    ranked[1].finalState.race.stuntsScore = 250u;
-    ranked[2].finalState.race.stuntsScore = 200u;
+    ranked[0].finalState.stunts.stuntsScore = 100u;
+    ranked[1].finalState.stunts.stuntsScore = 250u;
+    ranked[2].finalState.stunts.stuntsScore = 200u;
     if (SelectCudaTimelineWinner(ranked) != 1u) {
         std::cerr << "stunt candidate winner ordering is not exact\n";
         return 1;

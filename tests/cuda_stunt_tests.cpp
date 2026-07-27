@@ -177,22 +177,22 @@ int main() {
         std::cerr << "stunt state mismatch at byte " << mismatch
                   << " expected=" << static_cast<unsigned>(cpuBytes[mismatch])
                   << " actual=" << static_cast<unsigned>(gpuBytes[mismatch])
-                  << " scores=" << expected.stuntsScore << "/"
-                  << gpu.finalState.stuntsScore
+                  << " scores=" << expected.stunts.stuntsScore << "/"
+                  << gpu.finalState.stunts.stuntsScore
                   << " events=" << expected.stuntEvents.count << "/"
                   << gpu.finalState.stuntEvents.count << '\n';
         return 1;
     }
     if (expected.stuntEvents.count < 2u ||
-        !expected.stuntScoreAtTimeLimit.present ||
-        expected.stuntInputHistorySize != 32u ||
-        expected.stuntLocationHistorySize != 20u) {
+        !expected.stunts.stuntScoreAtTimeLimit.present ||
+        expected.stunts.stuntInputHistorySize != 32u ||
+        expected.stunts.stuntLocationHistorySize != 20u) {
         std::cerr << "synthetic stunt coverage did not exercise "
                      "events, latching, and bounded histories\n";
         return 1;
     }
     CudaRaceState overflowInitial = initial;
-    overflowInitial.replayStuntsEnabled = true;
+    overflowInitial.stunts.replayStuntsEnabled = true;
     overflowInitial.stuntEvents.count = 2048u;
     CudaStuntCommand overflowCommand;
     overflowCommand.kind = CudaStuntCommandKind::TimePenalty;

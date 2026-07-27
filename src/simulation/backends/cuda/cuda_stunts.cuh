@@ -203,7 +203,7 @@ __device__ inline std::uint32_t RotationCount(
                        : (magnitude + HalfPi) / Pi);
 }
 
-__device__ inline void Reset(CudaRacePhysicsState &race) {
+__device__ inline void Reset(CudaStuntState &race) {
     race.stuntRotation = {};
     race.stuntTakeoffTick = UINT32_MAX;
     race.stuntLandingTick = UINT32_MAX;
@@ -221,7 +221,7 @@ __device__ inline void Reset(CudaRacePhysicsState &race) {
     }
 }
 
-__device__ inline void PushInput(CudaRacePhysicsState &race) {
+__device__ inline void PushInput(CudaStuntState &race) {
     CTrackManiaRace::ReplayStuntInputSnapshot snapshot;
     snapshot.tickTimeMs = race.replayStuntState.tickTimeMs;
     snapshot.lastChangeTimeMs =
@@ -238,7 +238,7 @@ __device__ inline void PushInput(CudaRacePhysicsState &race) {
     }
 }
 
-__device__ inline void PushLocation(CudaRacePhysicsState &race) {
+__device__ inline void PushLocation(CudaStuntState &race) {
     constexpr std::uint32_t Capacity = 20u;
     if (race.stuntLocationHistorySize == Capacity) {
         for (std::uint32_t index = 1u; index < Capacity; ++index) {
@@ -254,7 +254,7 @@ __device__ inline void PushLocation(CudaRacePhysicsState &race) {
 }
 
 __device__ inline bool IsStuntTimeOver(
-        const CudaRacePhysicsState &race,
+        const CudaStuntState &race,
         std::uint32_t tick) {
     if (race.replayStuntsRaceStartTimeMs == UINT32_MAX ||
         race.replayStuntsRaceStartTimeMs >= tick) {
@@ -265,7 +265,7 @@ __device__ inline bool IsStuntTimeOver(
 }
 
 __device__ inline bool IsMasterJump(
-        const CudaRacePhysicsState &race,
+        const CudaStuntState &race,
         std::uint32_t startTimeMs,
         std::uint32_t endTimeMs) {
     const std::uint32_t queryStart =
@@ -323,7 +323,7 @@ __device__ inline Status AppendEvent(
     return Status::Success;
 }
 
-__device__ inline void UpdateRotation(CudaRacePhysicsState &race) {
+__device__ inline void UpdateRotation(CudaStuntState &race) {
     const GmMat3 relative = MultiplyByTranspose(
             race.replayStuntState.vehicleLocation.rotation,
             race.stuntPreviousLocation.rotation);
@@ -339,7 +339,7 @@ __device__ inline void UpdateRotation(CudaRacePhysicsState &race) {
 }
 
 __device__ inline Status Compute(
-        CudaRacePhysicsState &race,
+        CudaStuntState &race,
         CudaFixedArray<ReplayStuntEvent, 2048u> &stuntEvents) {
     if (!race.replayStuntsEnabled ||
         race.stuntLandingTick == UINT32_MAX) {
@@ -535,28 +535,29 @@ __device__ inline void Configure(
         CudaRaceState &race,
         bool enabled,
         std::uint32_t timeLimitMs) {
-    race.replayStuntsEnabled = enabled;
-    race.replayStuntStateAvailable = false;
-    race.replayStuntsTimeLimitMs = timeLimitMs;
-    race.replayStuntsRaceStartTimeMs = UINT32_MAX;
-    race.replayStuntState = {};
-    race.stuntInputHistorySize = 0u;
-    race.stuntLocationHistorySize = 0u;
-    race.stuntPreviousLocation = detail::IdentityIso();
-    race.stuntTakeoffLocation = detail::IdentityIso();
-    race.stuntPreviousLandingTick = UINT32_MAX;
-    race.stuntChain = 0u;
-    race.stuntComboWindowMs = 0u;
-    race.stuntScoreAtTimeLimit = {};
+    CudaStuntState &stunts = race.stunts;
+    stunts.replayStuntsEnabled = enabled;
+    stunts.replayStuntStateAvailable = false;
+    stunts.replayStuntsTimeLimitMs = timeLimitMs;
+    stunts.replayStuntsRaceStartTimeMs = UINT32_MAX;
+    stunts.replayStuntState = {};
+    stunts.stuntInputHistorySize = 0u;
+    stunts.stuntLocationHistorySize = 0u;
+    stunts.stuntPreviousLocation = detail::IdentityIso();
+    stunts.stuntTakeoffLocation = detail::IdentityIso();
+    stunts.stuntPreviousLandingTick = UINT32_MAX;
+    stunts.stuntChain = 0u;
+    stunts.stuntComboWindowMs = 0u;
+    stunts.stuntScoreAtTimeLimit = {};
     for (std::uint32_t index = 0u; index < 39u; ++index) {
-        race.stuntFigureScores[index] = 0u;
+        stunts.stuntFigureScores[index] = 0u;
     }
-    race.stuntsScore = 0u;
+    stunts.stuntsScore = 0u;
     race.stuntEvents = {};
-    detail::Reset(race);
+    detail::Reset(stunts);
 }
 
-__device__ inline void ApplyRespawnPenalty(CudaRacePhysicsState &race) {
+__device__ inline void ApplyRespawnPenalty(CudaStuntState &race) {
     if (!race.replayStuntsEnabled) return;
     const std::uint32_t penalty =
             race.stuntsScore < detail::RespawnPenalty
@@ -569,25 +570,26 @@ __device__ inline void ApplyRespawnPenalty(CudaRacePhysicsState &race) {
 __device__ inline Status ApplyTimePenalty(
         CudaRaceState &race,
         std::uint32_t overtimeMs) {
-    if (!race.replayStuntsEnabled) return Status::Success;
+    CudaStuntState &stunts = race.stunts;
+    if (!stunts.replayStuntsEnabled) return Status::Success;
     const std::uint32_t penalty = overtimeMs / 100u;
     const std::uint32_t scoreAtTimeLimit =
-            race.stuntScoreAtTimeLimit.present
-                    ? race.stuntScoreAtTimeLimit.value
-                    : race.stuntsScore;
-    race.stuntsScore =
+            stunts.stuntScoreAtTimeLimit.present
+                    ? stunts.stuntScoreAtTimeLimit.value
+                    : stunts.stuntsScore;
+    stunts.stuntsScore =
             penalty < scoreAtTimeLimit
                     ? scoreAtTimeLimit - penalty
                     : 0u;
     if (penalty == 0u) return Status::Success;
-    race.stuntComboWindowMs = detail::InterComboDelay;
+    stunts.stuntComboWindowMs = detail::InterComboDelay;
     return detail::AppendEvent(
             race.stuntEvents, 34u, 0u, penalty, 0.0f,
             false, false, false, 0u);
 }
 
 __device__ inline Status UpdateState(
-        CudaRacePhysicsState &race,
+        CudaStuntState &race,
         CudaFixedArray<ReplayStuntEvent, 2048u> &stuntEvents,
         const ReplayStuntSimulationState &state) {
     race.replayStuntState = state;
@@ -681,7 +683,7 @@ __device__ inline Status UpdateState(
         CudaRaceState &race,
         const ReplayStuntSimulationState &state) {
     return UpdateState(
-            race, race.stuntEvents, state);
+            race.stunts, race.stuntEvents, state);
 }
 
 __device__ inline Status Update(
@@ -715,7 +717,7 @@ __device__ inline Status Update(
     state.inputLastChangeTimeMs =
             tick.stuntsInput.lastChangeTimeMs;
     return UpdateState(
-            candidate.race, candidate.stuntEvents, state);
+            candidate.stunts, candidate.stuntEvents, state);
 }
 
 }  // namespace forevervalidator::simulation::cuda::stunts
