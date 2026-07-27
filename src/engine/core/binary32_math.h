@@ -47,10 +47,19 @@ inline float CIsinQuarterPi(void) noexcept {
     std::memcpy(&value, &QuarterPiSineEncoding, sizeof(value));
 #if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || \
         defined(_M_X64)
-    const unsigned int current = _mm_getcsr();
-    if ((current & _MM_EXCEPT_INEXACT) == 0u) {
-        _mm_setcsr(current | _MM_EXCEPT_INEXACT);
-    }
+#if defined(__GNUC__) || defined(__clang__)
+    float numerator = 1.0f;
+    const float denominator = 3.0f;
+    // The exact CIsin(QuarterPi) path always raises only FE_INEXACT. A benign
+    // scalar division reproduces that sticky-status effect without the
+    // serializing MXCSR read/conditional write; its rounded result is ignored.
+    __asm__ volatile(
+            "divss %1, %0"
+            : "+x"(numerator)
+            : "x"(denominator));
+#else
+    std::feraiseexcept(FE_INEXACT);
+#endif
 #else
     std::feraiseexcept(FE_INEXACT);
 #endif
