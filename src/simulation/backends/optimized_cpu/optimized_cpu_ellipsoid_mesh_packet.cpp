@@ -65,7 +65,7 @@ bool BuildPreparedPacket(
     const std::uint32_t laneMask =
             (1u << static_cast<unsigned int>(laneCount)) - 1u;
     requestedMask &= laneMask;
-    OptimizedCpuPreparedEllipsoidMeshPacket candidate;
+    OptimizedCpuPreparedEllipsoidMeshPacket candidate{};
     candidate.laneCount = laneCount;
     candidate.preparedMask = requestedMask;
     if (requestedMask == 0u) {
