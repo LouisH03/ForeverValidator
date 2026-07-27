@@ -1834,7 +1834,7 @@ struct OptimizedCpuVehicleForceAccess {
     }
 
     template<bool NativeBinary32>
-    static void ComputeForces(
+    static FV_E019_HOT_NOINLINE void ComputeForces(
             CSceneVehicleCar &car,
             CHmsDyna &dyna,
             float dt,
