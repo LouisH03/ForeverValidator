@@ -1,4 +1,5 @@
 #include <array>
+#include <cfenv>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -6,6 +7,10 @@
 #include <limits>
 #include <memory>
 #include <vector>
+
+#if defined(__i386__) || defined(__x86_64__)
+#include <xmmintrin.h>
+#endif
 
 #include "engine/physics/geometry/gm_surface.h"
 #include "engine/physics/geometry/plug_surface.h"
@@ -16,6 +21,59 @@ namespace {
 
 constexpr std::size_t ChildCount = 8u;
 constexpr std::size_t RandomCaseCount = 4096u;
+constexpr std::size_t FloatingEnvironmentCaseCount = 16u;
+
+class FloatingEnvironmentRestore final {
+public:
+    FloatingEnvironmentRestore(void) noexcept {
+        captured_ = std::fegetenv(&environment_) == 0;
+#if defined(__i386__) || defined(__x86_64__)
+        mxcsr_ = _mm_getcsr();
+#endif
+    }
+
+    ~FloatingEnvironmentRestore(void) {
+        if (!captured_) {
+            return;
+        }
+        std::fesetenv(&environment_);
+#if defined(__i386__) || defined(__x86_64__)
+        _mm_setcsr(mxcsr_);
+#endif
+    }
+
+    bool Captured(void) const noexcept {
+        return captured_;
+    }
+
+private:
+    std::fenv_t environment_{};
+#if defined(__i386__) || defined(__x86_64__)
+    unsigned int mxcsr_ = 0u;
+#endif
+    bool captured_ = false;
+};
+
+struct FloatingStatus {
+    int exceptions = 0;
+    unsigned int mxcsrStatus = 0u;
+};
+
+void ClearFloatingStatus(void) {
+    std::feclearexcept(FE_ALL_EXCEPT);
+#if defined(__i386__) || defined(__x86_64__)
+    _mm_setcsr(_mm_getcsr() & ~0x3fu);
+#endif
+}
+
+FloatingStatus ReadFloatingStatus(void) {
+    FloatingStatus result;
+    result.exceptions = std::fetestexcept(FE_ALL_EXCEPT);
+#if defined(__i386__) || defined(__x86_64__)
+    result.mxcsrStatus = _mm_getcsr() & 0x3fu;
+#endif
+    return result;
+}
 
 struct XorShift32 {
     std::uint32_t state = 0x73a9e51du;
@@ -154,6 +212,11 @@ bool SameTreeBoxes(const TreeFixture &left,
 }  // namespace
 
 int main(void) {
+    FloatingEnvironmentRestore floatingEnvironment;
+    if (!floatingEnvironment.Captured()) {
+        std::fprintf(stderr, "could not capture floating environment\n");
+        return 1;
+    }
     TreeFixture authority = MakeFixture();
     TreeFixture optimized = MakeFixture();
     forevervalidator::simulation::OptimizedCpuVehicleCollisionBoundsPlan
@@ -189,7 +252,19 @@ int main(void) {
             optimized.children[childIndex]->SetLocation(childTransform);
         }
 
+        const bool compareFloatingEnvironment =
+                caseIndex < FloatingEnvironmentCaseCount;
+        if (compareFloatingEnvironment) {
+            ClearFloatingStatus();
+        }
         authority.root->UpdateBoundingBox(0);
+        const FloatingStatus authorityFloatingStatus =
+                compareFloatingEnvironment
+                ? ReadFloatingStatus()
+                : FloatingStatus{};
+        if (compareFloatingEnvironment) {
+            ClearFloatingStatus();
+        }
         if ((caseIndex & 1u) == 0u) {
             plan.RefreshRuntimeCertified();
         } else if (!plan.TryRefresh()) {
@@ -197,6 +272,19 @@ int main(void) {
                          "guarded refresh rejected case %zu\n",
                          caseIndex);
             return 1;
+        }
+        if (compareFloatingEnvironment) {
+            const FloatingStatus optimizedFloatingStatus =
+                    ReadFloatingStatus();
+            if (authorityFloatingStatus.exceptions !=
+                        optimizedFloatingStatus.exceptions ||
+                authorityFloatingStatus.mxcsrStatus !=
+                        optimizedFloatingStatus.mxcsrStatus) {
+                std::fprintf(stderr,
+                             "vehicle bounds case %zu floating environment differs\n",
+                             caseIndex);
+                return 1;
+            }
         }
         if (!SameTreeBoxes(authority, optimized)) {
             std::fprintf(stderr,
@@ -255,7 +343,9 @@ int main(void) {
     }
 
     std::printf(
-            "vehicle_collision_bounds_cases=%zu result=identical\n",
-            RandomCaseCount);
+            "vehicle_collision_bounds_cases=%zu "
+            "floating_environment_cases=%zu result=identical\n",
+            RandomCaseCount,
+            FloatingEnvironmentCaseCount);
     return 0;
 }

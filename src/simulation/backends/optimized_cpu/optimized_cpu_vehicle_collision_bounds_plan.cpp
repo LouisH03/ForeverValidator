@@ -1,5 +1,6 @@
 #include "simulation/backends/optimized_cpu/optimized_cpu_vehicle_collision_bounds_plan.h"
 
+#include <cmath>
 #include <cstring>
 #include <typeinfo>
 
@@ -8,6 +9,57 @@
 namespace forevervalidator::simulation {
 
 namespace {
+
+inline float OrderedRowProduct(float x,
+                               float xValue,
+                               float y,
+                               float yValue,
+                               float z,
+                               float zValue) noexcept {
+    const float xy = x * xValue + y * yValue;
+    return xy + z * zValue;
+}
+
+inline void TransformCertifiedBox(GmBoxAligned &output,
+                                  const GmBoxAligned &source,
+                                  const GmIso4 &transform) noexcept {
+    const GmMat3 &rotation = transform.rotation;
+    const GmVec3 &sourceCenter = source.center;
+    const GmVec3 &sourceHalf = source.halfExtents;
+
+    const float centerX = OrderedRowProduct(
+            rotation.basisX.x, sourceCenter.x,
+            rotation.basisY.x, sourceCenter.y,
+            rotation.basisZ.x, sourceCenter.z);
+    const float centerY = OrderedRowProduct(
+            rotation.basisX.y, sourceCenter.x,
+            rotation.basisY.y, sourceCenter.y,
+            rotation.basisZ.y, sourceCenter.z);
+    const float centerZ = OrderedRowProduct(
+            rotation.basisX.z, sourceCenter.x,
+            rotation.basisY.z, sourceCenter.y,
+            rotation.basisZ.z, sourceCenter.z);
+    output.center = {
+        centerX + transform.translation.x,
+        centerY + transform.translation.y,
+        centerZ + transform.translation.z,
+    };
+
+    output.halfExtents = {
+        OrderedRowProduct(
+                std::fabs(rotation.basisX.x), sourceHalf.x,
+                std::fabs(rotation.basisY.x), sourceHalf.y,
+                std::fabs(rotation.basisZ.x), sourceHalf.z),
+        OrderedRowProduct(
+                std::fabs(rotation.basisX.y), sourceHalf.x,
+                std::fabs(rotation.basisY.y), sourceHalf.y,
+                std::fabs(rotation.basisZ.y), sourceHalf.z),
+        OrderedRowProduct(
+                std::fabs(rotation.basisX.z), sourceHalf.x,
+                std::fabs(rotation.basisY.z), sourceHalf.y,
+                std::fabs(rotation.basisZ.z), sourceHalf.z),
+    };
+}
 
 // The plan only accepts geometry boxes that are valid for tree refresh.
 // GmBoxAligned::SetMult applies absolute rotation elements to non-negative
@@ -144,8 +196,8 @@ void OptimizedCpuVehicleCollisionBoundsPlan::RefreshUnchecked(
         const Child &child = children_[childIndex];
         GmBoxAligned childBounds;
         if (child.tree->HasLocalTransform()) {
-            childBounds.SetMult(
-                    child.geometryBounds, child.tree->LocalIso());
+            TransformCertifiedBox(
+                    childBounds, child.geometryBounds, child.tree->LocalIso());
         } else {
             childBounds = child.geometryBounds;
         }
@@ -159,7 +211,7 @@ void OptimizedCpuVehicleCollisionBoundsPlan::RefreshUnchecked(
 
     GmBoxAligned rootBounds;
     if (root_->HasLocalTransform()) {
-        rootBounds.SetMult(merged, root_->LocalIso());
+        TransformCertifiedBox(rootBounds, merged, root_->LocalIso());
     } else {
         rootBounds = merged;
     }
