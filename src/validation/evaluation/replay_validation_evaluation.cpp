@@ -39,6 +39,7 @@ struct ReplayEvaluationMetadata {
     std::optional<bool> raceCompleted;
     std::optional<s32> raceTimeMs;
     std::optional<forevervalidator::FinishTimeEstimate> raceTime;
+    std::optional<s32> validationRaceTimeMs;
     std::optional<s32> stuntsScore;
     std::optional<s32> respawns;
 };
@@ -163,6 +164,17 @@ ReplayEvaluationMetadata ResolveActualMetadata(
     const std::uint64_t prestartNs =
             static_cast<std::uint64_t>(plan.validationPrestartMs) *
             1000000u;
+    if (simulationResult.finishTimeMs.has_value() &&
+        *simulationResult.finishTimeMs >= plan.validationPrestartMs) {
+        actual.validationRaceTimeMs = static_cast<s32>(
+                *simulationResult.finishTimeMs -
+                plan.validationPrestartMs);
+    } else if (plan.validationMode != ReplayValidationMode::Platform &&
+               plan.validationMode != ReplayValidationMode::Puzzle &&
+               plan.validationMode != ReplayValidationMode::Stunts &&
+               simulatedFinishRaceTimeMs.has_value()) {
+        actual.validationRaceTimeMs = simulatedFinishRaceTimeMs;
+    }
     if (simulationResult.finishTime.has_value() &&
         simulationResult.finishTime->estimatedNs >= prestartNs) {
         actual.raceCompleted = true;
@@ -182,8 +194,7 @@ ReplayEvaluationMetadata ResolveActualMetadata(
     } else if (simulationResult.finishTimeMs.has_value() &&
         *simulationResult.finishTimeMs >= plan.validationPrestartMs) {
         actual.raceCompleted = true;
-        actual.raceTimeMs = static_cast<s32>(
-                *simulationResult.finishTimeMs - plan.validationPrestartMs);
+        actual.raceTimeMs = actual.validationRaceTimeMs;
     } else if (plan.validationMode != ReplayValidationMode::Platform &&
                plan.validationMode != ReplayValidationMode::Puzzle &&
                plan.validationMode != ReplayValidationMode::Stunts &&
@@ -261,7 +272,9 @@ void FinalizeValidation(
         respawnCount < 0 ? 0u : static_cast<u32>(respawnCount),
         output.maxDeviationTimeMs,
         output.maxDeviationDistance,
-        actual.raceTimeMs,
+        actual.validationRaceTimeMs.has_value()
+                ? actual.validationRaceTimeMs
+                : actual.raceTimeMs,
         actual.stuntsScore,
         *actual.raceCompleted,
     };
@@ -271,8 +284,14 @@ void FinalizeValidation(
     expected.raceTimeMs = plan.expectedRaceTimeMs;
     expected.stuntsScore = plan.expectedStuntsScore;
     expected.respawns = plan.expectedRespawns;
+    ReplayEvaluationMetadata validationActual = actual;
+    if (actual.validationRaceTimeMs.has_value()) {
+        validationActual.raceTimeMs =
+                actual.validationRaceTimeMs;
+    }
     output.outcome = OutcomeFromComparison(comparison.result);
-    output.status = StatusFromComparison(comparison, expected, actual);
+    output.status = StatusFromComparison(
+            comparison, expected, validationActual);
     output.wrongSimulation =
             comparison.result == ReplayValidationComparisonResult::WrongSimulation;
 }
