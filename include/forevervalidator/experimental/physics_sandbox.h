@@ -404,6 +404,8 @@ struct PhysicsSandboxCudaSearchConfiguration {
     std::vector<PhysicsSandboxCudaModifier> modifiers;
     PhysicsSandboxCudaEvaluator evaluator =
             PhysicsSandboxCudaFinishTimeEvaluator{};
+    // Retains the original materialization path for exact differential tests.
+    bool useLegacyMutationPipelineForTesting = false;
 };
 
 // An opaque in-process runtime clone. States are not serializable and are not
@@ -428,6 +430,9 @@ private:
 
 struct PhysicsSandboxCudaSearchMetrics {
     std::uint64_t residentDeviceBytes = 0u;
+    std::uint64_t mutationDeviceBytes = 0u;
+    std::uint64_t candidateInputDeviceBytes = 0u;
+    std::uint64_t mutationScratchDeviceBytes = 0u;
     std::uint64_t hostToDeviceBytes = 0u;
     std::uint64_t deviceToHostBytes = 0u;
     double kernelMilliseconds = 0.0;
