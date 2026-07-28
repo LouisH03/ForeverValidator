@@ -76,6 +76,30 @@ over the full control stream, so there is no per-tick host synchronization.
 Final state, observations, outcomes, events, and scores are copied back once;
 winner selection uses the exact returned candidate data.
 
+Multi-replay validation uses the same timeline kernel. The CPU retains the
+standard replay decoder, asset routing, map construction, vehicle/environment
+flattening, control-plan construction, recorded-event handling, and report
+evaluation. Each submitted replay lane supplies its own immutable device
+scene and static configuration to the kernel, so unrelated Stadium maps can
+share one launch without sharing simulation state. This path is used
+automatically by `ValidateReplayBatch` and the CLI when the selected backend
+is CUDA; it is independent of the TAS/search API.
+
+For example:
+
+```sh
+build/cuda/forevervalidator \
+  --pak-dir "/path/to/TmUnitedForever/Packs" \
+  --backend cuda \
+  --batch-size 8 \
+  --out-dir /tmp/cuda-validation \
+  "/path/to/replays"
+```
+
+Larger batches expose more independent replay timelines to the GPU but retain
+all of their CPU scene objects and uploaded CUDA scenes until the launch
+finishes. Choose `--batch-size` for available host and device memory.
+
 CUDA is compiled with fused multiply-add disabled, precise division and
 square root, gradual underflow, and no fast math. The corresponding CPU
 reference uses native binary32 operations with contraction disabled.

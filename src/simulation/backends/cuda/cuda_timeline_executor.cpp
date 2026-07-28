@@ -144,6 +144,16 @@ CudaTimelineBatchResult ExecuteCudaTimelineBatch(
             "CUDA timeline execution unavailable in a CPU-only build";
     return result;
 }
+
+CudaTimelineBatchResult ExecuteCudaReplayTimelineBatch(
+        const std::vector<CudaCandidateTimelineInput> &,
+        bool) noexcept {
+    CudaTimelineBatchResult result;
+    result.status = CudaTimelineStatus::DeviceFailure;
+    result.diagnostic =
+            "CUDA timeline backend was not compiled";
+    return result;
+}
 #endif
 
 }  // namespace forevervalidator::simulation

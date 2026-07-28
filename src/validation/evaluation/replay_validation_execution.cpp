@@ -1,6 +1,7 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <utility>
 
 #include "validation/evaluation/replay_validation_session.h"
 #include "simulation/control/replay_control_plan.h"
@@ -73,6 +74,31 @@ ReplayValidationExecutionResult ExecuteReplayValidation(
         const ReplaySimulationDefinition &simulationDefinition,
         const ReplayGhostTrajectory &trajectory,
         const ReplayInputTimeline &inputTimeline) {
+    ReplayValidationExecutionPreparation preparation;
+    const ReplayValidationExecutionResult prepareResult =
+            PrepareReplayValidationExecution(
+                    &preparation, plan, trajectory, inputTimeline);
+    if (prepareResult != ReplayValidationExecutionResult::Success) {
+        return prepareResult;
+    }
+
+    simulationSession.ConfigureReplayRace(
+            plan.playMode, plan.isLapRace, plan.lapCount);
+    ReplaySimulationTimelineResult simulationResult =
+            simulationSession.SimulateTimeline(
+                    simulationDefinition,
+                    preparation.controlPlan.ticks,
+                    plan.validationSeed);
+    return CompleteReplayValidationExecution(
+            out, simulationSession, preparation, inputTimeline,
+            std::move(simulationResult));
+}
+
+ReplayValidationExecutionResult PrepareReplayValidationExecution(
+        ReplayValidationExecutionPreparation *out,
+        const ReplayValidationPlan &plan,
+        const ReplayGhostTrajectory &trajectory,
+        const ReplayInputTimeline &inputTimeline) {
     if (out == nullptr) {
         return ReplayValidationExecutionResult::MissingInput;
     }
@@ -129,16 +155,24 @@ ReplayValidationExecutionResult ExecuteReplayValidation(
         return ReplayValidationExecutionResult::InvalidControlPlan;
     }
 
-    simulationSession.ConfigureReplayRace(
-            plan.playMode, plan.isLapRace, plan.lapCount);
-    ReplaySimulationTimelineResult simulationResult =
-            simulationSession.SimulateTimeline(
-                    simulationDefinition,
-                    controlPlan.ticks,
-                    plan.validationSeed);
+    out->plan = plan;
+    out->controlPlan = std::move(controlPlan);
+    return ReplayValidationExecutionResult::Success;
+}
+
+ReplayValidationExecutionResult CompleteReplayValidationExecution(
+        ReplayValidationExecutionOutput *out,
+        ReplaySimulationSession &simulationSession,
+        const ReplayValidationExecutionPreparation &preparation,
+        const ReplayInputTimeline &inputTimeline,
+        ReplaySimulationTimelineResult simulationResult) {
+    if (out == nullptr) {
+        return ReplayValidationExecutionResult::MissingInput;
+    }
     if (simulationResult.result != ReplaySimulationRunResult::Success) {
         return FromSimulationResult(simulationResult.result);
     }
+    const ReplayValidationPlan &plan = preparation.plan;
     // Platform, Puzzle, and Stunts carry their recorded outcome in replay
     // events. Race completion remains authoritative only when the standalone
     // checkpoint simulation reaches a valid finish.

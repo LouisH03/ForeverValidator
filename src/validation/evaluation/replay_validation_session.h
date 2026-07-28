@@ -9,10 +9,11 @@
 
 #include "format/replay/replay_ghost_trajectory.h"
 #include "format/replay/replay_input_timeline.h"
+#include "simulation/control/replay_control_plan.h"
+#include "simulation/runtime/replay_simulation_session.h"
 #include "validation/evaluation/replay_validation_model.h"
 struct ReplaySimulationDefinition;
 class ReplayFile;
-class ReplaySimulationSession;
 
 class ReplayValidationReplay {
 public:
@@ -82,6 +83,24 @@ enum class ReplayValidationExecutionResult {
     CudaExecutionFailed,
 };
 
+struct ReplayValidationExecutionPreparation {
+    ReplayValidationPlan plan{};
+    ReplayControlPlan controlPlan{};
+};
+
+ReplayValidationExecutionResult PrepareReplayValidationExecution(
+        ReplayValidationExecutionPreparation *out,
+        const ReplayValidationPlan &plan,
+        const ReplayGhostTrajectory &trajectory,
+        const ReplayInputTimeline &inputTimeline);
+
+ReplayValidationExecutionResult CompleteReplayValidationExecution(
+        ReplayValidationExecutionOutput *out,
+        ReplaySimulationSession &simulationSession,
+        const ReplayValidationExecutionPreparation &preparation,
+        const ReplayInputTimeline &inputTimeline,
+        ReplaySimulationTimelineResult simulationResult);
+
 ReplayValidationExecutionResult ExecuteReplayValidation(
         ReplayValidationExecutionOutput *out,
         ReplaySimulationSession &simulationSession,
@@ -95,6 +114,10 @@ struct ReplayFileValidationResult {
     ReplayValidationResult validation{};
     ReplayRaceOutcome raceOutcome{};
 };
+
+ReplayFileValidationResult BuildReplayFileValidationMetadata(
+        const ReplayFile &replay,
+        const ReplayValidationConfiguration &configuration);
 
 using ReplayFileValidationBuild =
         forevervalidator::DiscriminatedResult<
