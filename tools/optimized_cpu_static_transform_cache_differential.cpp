@@ -99,6 +99,23 @@ struct OptimizedCpuStaticMeshTriangleSidecarTestAccess {
         return rejected && cache.CertifyForAdvance(zone) &&
                 cache.IsCertifiedFor(zone);
     }
+
+    static bool RejectsPacketGroupBackingMutation(
+            OptimizedCpuStaticMeshTriangleSidecar &sidecar,
+            OptimizedCpuStaticSurfaceTransformCache &cache,
+            const CHmsCollisionManagerSZone &zone) {
+        if (sidecar.packetGroups_.empty()) {
+            return true;
+        }
+        std::vector<OptimizedCpuStaticMeshPacketGroup> saved =
+                std::move(sidecar.packetGroups_);
+        sidecar.packetGroups_.assign(saved.size(), {});
+        const bool rejected = !cache.CertifyForAdvance(zone) &&
+                !cache.IsCertifiedFor(zone);
+        sidecar.packetGroups_ = std::move(saved);
+        return rejected && cache.CertifyForAdvance(zone) &&
+                cache.IsCertifiedFor(zone);
+    }
 };
 
 namespace {
@@ -802,6 +819,9 @@ int main(void) {
                         *mutableSidecar, cache, firstZone) ||
         !OptimizedCpuStaticMeshTriangleSidecarTestAccess::
                 RejectsPacketCellBackingMutation(
+                        *mutableSidecar, cache, firstZone) ||
+        !OptimizedCpuStaticMeshTriangleSidecarTestAccess::
+                RejectsPacketGroupBackingMutation(
                         *mutableSidecar, cache, firstZone)) {
         std::fprintf(stderr, "advance sidecar certificate differs\n");
         return 1;

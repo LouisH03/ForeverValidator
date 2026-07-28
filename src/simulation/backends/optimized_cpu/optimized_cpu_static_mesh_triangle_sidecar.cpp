@@ -1,7 +1,9 @@
 #include "simulation/backends/optimized_cpu/optimized_cpu_static_mesh_triangle_sidecar.h"
 
+#include <algorithm>
 #include <cfenv>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <new>
 #include <utility>
@@ -267,6 +269,132 @@ bool BuildTraversalDepths(
     }
 }
 
+bool IsBoundedPacketGroupFloat(float value) noexcept {
+    std::uint32_t bits;
+    std::memcpy(&bits, &value, sizeof(bits));
+    const std::uint32_t magnitude = bits & 0x7fffffffu;
+    if (magnitude == 0u) {
+        return true;
+    }
+    const std::uint32_t exponent = magnitude >> 23u;
+    // Keep every certificate add/subtract far from binary32 overflow while
+    // excluding nonzero subnormals. Exact tiny cancellation may still produce
+    // a subnormal, but cannot raise underflow without also raising inexact.
+    return exponent >= 67u && exponent <= 187u;
+}
+
+bool IsBoundedPacketGroupBounds(const GmBoxAligned &bounds) noexcept {
+    std::uint32_t halfXBits;
+    std::uint32_t halfYBits;
+    std::uint32_t halfZBits;
+    std::memcpy(&halfXBits, &bounds.halfExtents.x, sizeof(halfXBits));
+    std::memcpy(&halfYBits, &bounds.halfExtents.y, sizeof(halfYBits));
+    std::memcpy(&halfZBits, &bounds.halfExtents.z, sizeof(halfZBits));
+    return (halfXBits & 0x80000000u) == 0u &&
+           (halfYBits & 0x80000000u) == 0u &&
+           (halfZBits & 0x80000000u) == 0u &&
+           IsBoundedPacketGroupFloat(bounds.center.x) &&
+           IsBoundedPacketGroupFloat(bounds.center.y) &&
+           IsBoundedPacketGroupFloat(bounds.center.z) &&
+           IsBoundedPacketGroupFloat(bounds.halfExtents.x) &&
+           IsBoundedPacketGroupFloat(bounds.halfExtents.y) &&
+           IsBoundedPacketGroupFloat(bounds.halfExtents.z);
+}
+
+void IncludePacketGroupBounds(
+        OptimizedCpuStaticMeshPacketGroup *group,
+        const GmBoxAligned &bounds,
+        bool first) noexcept {
+    if (first) {
+        group->minimumCenter = {
+            bounds.center.x,
+            bounds.center.y,
+            bounds.center.z,
+            0.0f,
+        };
+        group->maximumCenter = group->minimumCenter;
+        group->maximumHalfExtents = bounds.halfExtents;
+        return;
+    }
+    group->minimumCenter.x =
+            std::min(group->minimumCenter.x, bounds.center.x);
+    group->minimumCenter.y =
+            std::min(group->minimumCenter.y, bounds.center.y);
+    group->minimumCenter.z =
+            std::min(group->minimumCenter.z, bounds.center.z);
+    group->maximumCenter.x =
+            std::max(group->maximumCenter.x, bounds.center.x);
+    group->maximumCenter.y =
+            std::max(group->maximumCenter.y, bounds.center.y);
+    group->maximumCenter.z =
+            std::max(group->maximumCenter.z, bounds.center.z);
+    group->maximumHalfExtents.x = std::max(
+            group->maximumHalfExtents.x, bounds.halfExtents.x);
+    group->maximumHalfExtents.y = std::max(
+            group->maximumHalfExtents.y, bounds.halfExtents.y);
+    group->maximumHalfExtents.z = std::max(
+            group->maximumHalfExtents.z, bounds.halfExtents.z);
+}
+
+bool BuildPacketGroups(
+        const std::vector<GmMeshOctreeCell> &cells,
+        const std::vector<std::uint8_t> &depths,
+        std::vector<OptimizedCpuStaticMeshPacketCell> *packetCells,
+        std::vector<OptimizedCpuStaticMeshPacketGroup> *groups) {
+    constexpr std::size_t GroupWidth = 4u;
+    constexpr std::uint8_t ParentDepth = 1u;
+    constexpr std::uint8_t ChildDepth = ParentDepth + 1u;
+    constexpr std::size_t MaximumGroupCount =
+            std::numeric_limits<std::uint16_t>::max();
+    if (packetCells == nullptr || groups == nullptr ||
+        packetCells->size() != cells.size() || depths.size() != cells.size()) {
+        return false;
+    }
+    groups->clear();
+    groups->reserve(std::min(cells.size() / GroupWidth,
+                             MaximumGroupCount));
+    for (std::size_t parentIndex = 0u;
+         parentIndex < cells.size();
+         ++parentIndex) {
+        if (depths[parentIndex] != ParentDepth ||
+            cells[parentIndex].ContainsTriangle()) {
+            continue;
+        }
+        const std::size_t parentEnd =
+                parentIndex + cells[parentIndex].SubtreeEntryCount();
+        std::size_t childIndex = parentIndex + 1u;
+        while (childIndex < parentEnd) {
+            const std::size_t firstChildIndex = childIndex;
+            OptimizedCpuStaticMeshPacketGroup group;
+            std::size_t memberCount = 0u;
+            bool bounded = true;
+            while (childIndex < parentEnd && memberCount < GroupWidth) {
+                if (depths[childIndex] != ChildDepth) {
+                    return false;
+                }
+                const GmMeshOctreeCell &child = cells[childIndex];
+                const GmBoxAligned &bounds = child.Bounds();
+                bounded = bounded && IsBoundedPacketGroupBounds(bounds);
+                IncludePacketGroupBounds(&group, bounds, memberCount == 0u);
+                childIndex += child.SubtreeEntryCount();
+                ++memberCount;
+            }
+            const std::size_t groupEntryCount =
+                    childIndex - firstChildIndex;
+            if (memberCount < 2u || !bounded ||
+                groupEntryCount > std::numeric_limits<u32>::max() ||
+                groups->size() >= MaximumGroupCount) {
+                continue;
+            }
+            group.subtreeEntryCount = static_cast<u32>(groupEntryCount);
+            groups->push_back(group);
+            (*packetCells)[firstChildIndex].packetGroupOrdinal =
+                    static_cast<std::uint16_t>(groups->size());
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 bool MeasureOptimizedCpuStaticMeshTraversalDepth(
@@ -335,6 +463,14 @@ bool OptimizedCpuStaticMeshTriangleSidecar::TryBuild(
                 packet.triangleIndex = source.TriangleIndex();
                 packet.containsTriangle = 1u;
             }
+        }
+        if (!BuildPacketGroups(
+                    cells,
+                    traversalDepths,
+                    &rebuilt.packetCells_,
+                    &rebuilt.packetGroups_)) {
+            Clear();
+            return false;
         }
         rebuilt.traversalDepths_ = std::move(traversalDepths);
         if (triangles.size() > rebuilt.triangles_.max_size()) {
@@ -444,6 +580,7 @@ void OptimizedCpuStaticMeshTriangleSidecar::Clear(void) noexcept {
     maximumTraversalDepth_ = 0u;
     traversalDepths_.clear();
     packetCells_.clear();
+    packetGroups_.clear();
     triangles_.clear();
     directTrianglePostings_.clear();
     triangleGrid_.Clear();

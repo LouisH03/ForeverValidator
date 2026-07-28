@@ -157,6 +157,28 @@ GmSurfMeshTriangle Triangle(u32 a,
 
 bool BuildMesh(GmSurfMesh *mesh) {
     mesh->material = GmLocalMaterialIndex::FromIndex(31u);
+    const GmBoxAligned rootBounds = {
+        {1.5f, 0.0f, 0.125f},
+        {2.5f, 1.0f, 0.375f},
+    };
+    const GmBoxAligned firstBounds = {
+        {0.0f, 0.0f, 0.0f},
+        {1.0f, 1.0f, 0.25f},
+    };
+    const GmBoxAligned secondBounds = {
+        {3.0f, 0.0f, 0.25f},
+        {1.0f, 1.0f, 0.25f},
+    };
+    std::vector<GmMeshOctreeCell> cells = {
+        GmMeshOctreeCell::Branch(rootBounds),
+        GmMeshOctreeCell::Branch(rootBounds),
+        GmMeshOctreeCell::Triangle(firstBounds, 0u),
+        GmMeshOctreeCell::Triangle(firstBounds, 1u),
+        GmMeshOctreeCell::Triangle(secondBounds, 2u),
+        GmMeshOctreeCell::Triangle(secondBounds, 3u),
+    };
+    cells[0u].SetSubtreeEntryCount(6u);
+    cells[1u].SetSubtreeEntryCount(5u);
     return mesh->SetGeometry(
             {{-1.0f, -1.0f, 0.0f},
              {1.0f, -1.0f, 0.0f},
@@ -170,7 +192,7 @@ bool BuildMesh(GmSurfMesh *mesh) {
              Triangle(2u, 1u, 3u, 9u),
              Triangle(4u, 5u, 6u, 11u),
              Triangle(6u, 5u, 7u, 13u)},
-            {},
+            std::move(cells),
             GmSurfMesh::PlaneSource::Archived);
 }
 
@@ -202,6 +224,157 @@ GmMat3 Rotation(std::uint32_t selector) {
     }
 }
 
+struct PacketGroupRunResult {
+    bool accepted = false;
+    std::uint32_t hitMask = 0xffffffffu;
+    std::array<VectorCollisionBuffer, PacketWidth> buffers;
+    int exceptions = 0;
+#if defined(__i386__) || defined(__x86_64__)
+    unsigned int mxcsr = 0u;
+#endif
+};
+
+bool RunPacketGroupEnvironmentCases(
+        const GmSurfMesh &mesh,
+        const OptimizedCpuStaticMeshTriangleSidecar &sidecar) {
+    OptimizedCpuStaticMeshTriangleHierarchyView hierarchy;
+    if (!sidecar.TriangleHierarchyView(&hierarchy) ||
+        hierarchy.packetGroups == nullptr ||
+        hierarchy.packetGroupCount == 0u) {
+        std::fprintf(stderr, "packet group environment fixture unavailable\n");
+        return false;
+    }
+
+    GmIso4 meshIso;
+    meshIso.SetIdentity();
+    GmIso4 meshInverse;
+    meshInverse.SetIdentity();
+    const OptimizedCpuCertifiedStaticMeshPacket groupedMesh = {
+        &mesh,
+        meshIso,
+        meshInverse,
+        &sidecar,
+        hierarchy,
+    };
+    OptimizedCpuCertifiedStaticMeshPacket ordinaryMesh = groupedMesh;
+    ordinaryMesh.hierarchy.packetGroups = nullptr;
+    ordinaryMesh.hierarchy.packetGroupCount = 0u;
+
+    std::fenv_t savedEnvironment;
+    if (std::fegetenv(&savedEnvironment) != 0) {
+        std::fprintf(stderr, "could not save packet group environment\n");
+        return false;
+    }
+#if defined(__i386__) || defined(__x86_64__)
+    const unsigned int savedMxcsr = _mm_getcsr();
+#endif
+    struct EnvironmentRestore {
+        const std::fenv_t &environment;
+#if defined(__i386__) || defined(__x86_64__)
+        unsigned int mxcsr;
+#endif
+        ~EnvironmentRestore(void) {
+            std::fesetenv(&environment);
+#if defined(__i386__) || defined(__x86_64__)
+            _mm_setcsr(mxcsr);
+#endif
+        }
+    } restore{
+        savedEnvironment,
+#if defined(__i386__) || defined(__x86_64__)
+        savedMxcsr,
+#endif
+    };
+
+    const std::array<float, 2u> queryCenters = {64.0f, 4.5f};
+    const std::array<int, 2u> initialExceptions = {0, FE_INEXACT};
+    for (float queryCenter : queryCenters) {
+        std::array<GmSurfEllipsoid, PacketWidth> ellipsoids;
+        std::array<GmIso4, PacketWidth> ellipsoidIsos;
+        std::array<LocatedGmSurf, PacketWidth> located;
+        for (std::size_t lane = 0u; lane < PacketWidth; ++lane) {
+            ellipsoids[lane].material =
+                    GmLocalMaterialIndex::FromIndex(
+                            static_cast<std::uint16_t>(lane + 1u));
+            ellipsoids[lane].radii = {0.5f, 0.5f, 0.5f};
+            ellipsoidIsos[lane].SetIdentity();
+            ellipsoidIsos[lane].translation = {
+                queryCenter,
+                0.0f,
+                0.25f,
+            };
+            located[lane] = {
+                &ellipsoids[lane],
+                &ellipsoidIsos[lane],
+                true,
+            };
+        }
+
+        const auto execute = [&](const OptimizedCpuCertifiedStaticMeshPacket
+                                         &certifiedMesh,
+                                 int initialExceptionMask,
+                                 PacketGroupRunResult *result) {
+            std::array<OptimizedCpuEllipsoidMeshPacketLane, PacketWidth> lanes;
+            for (std::size_t lane = 0u; lane < PacketWidth; ++lane) {
+                lanes[lane] = {&located[lane], &result->buffers[lane]};
+            }
+            OptimizedCpuPreparedEllipsoidMeshPacket prepared;
+            if (!PrepareOptimizedCpuEllipsoidMeshPacket(
+                        lanes.data(), lanes.size(), 0xffu, &prepared) ||
+                std::feclearexcept(FE_ALL_EXCEPT) != 0 ||
+                (initialExceptionMask != 0 &&
+                 std::feraiseexcept(initialExceptionMask) != 0)) {
+                return false;
+            }
+            result->accepted =
+                    GmCollision_PreparedEllipsoidPacket_Mesh_InlineMathOptimizedCpuNativeBinary32WithCertifiedStaticMesh(
+                            prepared,
+                            0xffu,
+                            certifiedMesh,
+                            &result->hitMask);
+            result->exceptions = std::fetestexcept(FE_ALL_EXCEPT);
+#if defined(__i386__) || defined(__x86_64__)
+            result->mxcsr = _mm_getcsr();
+#endif
+            return true;
+        };
+
+        for (int initialExceptionMask : initialExceptions) {
+            PacketGroupRunResult grouped;
+            PacketGroupRunResult ordinary;
+            if (!execute(groupedMesh, initialExceptionMask, &grouped) ||
+                !execute(ordinaryMesh, initialExceptionMask, &ordinary) ||
+                !grouped.accepted || !ordinary.accepted ||
+                grouped.hitMask != ordinary.hitMask ||
+                grouped.exceptions != ordinary.exceptions
+#if defined(__i386__) || defined(__x86_64__)
+                || grouped.mxcsr != ordinary.mxcsr
+#endif
+            ) {
+                std::fprintf(
+                        stderr,
+                        "packet group environment differs center=%08x flags=%x\n",
+                        Bits(queryCenter),
+                        initialExceptionMask);
+                return false;
+            }
+            for (std::size_t lane = 0u; lane < PacketWidth; ++lane) {
+                if (!SameBuffer(grouped.buffers[lane],
+                                ordinary.buffers[lane])) {
+                    std::fprintf(
+                            stderr,
+                            "packet group collision differs center=%08x flags=%x lane=%zu\n",
+                            Bits(queryCenter),
+                            initialExceptionMask,
+                            lane);
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 bool RunPackets(const GmSurfMesh &mesh,
                 const OptimizedCpuStaticMeshTriangleSidecar &sidecar) {
     if (!OptimizedCpuEllipsoidMeshPacketAvailable()) {
@@ -216,7 +389,29 @@ bool RunPackets(const GmSurfMesh &mesh,
     meshInverse.SetInverse(meshIso);
     const LocatedGmSurf locatedMesh = {&mesh, &meshIso, true};
     OptimizedCpuStaticMeshTriangleHierarchyView hierarchy;
-    if (!sidecar.TriangleHierarchyView(&hierarchy)) {
+    if (!sidecar.TriangleHierarchyView(&hierarchy) ||
+        hierarchy.packetGroups == nullptr ||
+        hierarchy.packetGroupCount != 1u ||
+        hierarchy.count != 6u ||
+        hierarchy.packetCells[2u].packetGroupOrdinal != 1u ||
+        hierarchy.packetCells[3u].packetGroupOrdinal != 0u ||
+        hierarchy.packetCells[4u].packetGroupOrdinal != 0u ||
+        hierarchy.packetCells[5u].packetGroupOrdinal != 0u ||
+        hierarchy.packetGroups[0u].subtreeEntryCount != 4u ||
+        Bits(hierarchy.packetGroups[0u].minimumCenter.x) != Bits(0.0f) ||
+        Bits(hierarchy.packetGroups[0u].minimumCenter.y) != Bits(0.0f) ||
+        Bits(hierarchy.packetGroups[0u].minimumCenter.z) != Bits(0.0f) ||
+        Bits(hierarchy.packetGroups[0u].minimumCenter.w) != Bits(0.0f) ||
+        Bits(hierarchy.packetGroups[0u].maximumCenter.x) != Bits(3.0f) ||
+        Bits(hierarchy.packetGroups[0u].maximumCenter.y) != Bits(0.0f) ||
+        Bits(hierarchy.packetGroups[0u].maximumCenter.z) != Bits(0.25f) ||
+        Bits(hierarchy.packetGroups[0u].maximumCenter.w) != Bits(0.0f) ||
+        Bits(hierarchy.packetGroups[0u].maximumHalfExtents.x) !=
+                Bits(1.0f) ||
+        Bits(hierarchy.packetGroups[0u].maximumHalfExtents.y) !=
+                Bits(1.0f) ||
+        Bits(hierarchy.packetGroups[0u].maximumHalfExtents.z) !=
+                Bits(0.25f)) {
         std::fprintf(stderr, "certified hierarchy unavailable\n");
         return false;
     }
@@ -530,6 +725,7 @@ int main(void) {
     GmSurfMesh mesh;
     OptimizedCpuStaticMeshTriangleSidecar sidecar;
     if (!BuildMesh(&mesh) || !sidecar.TryBuild(mesh) ||
+        !RunPacketGroupEnvironmentCases(mesh, sidecar) ||
         !RunPackets(mesh, sidecar)) {
         return 1;
     }

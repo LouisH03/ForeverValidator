@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <typeinfo>
 
@@ -489,6 +490,147 @@ FV_E031_INLINE __m256 BoundsMask(const Boxx8 &queries,
     return AndNot(Or(Or(rejectZ, rejectY), rejectX), activeMask);
 }
 
+struct PacketGroupQueryBounds {
+    __m128 minimumCenter;
+    __m128 maximumCenter;
+    __m128 maximumHalfExtents;
+};
+
+FV_E031_INLINE __m256i InvalidPacketGroupFloatLanes(
+        __m256 values,
+        bool rejectNegative) {
+    const __m256i bits = _mm256_castps_si256(values);
+    const __m256i magnitude = _mm256_and_si256(
+            bits, _mm256_set1_epi32(0x7fffffffu));
+    const __m256i exponent = _mm256_srli_epi32(magnitude, 23u);
+    const __m256i zero = _mm256_cmpeq_epi32(
+            magnitude, _mm256_setzero_si256());
+    const __m256i belowMinimum = _mm256_cmpgt_epi32(
+            _mm256_set1_epi32(67), exponent);
+    const __m256i aboveMaximum = _mm256_cmpgt_epi32(
+            exponent, _mm256_set1_epi32(187));
+    __m256i invalid = _mm256_andnot_si256(
+            zero, _mm256_or_si256(belowMinimum, aboveMaximum));
+    if (rejectNegative) {
+        invalid = _mm256_or_si256(
+                invalid, _mm256_srai_epi32(bits, 31u));
+    }
+    return invalid;
+}
+
+FV_E031_INLINE float HorizontalMinimum(__m256 values) {
+    values = _mm256_min_ps(
+            values, _mm256_permute2f128_ps(values, values, 0x01));
+    values = _mm256_min_ps(
+            values,
+            _mm256_permute_ps(values, _MM_SHUFFLE(1, 0, 3, 2)));
+    values = _mm256_min_ps(
+            values,
+            _mm256_permute_ps(values, _MM_SHUFFLE(2, 3, 0, 1)));
+    return _mm_cvtss_f32(_mm256_castps256_ps128(values));
+}
+
+FV_E031_INLINE float HorizontalMaximum(__m256 values) {
+    values = _mm256_max_ps(
+            values, _mm256_permute2f128_ps(values, values, 0x01));
+    values = _mm256_max_ps(
+            values,
+            _mm256_permute_ps(values, _MM_SHUFFLE(1, 0, 3, 2)));
+    values = _mm256_max_ps(
+            values,
+            _mm256_permute_ps(values, _MM_SHUFFLE(2, 3, 0, 1)));
+    return _mm_cvtss_f32(_mm256_castps256_ps128(values));
+}
+
+FV_E031_AVX2 bool BuildPacketGroupQueryBounds(
+        const Boxx8 &queries,
+        std::uint32_t activeMask,
+        PacketGroupQueryBounds *result) noexcept {
+    if (result == nullptr || activeMask == 0u) {
+        return false;
+    }
+    const __m256 laneMask = MaskForBits(activeMask);
+    __m256i invalid = InvalidPacketGroupFloatLanes(
+            queries.center.x, false);
+    invalid = _mm256_or_si256(
+            invalid,
+            InvalidPacketGroupFloatLanes(queries.center.y, false));
+    invalid = _mm256_or_si256(
+            invalid,
+            InvalidPacketGroupFloatLanes(queries.center.z, false));
+    invalid = _mm256_or_si256(
+            invalid,
+            InvalidPacketGroupFloatLanes(queries.halfExtents.x, true));
+    invalid = _mm256_or_si256(
+            invalid,
+            InvalidPacketGroupFloatLanes(queries.halfExtents.y, true));
+    invalid = _mm256_or_si256(
+            invalid,
+            InvalidPacketGroupFloatLanes(queries.halfExtents.z, true));
+    invalid = _mm256_and_si256(invalid, _mm256_castps_si256(laneMask));
+    if (_mm256_movemask_ps(_mm256_castsi256_ps(invalid)) != 0) {
+        return false;
+    }
+
+    const __m256 positiveInfinity =
+            _mm256_set1_ps(std::numeric_limits<float>::infinity());
+    const __m256 negativeInfinity =
+            _mm256_set1_ps(-std::numeric_limits<float>::infinity());
+    const __m256 zero = _mm256_setzero_ps();
+    result->minimumCenter = _mm_set_ps(
+            0.0f,
+            HorizontalMinimum(_mm256_blendv_ps(
+                    positiveInfinity, queries.center.z, laneMask)),
+            HorizontalMinimum(_mm256_blendv_ps(
+                    positiveInfinity, queries.center.y, laneMask)),
+            HorizontalMinimum(_mm256_blendv_ps(
+                    positiveInfinity, queries.center.x, laneMask)));
+    result->maximumCenter = _mm_set_ps(
+            0.0f,
+            HorizontalMaximum(_mm256_blendv_ps(
+                    negativeInfinity, queries.center.z, laneMask)),
+            HorizontalMaximum(_mm256_blendv_ps(
+                    negativeInfinity, queries.center.y, laneMask)),
+            HorizontalMaximum(_mm256_blendv_ps(
+                    negativeInfinity, queries.center.x, laneMask)));
+    result->maximumHalfExtents = _mm_set_ps(
+            0.0f,
+            HorizontalMaximum(_mm256_blendv_ps(
+                    zero, queries.halfExtents.z, laneMask)),
+            HorizontalMaximum(_mm256_blendv_ps(
+                    zero, queries.halfExtents.y, laneMask)),
+            HorizontalMaximum(_mm256_blendv_ps(
+                    zero, queries.halfExtents.x, laneMask)));
+    return true;
+}
+
+FV_E031_INLINE bool PacketGroupRejectsAll(
+        const PacketGroupQueryBounds &queries,
+        const OptimizedCpuStaticMeshPacketGroup &group) {
+    const __m128 groupMinimumCenter =
+            _mm_loadu_ps(&group.minimumCenter.x);
+    const __m128 groupMaximumCenter =
+            _mm_loadu_ps(&group.maximumCenter.x);
+    __m128 groupMaximumHalfExtents;
+    std::memcpy(
+            &groupMaximumHalfExtents,
+            &group.maximumHalfExtents.x,
+            sizeof(groupMaximumHalfExtents));
+    groupMaximumHalfExtents = _mm_blend_ps(
+            groupMaximumHalfExtents, _mm_setzero_ps(), 0x8);
+    const __m128 reach = _mm_add_ps(
+            groupMaximumHalfExtents, queries.maximumHalfExtents);
+    const __m128 rejectLeft = _mm_cmp_ps(
+            reach,
+            _mm_sub_ps(groupMinimumCenter, queries.maximumCenter),
+            _CMP_LT_OQ);
+    const __m128 rejectRight = _mm_cmp_ps(
+            reach,
+            _mm_sub_ps(queries.minimumCenter, groupMaximumCenter),
+            _CMP_LT_OQ);
+    return (_mm_movemask_ps(_mm_or_ps(rejectLeft, rejectRight)) & 0x7) != 0;
+}
+
 struct PacketExecution {
     const OptimizedCpuPreparedEllipsoidMeshPacket &setup;
     Iso3x8 meshToUnit;
@@ -869,6 +1011,24 @@ FV_E031_AVX2 bool RunPacketAvx2(
     const Boxx8 meshBounds =
             TransformEllipsoidBox(ellipsoidToMesh, radii);
     const Iso3x8 meshToEllipsoid = Inverse(ellipsoidToMesh);
+    PacketGroupQueryBounds packetGroupQueries;
+    constexpr unsigned int MxcsrControlMask = 0xffc0u;
+    constexpr unsigned int DeterministicMxcsrControl = 0x1f80u;
+    const unsigned int mxcsr = _mm_getcsr();
+    // The conservative group arithmetic can add only FE_INEXACT for certified
+    // operands. Run it only when that sticky status is already set and the
+    // default rounding/denormal controls are active; otherwise preserve the
+    // authoritative per-cell path without executing extra floating work.
+    const bool usePacketGroups =
+            hierarchy.packetGroups != nullptr &&
+            hierarchy.packetGroupCount != 0u &&
+            (mxcsr & MxcsrControlMask) == DeterministicMxcsrControl &&
+            (mxcsr & _MM_EXCEPT_INEXACT) != 0u &&
+            BuildPacketGroupQueryBounds(
+                    meshBounds, activeMask, &packetGroupQueries);
+    const std::uint16_t packetGroupOrdinalMask = usePacketGroups
+            ? std::numeric_limits<std::uint16_t>::max()
+            : 0u;
     PacketExecution execution{
         setup,
         ScaleRows(meshToEllipsoid, inverseRadii),
@@ -899,6 +1059,18 @@ FV_E031_AVX2 bool RunPacketAvx2(
             cell + hierarchy.count;
     while (cell != cellEnd) {
         const std::size_t traversalDepth = cell->depth;
+        const std::uint16_t packetGroupOrdinal =
+                cell->packetGroupOrdinal & packetGroupOrdinalMask;
+        if (packetGroupOrdinal != 0u) {
+            const std::size_t groupIndex =
+                    static_cast<std::size_t>(packetGroupOrdinal - 1u);
+            const OptimizedCpuStaticMeshPacketGroup &group =
+                    hierarchy.packetGroups[groupIndex];
+            if (PacketGroupRejectsAll(packetGroupQueries, group)) {
+                cell += group.subtreeEntryCount;
+                continue;
+            }
+        }
         const __m256 parentMask = traversalDepth == 0u
                 ? execution.packetMask
                 : traversalMasks[traversalDepth - 1u].value;

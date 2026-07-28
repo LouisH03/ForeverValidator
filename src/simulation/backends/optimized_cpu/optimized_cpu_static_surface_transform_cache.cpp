@@ -661,7 +661,10 @@ bool OptimizedCpuStaticSurfaceTransformCache::CertifyForAdvance(
                 packet.hierarchy.cells != hierarchy.cells ||
                 packet.hierarchy.depths != hierarchy.depths ||
                 packet.hierarchy.packetCells != hierarchy.packetCells ||
+                packet.hierarchy.packetGroups != hierarchy.packetGroups ||
                 packet.hierarchy.count != hierarchy.count ||
+                packet.hierarchy.packetGroupCount !=
+                        hierarchy.packetGroupCount ||
                 packet.hierarchy.maximumTraversalDepth !=
                         hierarchy.maximumTraversalDepth) {
                 return false;
