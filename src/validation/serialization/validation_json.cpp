@@ -319,6 +319,26 @@ void AppendSimulationOutcomeJson(
     } else {
         json.Append("null");
     }
+    json.Append(",\"race_time_ns\":");
+    if (simulation.raceTime.has_value()) {
+        json.AppendFormat(
+                "%llu",
+                static_cast<unsigned long long>(
+                        simulation.raceTime->estimatedNs));
+    } else {
+        json.Append("null");
+    }
+    json.Append(",\"race_time_bracket_ns\":");
+    if (simulation.raceTime.has_value()) {
+        json.AppendFormat(
+                "{\"lower_exclusive\":%llu,\"upper_inclusive\":%llu}",
+                static_cast<unsigned long long>(
+                        simulation.raceTime->lowerBoundNs),
+                static_cast<unsigned long long>(
+                        simulation.raceTime->upperBoundNs));
+    } else {
+        json.Append("null");
+    }
     json.Append(",\"stunts_score\":");
     if (simulation.stuntsScore.has_value()) {
         json.AppendFormat("%d", *simulation.stuntsScore);

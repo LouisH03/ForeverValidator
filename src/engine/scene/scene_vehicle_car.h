@@ -312,6 +312,7 @@ public:
   void ClearWheelSurfaceObserver(void);
   bool WheelSurfaceObserverPreservesDynamics(void) const noexcept;
   RuntimeClone CaptureRuntimeClone(void) const;
+  void CaptureRuntimeClone(RuntimeClone &clone) const;
   bool CanRestoreRuntimeClone(const RuntimeClone &clone) const noexcept;
   void RestoreRuntimeClone(const RuntimeClone &clone) noexcept;
 

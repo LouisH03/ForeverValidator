@@ -177,11 +177,17 @@ void ReplayVehicleWheelSurfaces::OnWheelSurfaceUpdated(
 ReplayVehicleWheelSurfaces::RuntimeClone
 ReplayVehicleWheelSurfaces::CaptureRuntimeClone() const {
     RuntimeClone clone;
-    clone.movedByUpdateSurface.reserve(wheelBindings.size());
-    for (const WheelSurfaceBinding &binding : wheelBindings) {
-        clone.movedByUpdateSurface.push_back(binding.movedByUpdateSurface);
-    }
+    CaptureRuntimeClone(clone);
     return clone;
+}
+
+void ReplayVehicleWheelSurfaces::CaptureRuntimeClone(
+        RuntimeClone &clone) const {
+    clone.movedByUpdateSurface.resize(wheelBindings.size());
+    for (std::size_t index = 0u; index < wheelBindings.size(); ++index) {
+        clone.movedByUpdateSurface[index] =
+                wheelBindings[index].movedByUpdateSurface;
+    }
 }
 
 bool ReplayVehicleWheelSurfaces::CanRestoreRuntimeClone(

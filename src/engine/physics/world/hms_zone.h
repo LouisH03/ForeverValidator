@@ -9,6 +9,12 @@
 #include "engine/physics/dynamics/hms_corpus_registry.h"
 #include "engine/physics/dynamics/hms_force_field.h"
 struct CHmsCorpus;
+class CHmsCollisionSubstepObserver {
+public:
+    virtual ~CHmsCollisionSubstepObserver() = default;
+    virtual void BeforeCollisionSubstep(CHmsCorpus &corpus, float dt) = 0;
+    virtual void AfterCollisionSubstep(CHmsCorpus &corpus, float dt) = 0;
+};
 class OptimizedCpuStaticSurfaceTransformCache;
 namespace forevervalidator::simulation {
 class OptimizedCpuVehicleForceContext;
@@ -70,6 +76,10 @@ struct CHmsZoneDynamic : CHmsZone {
     void ResetSimulationState(void);
     void SetCollisionManagerZone(CHmsCollisionManagerSZone &managerZone);
     void ResetForceFields(float linearDamping, float angularDamping);
+    void SetCollisionSubstepObserver(
+            CHmsCollisionSubstepObserver *observer) noexcept {
+        collisionSubstepObserver_ = observer;
+    }
     void ComputeCorpusForces(
             CHmsCorpus *corpus,
             float dt);
@@ -103,6 +113,17 @@ struct CHmsZoneDynamic : CHmsZone {
                     OptimizedCpuVehicleForceContext &context);
 
 private:
+    void NotifyBeforeCollisionSubstep(CHmsCorpus &corpus, float dt) {
+        if (collisionSubstepObserver_ != nullptr) {
+            collisionSubstepObserver_->BeforeCollisionSubstep(corpus, dt);
+        }
+    }
+    void NotifyAfterCollisionSubstep(CHmsCorpus &corpus, float dt) {
+        if (collisionSubstepObserver_ != nullptr) {
+            collisionSubstepObserver_->AfterCollisionSubstep(corpus, dt);
+        }
+    }
+
     void PhysicsStep2OptimizedCpuCachedImpl(
             const OptimizedCpuStaticSurfaceTransformCache &transforms,
             bool nativeBinary32,
@@ -115,4 +136,5 @@ private:
     std::vector<CHmsCorpus *> zombieCorpuses_;
     CHmsCollisionBuffer collisionBuffer_;
     CHmsCollisionManagerSZone *collisionManagerZone_ = nullptr;
+    CHmsCollisionSubstepObserver *collisionSubstepObserver_ = nullptr;
 };
