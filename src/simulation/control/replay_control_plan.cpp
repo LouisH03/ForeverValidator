@@ -23,6 +23,7 @@ struct ReplayControlTimeline {
     ReplayRaceTransitionActions baseActions{};
     std::optional<s32> enableRaceSimulationAfterMs;
     std::optional<s32> establishRaceSpawnAtMs;
+    bool appendUnobservedTrailingTick = false;
 };
 
 struct ReplayControlTarget {
@@ -317,6 +318,31 @@ ReplayControlPlanBuildResult BuildTimelinePlan(
         }
     }
 
+    if (timeline.appendUnobservedTrailingTick) {
+        if (out->ticks.empty()) {
+            return ReplayControlPlanBuildResult::MissingComparisonTarget;
+        }
+        ReplayControlTick trailing = out->ticks.back();
+        constexpr u32 maxTickTime =
+                static_cast<u32>(std::numeric_limits<s32>::max());
+        if (trailing.periodMs > maxTickTime ||
+            trailing.timeMs > maxTickTime - trailing.periodMs) {
+            return ReplayControlPlanBuildResult::TargetTimeOutOfRange;
+        }
+        trailing.timeMs += trailing.periodMs;
+        trailing.observe = false;
+        trailing.comparisonTarget.reset();
+        trailing.actions.establishRaceSpawn = false;
+        trailing.actions.resetAtRaceStart = false;
+        trailing.actions.finishRace = false;
+        trailing.actions.respawnAtCheckpointCount = 0u;
+        try {
+            out->ticks.push_back(std::move(trailing));
+        } catch (const std::bad_alloc &) {
+            return ReplayControlPlanBuildResult::TickAllocationFailed;
+        }
+    }
+
     if (out->comparisonTargetCount != timeline.targetCount) {
         return ReplayControlPlanBuildResult::MissingComparisonTarget;
     }
@@ -352,6 +378,8 @@ ReplayControlPlanBuildResult BuildReplayControlPlan(
     timeline.baseActions = request.baseActions;
     timeline.enableRaceSimulationAfterMs = request.enableRaceSimulationAfterMs;
     timeline.establishRaceSpawnAtMs = request.establishRaceSpawnAtMs;
+    timeline.appendUnobservedTrailingTick =
+            request.appendUnobservedTrailingTick;
 
     std::vector<ReplayControlTarget> targets;
     try {

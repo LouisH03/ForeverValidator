@@ -555,4 +555,17 @@ if(FOREVERVALIDATOR_BUILD_TESTS)
     forevervalidator_configure_target(forevervalidator-render-scene-tests)
     add_test(NAME forevervalidator-render-scene
              COMMAND forevervalidator-render-scene-tests)
+
+    add_executable(forevervalidator-replay-control-plan-tests
+        tests/replay_control_plan_tests.cpp)
+    target_include_directories(
+        forevervalidator-replay-control-plan-tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(
+        forevervalidator-replay-control-plan-tests PRIVATE
+        forevervalidator_core)
+    forevervalidator_configure_target(
+        forevervalidator-replay-control-plan-tests)
+    add_test(NAME forevervalidator-replay-control-plan
+        COMMAND forevervalidator-replay-control-plan-tests)
 endif()
