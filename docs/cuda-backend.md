@@ -114,6 +114,10 @@ build/cuda/cuda_replay_parity PACKS REPLAY both
 
 ## Performance
 
+Winner-selection complexity, differential coverage, and current search
+microbenchmarks are documented in
+[CUDA winner reduction](cuda-winner-reduction.md).
+
 `cuda_backend_benchmark` reports immutable packing/upload, allocation,
 timeline transfer, kernel, synchronization, device memory, throughput, and a
 parallel CPU comparison. On an RTX 5060 (compute capability 12.0), replay
