@@ -113,6 +113,7 @@ if(FOREVERVALIDATOR_ENABLE_CUDA)
         "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_dynamics_certification.cu"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_collision_certification.cu"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_physics_step_certification.cu"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_race_certification.cu"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_vehicle_prefix_certification.cu"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_vehicle_force_certification.cu"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_stunt_certification.cu"
@@ -556,6 +557,20 @@ if(FOREVERVALIDATOR_BUILD_TESTS)
             forevervalidator-cuda-collision-tests)
         add_test(NAME forevervalidator-cuda-collision
                  COMMAND forevervalidator-cuda-collision-tests)
+
+        add_executable(forevervalidator-cuda-race-tests
+            tests/cuda_race_tests.cpp)
+        target_include_directories(
+            forevervalidator-cuda-race-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/include"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src")
+        target_link_libraries(
+            forevervalidator-cuda-race-tests PRIVATE
+            forevervalidator_core CUDA::cudart)
+        forevervalidator_configure_target(
+            forevervalidator-cuda-race-tests)
+        add_test(NAME forevervalidator-cuda-race
+                 COMMAND forevervalidator-cuda-race-tests)
     endif()
 
     add_executable(forevervalidator-render-scene-tests

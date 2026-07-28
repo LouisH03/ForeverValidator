@@ -70,6 +70,9 @@ __device__ inline void Checkpoint(
     CudaRacePhysicsState &race = candidate.race;
     race.progress.lastBlockRole = actor.checkpointRole;
     race.progress.lastContactBlockId = actor.raceBlockId;
+    if (actor.respawnUsesCurrentTransform) {
+        ClearFreewheel(candidate);
+    }
     if (actor.checkpointSlot == UINT32_MAX) return;
     const GmIso4 *spawn = nullptr;
     GmIso4 currentSpawn{};

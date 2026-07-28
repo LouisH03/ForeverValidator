@@ -65,35 +65,40 @@ bool TestCurrentTransformCheckpointContactClearsFreewheel() {
     return okay;
 }
 
-bool TestReferenceOnlyBackendRouting() {
+bool BackendClearsCurrentTransformCheckpointFreewheel(
+        forevervalidator::SimulationBackend backend) {
     CMwNodRef<CGameCtnBlockInfo> info = MakeMwNod<CGameCtnBlockInfo>();
     info->SetRespawnUsesCurrentTransform(true);
     CGameCtnBlock block;
     block.SetBlockInfo(info.Get());
 
-    CTrackManiaRace referenceRace;
-    ReplaySimulationRuntime referenceRuntime(
-            referenceRace, forevervalidator::SimulationBackend::Reference);
-    CSceneVehicleCar referenceVehicle;
-    referenceRace.BindVehicle(&referenceVehicle);
-    referenceVehicle.VehicleFreeWheelingSet(1);
-    referenceRace.OnCheckpoint(nullptr, &block);
-    bool okay = Check(
-            !referenceVehicle.CaptureRuntimeClone()
-                     .controls.forcedLowSpeedFriction,
-            "Reference backend did not enable the checkpoint rule");
+    CTrackManiaRace race;
+    ReplaySimulationRuntime runtime(race, backend);
+    CSceneVehicleCar vehicle;
+    race.BindVehicle(&vehicle);
+    vehicle.VehicleFreeWheelingSet(1);
+    race.OnCheckpoint(nullptr, &block);
+    return !vehicle.CaptureRuntimeClone()
+                     .controls.forcedLowSpeedFriction;
+}
 
-    CTrackManiaRace optimizedRace;
-    ReplaySimulationRuntime optimizedRuntime(
-            optimizedRace, forevervalidator::SimulationBackend::OptimizedCpu);
-    CSceneVehicleCar optimizedVehicle;
-    optimizedRace.BindVehicle(&optimizedVehicle);
-    optimizedVehicle.VehicleFreeWheelingSet(1);
-    optimizedRace.OnCheckpoint(nullptr, &block);
+bool TestParityBackendRouting() {
+    bool okay = Check(
+            BackendClearsCurrentTransformCheckpointFreewheel(
+                    forevervalidator::SimulationBackend::Reference),
+            "Reference backend did not enable the checkpoint rule");
     okay &= Check(
-            optimizedVehicle.CaptureRuntimeClone()
-                    .controls.forcedLowSpeedFriction,
-            "Optimized CPU backend enabled the Reference checkpoint rule");
+            BackendClearsCurrentTransformCheckpointFreewheel(
+                    forevervalidator::SimulationBackend::OptimizedCpu),
+            "Optimized CPU backend did not enable the checkpoint rule");
+    okay &= Check(
+            BackendClearsCurrentTransformCheckpointFreewheel(
+                    forevervalidator::SimulationBackend::Cuda),
+            "CUDA staging runtime did not enable the checkpoint rule");
+    okay &= Check(
+            !BackendClearsCurrentTransformCheckpointFreewheel(
+                    forevervalidator::SimulationBackend::SpeculativeTicking),
+            "unrelated speculative backend enabled the checkpoint rule");
     return okay;
 }
 
@@ -101,6 +106,6 @@ bool TestReferenceOnlyBackendRouting() {
 
 int main() {
     const bool contact = TestCurrentTransformCheckpointContactClearsFreewheel();
-    const bool routing = TestReferenceOnlyBackendRouting();
+    const bool routing = TestParityBackendRouting();
     return contact && routing ? 0 : 1;
 }

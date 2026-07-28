@@ -316,7 +316,9 @@ struct ReplaySimulationRuntime::State {
           backend(forevervalidator::simulation::ResolveLeafBackend(
                   requestedBackend)) {
         race.SetCurrentTransformCheckpointFreewheelClearEnabled(
-                backend == forevervalidator::SimulationBackend::Reference);
+                backend == forevervalidator::SimulationBackend::Reference ||
+                backend == forevervalidator::SimulationBackend::OptimizedCpu ||
+                backend == forevervalidator::SimulationBackend::Cuda);
     }
 
     ReplayPhysicsWorld world;
