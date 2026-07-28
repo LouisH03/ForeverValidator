@@ -510,6 +510,9 @@ bool BuildReplayChallenge(
         const ReplaySceneBlockDefinition *definition =
                 scene.FindAuthoredBlock(placement.Id());
         if (definition == nullptr) {
+            if (!scene.IsAuthoredBlockSkipped(placement.Id())) {
+                return false;
+            }
             missingBlocks++;
             continue;
         }
@@ -609,7 +612,8 @@ bool BuildReplayChallenge(
             construction.TerrainModifierBlockCount();
     report.removedInitialBlockCount = rejectedCountTotal;
     report.missingBlockCount = construction.MissingBlockCount();
-    report.complete = missingBlocks == 0u &&
+    report.complete =
+            missingBlocks == scene.SkippedAuthoredBlockCount() &&
             construction.BlockCount() ==
                     construction.AuthoredBlockCount() +
                     construction.AutomaticBaseBlockCount() +

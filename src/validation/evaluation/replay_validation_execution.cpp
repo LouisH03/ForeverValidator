@@ -108,6 +108,8 @@ ReplayValidationExecutionResult ExecuteReplayValidation(
     controlRequest.enableRaceSimulationAfterMs =
             plan.enableRaceSimulationAfterMs;
     controlRequest.establishRaceSpawnAtMs = plan.establishRaceSpawnAtMs;
+    controlRequest.appendUnobservedTrailingTick =
+            plan.validationMode == ReplayValidationMode::Race;
     if (plan.sampleCount != 0u) {
         controlRequest.trajectory = std::cref(trajectory);
     }

@@ -122,6 +122,7 @@ public:
     void Clear();
     bool Reserve(std::size_t blockCount);
     bool Add(ReplaySceneBlockDefinition block);
+    bool SkipAuthoredBlock(CGameCtnReplayBlockPlacementId id);
     bool SetConstructionZones(
             std::vector<ReplaySceneConstructionZoneDefinition> zones);
     bool SetZoneClips(std::vector<ReplaySceneZoneClipDefinition> clips);
@@ -132,6 +133,9 @@ public:
     ReplaySceneBlockDefinition *MutableBlockAt(std::size_t index);
     const ReplaySceneBlockDefinition *FindAuthoredBlock(
             CGameCtnReplayBlockPlacementId id) const;
+    bool IsAuthoredBlockSkipped(
+            CGameCtnReplayBlockPlacementId id) const;
+    std::size_t SkippedAuthoredBlockCount() const;
     const ReplaySceneBlockDefinition *AutomaticBaseBlock() const;
 
     const std::vector<ReplaySceneBlockDefinition> &Blocks() const;
@@ -174,6 +178,7 @@ public:
 
 private:
     std::vector<ReplaySceneBlockDefinition> blocks_;
+    std::vector<CGameCtnReplayBlockPlacementId> skippedAuthoredBlocks_;
     std::vector<ReplaySceneConstructionZoneDefinition> constructionZones_;
     std::vector<ReplaySceneZoneClipDefinition> zoneClips_;
     std::vector<ReplaySceneZonePylonDefinition> zonePylons_;

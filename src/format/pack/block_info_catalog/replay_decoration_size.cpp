@@ -52,10 +52,6 @@ bool EndsWith(std::string_view text, std::string_view suffix) {
            text.substr(text.size() - suffix.size()) == suffix;
 }
 
-bool SameMapSize(const GmNat3 &lhs, const GmNat3 &rhs) {
-    return lhs.x == rhs.x && lhs.y == rhs.y && lhs.z == rhs.z;
-}
-
 bool SkipBytes(u32 archiveByteCount, u32 *offset, u32 byteCount) {
     if (offset == nullptr || *offset > archiveByteCount ||
         byteCount > archiveByteCount - *offset) {
@@ -504,6 +500,20 @@ std::optional<CatalogDecorationSizeDefinition> DecorationSizeFromArchive(
 }  // namespace
 
 std::optional<CatalogDecorationSizeDefinition>
+SelectReplayDecorationSizeCandidate(
+        const std::optional<CatalogDecorationSizeDefinition> &candidate,
+        u32 candidateCount,
+        const GmNat3 &serializedMapSize) {
+    if (candidateCount != 1u || !candidate || serializedMapSize.x == 0u ||
+        serializedMapSize.y == 0u || serializedMapSize.z == 0u) {
+        return std::nullopt;
+    }
+    CatalogDecorationSizeDefinition result = *candidate;
+    result.mapSize = serializedMapSize;
+    return result;
+}
+
+std::optional<CatalogDecorationSizeDefinition>
 DecodeReplayDecorationSizeArchive(
         const unsigned char *archiveBytes,
         u32 archiveByteCount) {
@@ -524,10 +534,8 @@ ResolveReplayDecorationSize(
         return std::nullopt;
     }
 
-    std::optional<CatalogDecorationSizeDefinition> exactResult;
-    std::optional<CatalogDecorationSizeDefinition> compatibleResult;
-    bool exactAmbiguous = false;
-    bool compatibleAmbiguous = false;
+    std::optional<CatalogDecorationSizeDefinition> candidate;
+    u32 candidateCount = 0u;
     for (const CPlugFileFidContainer_SFileDesc &file : pack.files) {
         if (file.classId != TMNF_CLASS_CGameCtnDecoration) {
             continue;
@@ -556,27 +564,11 @@ ResolveReplayDecorationSize(
         if (!decoded) {
             continue;
         }
-        if (SameMapSize(decoded->mapSize, mapInput.Size())) {
-            if (exactResult) {
-                exactAmbiguous = true;
-            } else {
-                exactResult = std::move(decoded);
-            }
-            continue;
+        if (!candidate) {
+            candidate = std::move(*decoded);
         }
-        if (!ReplayMapAuthoredCoordinatesFit(mapInput, decoded->mapSize)) {
-            continue;
-        }
-        if (compatibleResult) {
-            compatibleAmbiguous = true;
-        } else {
-            compatibleResult = std::move(decoded);
-        }
+        ++candidateCount;
     }
-    if (exactResult) {
-        return exactAmbiguous ? std::nullopt : std::move(exactResult);
-    }
-    return compatibleAmbiguous
-            ? std::nullopt
-            : std::move(compatibleResult);
+    return SelectReplayDecorationSizeCandidate(
+            candidate, candidateCount, mapInput.Size());
 }

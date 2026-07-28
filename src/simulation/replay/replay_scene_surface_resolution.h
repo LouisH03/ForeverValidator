@@ -108,6 +108,7 @@ private:
 struct ReplaySceneAssetResolver {
     CatalogAssetRepository *assets = nullptr;
 
+    void ResolveJunctionSources(CGameCtnBlockInfo &blockInfo) const;
     CSceneMobil *SelectMobil(
             BlockInfoAssetHandle sourceAsset,
             u32 selectorGroup,

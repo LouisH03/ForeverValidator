@@ -467,10 +467,17 @@ bool ReplaySceneDefinitionFactory::LoadAuthoredBlocks() {
         bool ambiguous = false;
         const BlockInfoCatalogEntry *catalogEntry =
                 catalog_->FindForBlock(placement, &ambiguous);
-        if (catalogEntry == nullptr || !catalogEntry->asset.IsValid()) {
-            return Fail(ambiguous ? "ambiguous-block" : "unknown-block",
-                        &placement,
-                        catalogEntry);
+        if (catalogEntry == nullptr) {
+            if (ambiguous) {
+                return Fail("ambiguous-block", &placement);
+            }
+            if (!scene_.SkipAuthoredBlock(placement.Id())) {
+                return Fail("block-storage", &placement);
+            }
+            continue;
+        }
+        if (!catalogEntry->asset.IsValid()) {
+            return Fail("unknown-block", &placement, catalogEntry);
         }
         CGameCtnBlockInfo *blockInfo =
                 mapAssets_.BlockInfo(catalogEntry->asset);
@@ -526,6 +533,19 @@ bool ReplaySceneDefinitionFactory::BuildSpatialSources() {
 bool ReplaySceneDefinitionFactory::ResolveClipSources() {
     ReplaySceneAssetResolver resolver;
     resolver.assets = &mapAssets_;
+    for (ReplaySceneBlockDefinition &definition : scene_.MutableBlocks()) {
+        CGameCtnBlockInfo *blockInfo = definition.BlockInfo();
+        if (blockInfo != nullptr) {
+            resolver.ResolveJunctionSources(*blockInfo);
+        }
+    }
+    for (const ReplaySceneConstructionZoneDefinition &zone :
+         scene_.ConstructionZones()) {
+        CGameCtnBlockInfo *blockInfo = zone.BlockInfo();
+        if (blockInfo != nullptr) {
+            resolver.ResolveJunctionSources(*blockInfo);
+        }
+    }
     return units_.ApplyClipNeighbourSourceSides(
                    mapInput_, resolver, scene_, &columnSurfaces_) ||
            Fail("clip-neighbours");
@@ -566,7 +586,8 @@ bool ReplaySceneDefinitionFactory::Build() {
            LoadZonePylons() &&
            LoadAuthoredBlocks() && BuildSpatialSources() && ResolveClipSources() &&
            ResolveMaterialRemaps() &&
-           (scene_.BlockCount() == mapInput_.BlockCount() ||
+           (scene_.BlockCount() + scene_.SkippedAuthoredBlockCount() ==
+                    mapInput_.BlockCount() ||
             Fail("block-coverage"));
 }
 

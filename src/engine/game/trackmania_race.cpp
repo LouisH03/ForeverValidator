@@ -41,6 +41,11 @@ void CTrackManiaRace::BindCheckpointCourse(
     checkpointCourse = course;
 }
 
+void CTrackManiaRace::SetCurrentTransformCheckpointFreewheelClearEnabled(
+        bool enabled) {
+    currentTransformCheckpointFreewheelClearEnabled_ = enabled;
+}
+
 void CTrackManiaRace::SetInitialSpawnLocation(const GmIso4 &spawnIso) {
     player.Info().SetSpawnLoc(spawnIso, 1);
     playerSpawnLocation_ = spawnIso;
@@ -115,6 +120,10 @@ void CTrackManiaRace::OnCheckpoint(CTrackManiaPlayer *checkpointPlayer,
             checkpointCourse != nullptr
                     ? checkpointCourse->RaceBlockIdForCheckpointBlock(checkpointBlock)
                     : 0u;
+    if (currentTransformCheckpointFreewheelClearEnabled_ &&
+        blockInfo != nullptr && blockInfo->RespawnUsesCurrentTransform()) {
+        ClearVehicleFreewheelState();
+    }
     const std::optional<u32> checkpointSlot =
             checkpointCourse != nullptr
                     ? checkpointCourse->CheckpointSlotForBlock(checkpointBlock)

@@ -33,6 +33,7 @@ struct ReplayControlPlanRequest {
     ReplayRaceTransitionActions baseActions{};
     std::optional<std::int32_t> enableRaceSimulationAfterMs;
     std::optional<std::int32_t> establishRaceSpawnAtMs;
+    bool appendUnobservedTrailingTick = false;
     std::optional<std::reference_wrapper<const ReplayGhostTrajectory>> trajectory;
     const ReplayInputTimeline &inputTimeline;
 

@@ -567,4 +567,54 @@ if(FOREVERVALIDATOR_BUILD_TESTS)
     forevervalidator_configure_target(forevervalidator-render-scene-tests)
     add_test(NAME forevervalidator-render-scene
              COMMAND forevervalidator-render-scene-tests)
+
+    add_executable(forevervalidator-replay-control-plan-tests
+        tests/replay_control_plan_tests.cpp)
+    target_include_directories(
+        forevervalidator-replay-control-plan-tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(
+        forevervalidator-replay-control-plan-tests PRIVATE
+        forevervalidator_core)
+    forevervalidator_configure_target(
+        forevervalidator-replay-control-plan-tests)
+    add_test(NAME forevervalidator-replay-control-plan
+        COMMAND forevervalidator-replay-control-plan-tests)
+
+    add_executable(forevervalidator-checkpoint-freewheel-tests
+        tests/checkpoint_freewheel_tests.cpp)
+    target_include_directories(
+        forevervalidator-checkpoint-freewheel-tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(
+        forevervalidator-checkpoint-freewheel-tests PRIVATE
+        forevervalidator_core)
+    forevervalidator_configure_target(
+        forevervalidator-checkpoint-freewheel-tests)
+    add_test(NAME forevervalidator-checkpoint-freewheel
+        COMMAND forevervalidator-checkpoint-freewheel-tests)
+
+    add_executable(forevervalidator-replay-decoration-size-tests
+        tests/replay_decoration_size_tests.cpp)
+    target_include_directories(
+        forevervalidator-replay-decoration-size-tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(
+        forevervalidator-replay-decoration-size-tests PRIVATE
+        forevervalidator_core)
+    forevervalidator_configure_target(
+        forevervalidator-replay-decoration-size-tests)
+    add_test(NAME forevervalidator-replay-decoration-size
+        COMMAND forevervalidator-replay-decoration-size-tests)
+
+    add_executable(forevervalidator-replay-scene-unresolved-blocks-tests
+        tests/replay_scene_unresolved_blocks_tests.cpp)
+    target_include_directories(forevervalidator-replay-scene-unresolved-blocks-tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(forevervalidator-replay-scene-unresolved-blocks-tests PRIVATE
+        forevervalidator_core)
+    forevervalidator_configure_target(
+        forevervalidator-replay-scene-unresolved-blocks-tests)
+    add_test(NAME forevervalidator-replay-scene-unresolved-blocks
+        COMMAND forevervalidator-replay-scene-unresolved-blocks-tests)
 endif()
