@@ -2360,6 +2360,8 @@ PhysicsSandboxCudaSearchSession::Impl::Convert(
             execution.mutationKernelMilliseconds;
     result.metrics.simulationKernelMilliseconds =
             execution.simulationKernelMilliseconds;
+    result.metrics.finishRefinementKernelMilliseconds =
+            execution.finishRefinementKernelMilliseconds;
     result.metrics.winnerKernelMilliseconds =
             execution.winnerKernelMilliseconds;
     result.metrics.winnerReductionKernelMilliseconds =
@@ -2441,10 +2443,32 @@ PhysicsSandboxCudaSearchSession::Impl::Convert(
     view.totalLaps = race.requiredLapCount;
     view.raceCompleted = race.raceCompleted;
     if (race.raceCompleted) {
-        view.finishTimeMs =
-                race.lastPrepareTimeMs >= prestartDurationMs
-                ? race.lastPrepareTimeMs - prestartDurationMs
-                : 0u;
+        if (best.state.finishTime.present) {
+            const std::uint64_t prestartNs =
+                    static_cast<std::uint64_t>(
+                            prestartDurationMs) *
+                    1000000u;
+            view.finishTime = best.state.finishTime.value;
+            view.finishTime->lowerBoundNs =
+                    view.finishTime->lowerBoundNs >= prestartNs
+                    ? view.finishTime->lowerBoundNs - prestartNs
+                    : 0u;
+            view.finishTime->upperBoundNs =
+                    view.finishTime->upperBoundNs >= prestartNs
+                    ? view.finishTime->upperBoundNs - prestartNs
+                    : 0u;
+            view.finishTime->estimatedNs =
+                    view.finishTime->estimatedNs >= prestartNs
+                    ? view.finishTime->estimatedNs - prestartNs
+                    : 0u;
+            view.finishTimeMs = static_cast<std::uint32_t>(
+                    view.finishTime->estimatedNs / 1000000u);
+        } else {
+            view.finishTimeMs =
+                    race.lastPrepareTimeMs >= prestartDurationMs
+                    ? race.lastPrepareTimeMs - prestartDurationMs
+                    : 0u;
+        }
     }
     view.respawnCount = best.state.incrementalRespawnCount;
     if (best.state.stuntsEnabled) {

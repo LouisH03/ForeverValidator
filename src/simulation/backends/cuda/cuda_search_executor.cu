@@ -14,6 +14,7 @@
 #include <utility>
 
 #include "simulation/backends/cuda/cuda_exact_math.cuh"
+#include "simulation/backends/cuda/cuda_finish_time_refinement.cuh"
 #include "simulation/backends/cuda/cuda_physics_step.cuh"
 #include "simulation/backends/cuda/cuda_static_configuration.h"
 #include "simulation/backends/cuda/cuda_scene_layout.h"
@@ -1802,12 +1803,205 @@ __global__ __launch_bounds__(
     candidateBestSamples[slot + 1u] = localBest;
 }
 
+template <typename State, bool SimulateStunts>
+__global__ void RefineSearchFinishTimesKernel(
+        const void *sceneData,
+        const void *configurationData,
+        const CudaCandidateState *branchState,
+        const CudaControlTick *baselineTicks,
+        std::uint32_t timelineTickCount,
+        std::uint32_t tickDurationMs,
+        std::uint32_t prestartDurationMs,
+        std::int64_t branchTimeMs,
+        std::uint32_t eventCapacity,
+        DeviceSample *candidateBestSamples,
+        cuda::finish::Refinement *finishRefinements,
+        const CudaSearchInputEvent *baselineInputs,
+        const CudaSearchInputEvent *candidateEvents,
+        const std::int32_t *candidateInputValues,
+        const std::uint32_t *compactInputOffsets,
+        std::uint32_t compactInputCount,
+        bool compactRandomSteeringPipeline,
+        const std::uint32_t *eventCounts,
+        DeviceCandidateStatus *statuses,
+        const bool *activeCandidates,
+        cuda::collision::CudaCollision *collisionScratch,
+        cuda::collision::CudaCollision *shapeCollisionScratch,
+        GmIso4 *shapeWorldScratch,
+        GmBoxAligned *movingBoundsScratch,
+        cuda::collision::CudaCollisionSurfaceHit *
+                surfaceHitScratch,
+        cuda::collision::CudaCollisionMeshRange *
+                meshRangeScratch,
+        std::uint32_t *meshCellScratch,
+        std::uint32_t scratchStride,
+        std::uint32_t shapeCapacity,
+        const std::uint32_t *cancellation,
+        std::uint32_t candidateCount) {
+    const std::uint32_t slot =
+            blockIdx.x * blockDim.x + threadIdx.x;
+    if (slot >= candidateCount || !activeCandidates[slot]) {
+        return;
+    }
+    DeviceSample &sample = candidateBestSamples[slot + 1u];
+    if (!sample.valid ||
+        statuses[slot] != DeviceCandidateStatus::Success) {
+        return;
+    }
+    cuda::finish::Refinement &refinement =
+            finishRefinements[slot];
+    refinement = {};
+    const CudaSearchInputEvent *events =
+            candidateEvents == nullptr
+            ? nullptr
+            : candidateEvents +
+                      static_cast<std::uint64_t>(slot) * eventCapacity;
+    const std::int32_t *compactValues =
+            candidateInputValues == nullptr
+            ? nullptr
+            : candidateInputValues +
+                      static_cast<std::uint64_t>(slot) *
+                              compactInputCount;
+    const std::uint32_t eventCount = eventCounts[slot];
+    State state =
+            LoadSearchState<State, SimulateStunts>(branchState);
+    state.candidateId =
+            static_cast<std::uint32_t>(sample.candidateId);
+    cuda::collision::CudaCollisionSearchScratch candidateScratch{
+            0u,
+            0u,
+            0u,
+            false,
+            false,
+            collisionScratch,
+            shapeCollisionScratch,
+            shapeWorldScratch,
+            movingBoundsScratch,
+            surfaceHitScratch,
+            meshRangeScratch,
+            meshCellScratch,
+            slot,
+            scratchStride,
+            shapeCapacity};
+    DeviceControlState controlState;
+    std::uint32_t eventCursor = 0u;
+    while (eventCursor < eventCount) {
+        const CudaSearchInputEvent event = CandidateInputAt(
+                baselineInputs, events, compactValues,
+                compactInputOffsets,
+                compactRandomSteeringPipeline, eventCursor);
+        if (event.timeMs > branchTimeMs) {
+            break;
+        }
+        ApplyControlEvent(controlState, event);
+        ++eventCursor;
+    }
+    for (std::uint32_t tickIndex = 0u;
+         tickIndex < timelineTickCount; ++tickIndex) {
+        if ((tickIndex & 63u) == 0u &&
+            *reinterpret_cast<volatile const std::uint32_t *>(
+                    cancellation) != 0u) {
+            statuses[slot] = DeviceCandidateStatus::Cancelled;
+            return;
+        }
+        const std::int64_t publicTime =
+                branchTimeMs +
+                static_cast<std::int64_t>(tickIndex + 1u) *
+                        tickDurationMs;
+        while (eventCursor < eventCount) {
+            const CudaSearchInputEvent event = CandidateInputAt(
+                    baselineInputs, events, compactValues,
+                    compactInputOffsets,
+                    compactRandomSteeringPipeline, eventCursor);
+            if (event.timeMs > publicTime) {
+                break;
+            }
+            ApplyControlEvent(controlState, event);
+            ++eventCursor;
+        }
+        CudaControlTick tick = baselineTicks[tickIndex];
+        tick.controls = ControlsFromState(controlState);
+        tick.stuntsInput =
+                StuntsFromState(controlState, prestartDurationMs);
+        ApplyControlPrefix(state, tick);
+        if (!state.firstStep) {
+            cuda::transition::PrepareStep(
+                    state, tick,
+                    static_cast<const
+                            CudaPackedStaticConfigurationHeader *>(
+                            configurationData));
+        }
+        state.vehicle.mobil.absorbContactEnabled = true;
+        state.vehicle.mobil.physicsUpdatesEnabled =
+                (tick.actionFlags &
+                 CudaControlActionSuppressVehicleForceCallbacks) == 0u;
+        for (std::uint32_t respawn = 0u;
+             respawn < tick.respawnAtCheckpointCount; ++respawn) {
+            if (cuda::transition::Respawn(
+                        state,
+                        static_cast<const
+                                CudaPackedStaticConfigurationHeader *>(
+                                configurationData))) {
+                ++state.incrementalRespawnCount;
+                if constexpr (SimulateStunts) {
+                    cuda::stunts::ApplyRespawnPenalty(state.stunts);
+                }
+            }
+        }
+        const cuda::physics::Status physicsStatus =
+                cuda::finish::StepAndRefine<false, false, true>(
+                        static_cast<const CudaPackedSceneHeader *>(
+                                sceneData),
+                        static_cast<const
+                                CudaPackedStaticConfigurationHeader *>(
+                                configurationData),
+                        state, tick, candidateScratch, refinement);
+        if (physicsStatus != cuda::physics::Status::Success ||
+            refinement.failed) {
+            statuses[slot] =
+                    DeviceCandidateStatus::UnsupportedPhysicsTransition;
+            return;
+        }
+        if (refinement.present) {
+            const std::uint64_t prestartNs =
+                    static_cast<std::uint64_t>(
+                            prestartDurationMs) *
+                    1000000u;
+            if (refinement.estimate.lowerBoundNs < prestartNs ||
+                refinement.estimate.upperBoundNs < prestartNs) {
+                statuses[slot] =
+                        DeviceCandidateStatus::
+                                UnsupportedPhysicsTransition;
+                return;
+            }
+            sample.score = static_cast<double>(
+                    refinement.estimate.upperBoundNs - prestartNs);
+            sample.timeMs = sample.score / 1000000.0;
+            return;
+        }
+        if constexpr (SimulateStunts) {
+            const cuda::stunts::Status stuntStatus =
+                    cuda::stunts::Update(state, tick);
+            if (stuntStatus != cuda::stunts::Status::Success) {
+                statuses[slot] =
+                        DeviceCandidateStatus::CapacityExceeded;
+                return;
+            }
+        }
+        state.firstStep = false;
+        ++state.controlCursor;
+    }
+    statuses[slot] =
+            DeviceCandidateStatus::UnsupportedPhysicsTransition;
+}
+
 __global__ void CaptureSearchWinnerStateKernel(
         const void *sceneData,
         const void *configurationData,
         const CudaCandidateState *branchState,
         const CudaControlTick *baselineTicks,
         const DeviceSample *reducedBest,
+        const cuda::finish::Refinement *finishRefinements,
         std::uint32_t tickDurationMs,
         std::uint32_t prestartDurationMs,
         std::int64_t branchTimeMs,
@@ -1967,6 +2161,16 @@ __global__ void CaptureSearchWinnerStateKernel(
     cuda::collision::detail::CaptureReplacementOverflow(
             candidateScratch,
             state.collisionReplacementOverflow);
+    if (finishRefinements != nullptr &&
+        finishRefinements[slot].present) {
+        const forevervalidator::FinishTimeEstimate &finishTime =
+                finishRefinements[slot].estimate;
+        state.finishTime.present = true;
+        state.finishTime.value = {
+                finishTime.lowerBoundNs,
+                finishTime.upperBoundNs,
+                finishTime.estimatedNs};
+    }
     *capturedWinnerState = state;
 }
 
@@ -2107,6 +2311,7 @@ struct CudaSearchExecutor::Impl {
     DeviceAllocation<CudaSearchEvaluatorConfiguration> evaluator;
     DeviceAllocation<CudaCandidateState> capturedWinnerState;
     DeviceAllocation<DeviceSample> candidateBestSamples;
+    DeviceAllocation<cuda::finish::Refinement> finishRefinements;
     DeviceAllocation<std::uint32_t> randomStateWords;
     DeviceAllocation<CudaSearchInputEvent> candidateEvents;
     DeviceAllocation<std::uint32_t> compactInputIndices;
@@ -2149,6 +2354,7 @@ struct CudaSearchExecutor::Impl {
         ADD_BYTES(evaluator);
         ADD_BYTES(capturedWinnerState);
         ADD_BYTES(candidateBestSamples);
+        ADD_BYTES(finishRefinements);
         ADD_BYTES(randomStateWords);
         ADD_BYTES(candidateEvents);
         ADD_BYTES(compactInputIndices);
@@ -2354,6 +2560,8 @@ struct CudaSearchExecutor::Impl {
         const std::size_t meshCellSlots =
                 static_cast<std::size_t>(meshCellSlots64);
         DeviceAllocation<DeviceSample> nextCandidateBestSamples;
+        DeviceAllocation<cuda::finish::Refinement>
+                nextFinishRefinements;
         DeviceAllocation<std::uint32_t> nextRandomStateWords;
         DeviceAllocation<CudaSearchInputEvent> nextCandidateEvents;
         DeviceAllocation<std::int32_t> nextCandidateInputValues;
@@ -2377,6 +2585,11 @@ struct CudaSearchExecutor::Impl {
                 nextMeshRangeScratch;
         DeviceAllocation<std::uint32_t> nextMeshCellScratch;
         if (!nextCandidateBestSamples.Allocate(winnerSlots) ||
+            !nextFinishRefinements.Allocate(
+                    configuration.evaluator.kind ==
+                                    CudaSearchEvaluatorKind::FinishTime
+                            ? candidates
+                            : 0u) ||
             !nextRandomStateWords.Allocate(candidates * 624u) ||
             !nextCandidateEvents.Allocate(
                     compactRandomSteeringPipeline ? 0u : eventSlots) ||
@@ -2433,6 +2646,7 @@ struct CudaSearchExecutor::Impl {
         }
 
         candidateBestSamples = std::move(nextCandidateBestSamples);
+        finishRefinements = std::move(nextFinishRefinements);
         randomStateWords = std::move(nextRandomStateWords);
         candidateEvents = std::move(nextCandidateEvents);
         candidateInputValues =
@@ -2520,12 +2734,14 @@ struct CudaSearchExecutor::Impl {
         Event winnerInitialized;
         Event mutationsGenerated;
         Event simulationFinished;
+        Event finishRefined;
         Event winnerReduced;
         Event winnerStateCaptured;
         Event finished;
         if (!started.Valid() || !winnerInitialized.Valid() ||
             !mutationsGenerated.Valid() ||
             !simulationFinished.Valid() ||
+            !finishRefined.Valid() ||
             !winnerReduced.Valid() ||
             !winnerStateCaptured.Valid() || !finished.Valid()) {
             result.status = CudaSearchStatus::DeviceFailure;
@@ -2656,6 +2872,57 @@ struct CudaSearchExecutor::Impl {
                     std::false_type{});
         }
         cudaEventRecord(simulationFinished.Get());
+        if (configuration.evaluator.kind ==
+            CudaSearchEvaluatorKind::FinishTime) {
+            const auto launchFinishRefinement =
+                    [&](auto stateType, auto simulateStunts) {
+                using State = decltype(stateType);
+                constexpr bool SimulateStunts =
+                        decltype(simulateStunts)::value;
+                RefineSearchFinishTimesKernel<State, SimulateStunts>
+                        <<<simulationBlocks, SimulationBlockSize>>>(
+                        configuration.deviceScene,
+                        configuration.deviceStaticConfiguration,
+                        branchState.Get(),
+                        baselineTicks.Get(),
+                        timelineTickCount,
+                        configuration.tickDurationMs,
+                        configuration.prestartDurationMs,
+                        configuration.branchTimeMs,
+                        static_cast<std::uint32_t>(
+                                configuration.maximumEventCount),
+                        candidateBestSamples.Get(),
+                        finishRefinements.Get(),
+                        baselineInputs.Get(),
+                        candidateEvents.Get(),
+                        candidateInputValues.Get(),
+                        compactInputOffsets.Get(),
+                        compactInputCount,
+                        compactRandomSteeringPipeline,
+                        eventCounts.Get(),
+                        statuses.Get(),
+                        activeCandidates.Get(),
+                        collisionScratch.Get(),
+                        shapeCollisionScratch.Get(),
+                        shapeWorldScratch.Get(),
+                        movingBoundsScratch.Get(),
+                        surfaceHitScratch.Get(),
+                        meshRangeScratch.Get(),
+                        meshCellScratch.Get(),
+                        configuration.maximumBatchSize,
+                        collisionShapeCount,
+                        cancellation.Get(),
+                        candidateCount);
+            };
+            if (configuration.branchState.stuntsEnabled) {
+                launchFinishRefinement(
+                        CudaCandidateState{}, std::true_type{});
+            } else {
+                launchFinishRefinement(
+                        CudaCandidatePhysicsState{}, std::false_type{});
+            }
+        }
+        cudaEventRecord(finishRefined.Get());
         std::size_t temporaryBytes = reductionTemporary.Bytes();
         error = cub::DeviceReduce::Reduce(
                 reductionTemporary.Get(), temporaryBytes,
@@ -2678,6 +2945,10 @@ struct CudaSearchExecutor::Impl {
                 branchState.Get(),
                 baselineTicks.Get(),
                 reducedBest.Get(),
+                configuration.evaluator.kind ==
+                                CudaSearchEvaluatorKind::FinishTime
+                        ? finishRefinements.Get()
+                        : nullptr,
                 configuration.tickDurationMs,
                 configuration.prestartDurationMs,
                 configuration.branchTimeMs,
@@ -2780,11 +3051,16 @@ struct CudaSearchExecutor::Impl {
         cudaEventElapsedTime(
                 &milliseconds,
                 simulationFinished.Get(),
+                finishRefined.Get());
+        result.finishRefinementKernelMilliseconds = milliseconds;
+        cudaEventElapsedTime(
+                &milliseconds,
+                finishRefined.Get(),
                 finished.Get());
         result.winnerKernelMilliseconds = milliseconds;
         cudaEventElapsedTime(
                 &milliseconds,
-                simulationFinished.Get(),
+                finishRefined.Get(),
                 winnerReduced.Get());
         result.winnerReductionKernelMilliseconds = milliseconds;
         cudaEventElapsedTime(
@@ -2853,13 +3129,6 @@ struct CudaSearchExecutor::Impl {
             result.best.score = bestSample.score;
             result.best.evaluationTick = bestSample.evaluationTick;
             result.best.timeMs = bestSample.timeMs;
-            if (configuration.evaluator.kind ==
-                CudaSearchEvaluatorKind::FinishTime) {
-                result.best.score -=
-                        configuration.prestartDurationMs;
-                result.best.timeMs -=
-                        configuration.prestartDurationMs;
-            }
             result.best.detail0 = bestSample.detail0;
             result.best.detail1 = bestSample.detail1;
             result.best.inputs.resize(hostSummary.globalEventCount);
@@ -3150,6 +3419,11 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
             !impl->evaluator.Allocate(1u) ||
             !impl->capturedWinnerState.Allocate(1u) ||
             !impl->candidateBestSamples.Allocate(winnerSampleSlots) ||
+            !impl->finishRefinements.Allocate(
+                    configuration.evaluator.kind ==
+                                    CudaSearchEvaluatorKind::FinishTime
+                            ? candidates
+                            : 0u) ||
             !impl->randomStateWords.Allocate(candidates * 624u) ||
             !impl->candidateEvents.Allocate(
                     impl->compactRandomSteeringPipeline
