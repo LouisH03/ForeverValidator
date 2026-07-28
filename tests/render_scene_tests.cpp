@@ -1,8 +1,10 @@
 #include <forevervalidator/experimental/physics_sandbox.h>
 
+#include "engine/game/game_ctn_block_info.h"
 #include "engine/rendering/plug_tree.h"
 #include "engine/scene/static_scene_model.h"
 #include "format/static_solid/static_solid_geometry_decoder.h"
+#include "simulation/replay/replay_scene_surface_resolution.h"
 #include "simulation/runtime/replay_simulation_session.h"
 
 #include <cmath>
@@ -22,6 +24,60 @@ bool Check(bool condition, const char *message) {
     }
     return condition;
 }
+
+class TestBlockInfoAssetRegistry : public BlockInfoAssetRegistry {
+public:
+    static BlockInfoAssetHandle Handle(u32 index) {
+        return HandleForStorageIndex(index);
+    }
+};
+
+class JunctionResolverRepository final : public CatalogAssetRepository {
+public:
+    JunctionResolverRepository(
+            BlockInfoAssetHandle sourceAsset,
+            CGameCtnBlockInfoClip &sourceClip)
+            : sourceAsset_(sourceAsset), sourceClip_(&sourceClip) {}
+
+    const BlockInfoCatalog *Catalog() override { return nullptr; }
+
+    CGameCtnBlockInfo *BlockInfo(BlockInfoAssetHandle asset) override {
+        return asset == sourceAsset_ ? sourceClip_.Get() : nullptr;
+    }
+
+    CSceneMobil *Mobil(
+            BlockInfoAssetHandle,
+            bool,
+            u32) override {
+        return nullptr;
+    }
+
+    std::optional<std::string> FirstGroundSurface(
+            BlockInfoAssetHandle) override {
+        return std::nullopt;
+    }
+
+    std::optional<CatalogCollectionDefinition> Collection(
+            std::string_view) override {
+        return std::nullopt;
+    }
+
+    std::optional<CatalogDecorationSizeDefinition> DecorationSize(
+            const CGameCtnReplayMapInput &) override {
+        return std::nullopt;
+    }
+
+    bool HasSurfaceReplacement(
+            std::string_view,
+            std::string_view,
+            std::string_view) override {
+        return false;
+    }
+
+private:
+    BlockInfoAssetHandle sourceAsset_;
+    CMwNodRef<CGameCtnBlockInfoClip> sourceClip_;
+};
 
 void AppendFloat(std::vector<std::uint8_t> *bytes, float value) {
     const std::size_t offset = bytes->size();
@@ -221,6 +277,44 @@ bool TestGenericBackgroundLayerClassification() {
             "generic enclosing backdrop was not separated from world geometry");
 }
 
+bool TestClipJunctionSourceResolution() {
+    const BlockInfoAssetHandle sourceAsset =
+            TestBlockInfoAssetRegistry::Handle(7u);
+    CMwNodRef<CGameCtnBlockInfoClip> unresolved =
+            MakeMwNod<CGameCtnBlockInfoClip>();
+    CMwNodRef<CGameCtnBlockInfoClip> resolved =
+            MakeMwNod<CGameCtnBlockInfoClip>();
+    unresolved->SetSourceAsset(sourceAsset);
+    resolved->SetSourceAsset(sourceAsset);
+    resolved->ResetMobilVariants(CGameCtnBlockInfo::GroundMobilFamily, 1u);
+    resolved->AddMobil(
+            CGameCtnBlockInfo::GroundMobilFamily,
+            0u,
+            new CSceneMobil());
+
+    CGameCtnBlockInfo owner;
+    auto unit = std::make_unique<CGameCtnBlockUnitInfo>();
+    unit->InitializeUnitFields({0u, 0u, 0u}, 0u, 0u, &owner);
+    unit->SetJunction(ECardinalDir::West, unresolved.Get());
+    CGameCtnBlockUnitInfo *installedUnit = unit.get();
+    owner.AddBlockUnitInfo(true, std::move(unit));
+
+    JunctionResolverRepository repository(sourceAsset, *resolved);
+    ReplaySceneAssetResolver resolver;
+    resolver.assets = &repository;
+    resolver.ResolveJunctionSources(owner);
+
+    CGameCtnBlockInfoClip *junction =
+            installedUnit->JunctionAt(ECardinalDir::West);
+    return Check(
+            junction == resolved.Get() &&
+                    junction->GetMobil(
+                            CGameCtnBlockInfo::GroundMobilFamily,
+                            0u,
+                            0u) != nullptr,
+            "deferred clip junction kept its empty placeholder");
+}
+
 }  // namespace
 
 int main() {
@@ -228,5 +322,6 @@ int main() {
     okay &= TestTransformComposition();
     okay &= TestProvenanceAndImmutableScene();
     okay &= TestGenericBackgroundLayerClassification();
+    okay &= TestClipJunctionSourceResolution();
     return okay ? 0 : 1;
 }

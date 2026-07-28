@@ -292,6 +292,35 @@ ReplayClipConstructionDecision ResolveClipConstructionDecision(
             : ReplayClipConstructionDecision::ConstructMobil;
 }
 
+void ReplaySceneAssetResolver::ResolveJunctionSources(
+        CGameCtnBlockInfo &blockInfo) const {
+    for (int family = 0; family <= 1; ++family) {
+        for (const auto &unitInfo : blockInfo.BlockUnitInfos(family)) {
+            if (unitInfo == nullptr) {
+                continue;
+            }
+            for (u32 side = 0u; side < 4u; ++side) {
+                const ECardinalDir direction =
+                        static_cast<ECardinalDir>(side);
+                CGameCtnBlockInfoClip *source =
+                        unitInfo->JunctionAt(direction);
+                const BlockInfoAssetHandle sourceAsset =
+                        source != nullptr
+                        ? source->SourceAsset()
+                        : BlockInfoAssetHandle{};
+                if (!sourceAsset.IsValid()) {
+                    continue;
+                }
+                CGameCtnBlockInfoClip *resolved =
+                        ClipBlockInfo(sourceAsset);
+                if (resolved != nullptr) {
+                    unitInfo->SetJunction(direction, resolved);
+                }
+            }
+        }
+    }
+}
+
 CSceneMobil *ReplaySceneAssetResolver::SelectMobil(
         BlockInfoAssetHandle sourceAsset,
         u32 selectorGroup,

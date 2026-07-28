@@ -526,6 +526,19 @@ bool ReplaySceneDefinitionFactory::BuildSpatialSources() {
 bool ReplaySceneDefinitionFactory::ResolveClipSources() {
     ReplaySceneAssetResolver resolver;
     resolver.assets = &mapAssets_;
+    for (ReplaySceneBlockDefinition &definition : scene_.MutableBlocks()) {
+        CGameCtnBlockInfo *blockInfo = definition.BlockInfo();
+        if (blockInfo != nullptr) {
+            resolver.ResolveJunctionSources(*blockInfo);
+        }
+    }
+    for (const ReplaySceneConstructionZoneDefinition &zone :
+         scene_.ConstructionZones()) {
+        CGameCtnBlockInfo *blockInfo = zone.BlockInfo();
+        if (blockInfo != nullptr) {
+            resolver.ResolveJunctionSources(*blockInfo);
+        }
+    }
     return units_.ApplyClipNeighbourSourceSides(
                    mapInput_, resolver, scene_, &columnSurfaces_) ||
            Fail("clip-neighbours");
