@@ -107,7 +107,6 @@ struct CudaSearchBest {
     bool mutation = false;
     std::uint64_t candidateId = 0u;
     std::uint32_t mutationCount = 0u;
-    std::uint32_t evaluationTick = 0u;
     double score = 0.0;
     double timeMs = 0.0;
     double detail0 = 0.0;
@@ -123,8 +122,6 @@ struct CudaSearchBatchExecution {
     std::uint32_t evaluatedCandidateCount = 0u;
     std::uint64_t evaluatorCalls = 0u;
     std::uint64_t totalMutationCount = 0u;
-    // Candidate-best samples that strictly improved the incumbent in
-    // logical candidate order.
     std::uint64_t mutationImprovementCount = 0u;
     bool bestChanged = false;
     CudaSearchBest best{};
@@ -132,13 +129,9 @@ struct CudaSearchBatchExecution {
     std::uint64_t mutationDeviceBytes = 0u;
     std::uint64_t candidateInputDeviceBytes = 0u;
     std::uint64_t mutationScratchDeviceBytes = 0u;
-    // Candidate-best samples, the incumbent/reduction output, and CUB
-    // temporary storage. This is independent of evaluationTickCount.
-    std::uint64_t winnerSelectionDeviceBytes = 0u;
     std::uint64_t hostToDeviceBytes = 0u;
     std::uint64_t deviceToHostBytes = 0u;
     double kernelMilliseconds = 0.0;
-    // Retained name for compatibility; now measures the O(1) incumbent seed.
     double scoreInitializationKernelMilliseconds = 0.0;
     double mutationKernelMilliseconds = 0.0;
     double simulationKernelMilliseconds = 0.0;

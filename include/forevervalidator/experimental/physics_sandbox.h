@@ -434,8 +434,6 @@ struct PhysicsSandboxCudaSearchMetrics {
     std::uint64_t mutationDeviceBytes = 0u;
     std::uint64_t candidateInputDeviceBytes = 0u;
     std::uint64_t mutationScratchDeviceBytes = 0u;
-    // Winner-selection storage only; independent of the evaluation window.
-    std::uint64_t winnerSelectionDeviceBytes = 0u;
     std::uint64_t hostToDeviceBytes = 0u;
     std::uint64_t deviceToHostBytes = 0u;
     double kernelMilliseconds = 0.0;
@@ -459,14 +457,12 @@ struct PhysicsSandboxCudaSearchBatch {
     std::uint32_t evaluatedCandidateCount = 0u;
     std::uint64_t evaluatorCalls = 0u;
     std::uint64_t totalMutationCount = 0u;
-    // Candidate-level incumbent improvements in logical candidate order.
     std::uint64_t mutationImprovementCount = 0u;
     bool cancelled = false;
     bool bestChanged = false;
     bool bestIsMutation = false;
     std::optional<std::uint64_t> bestCandidateId;
     std::size_t bestMutationCount = 0u;
-    std::uint32_t bestEvaluationTick = 0u;
     double bestScore = 0.0;
     double bestTimeMs = 0.0;
     double bestDetail0 = 0.0;
