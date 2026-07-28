@@ -205,6 +205,41 @@ std::string CudaFailure(const char *operation, cudaError_t error) {
             cudaGetErrorString(error) + ")";
 }
 
+bool CanonicalBaselineInputs(
+        const std::vector<CudaSearchInputEvent> &inputs,
+        std::int64_t mutableFromTimeMs) {
+    bool mutableInputSeen = false;
+    std::int32_t previousMutableTime = INT32_MIN;
+    for (std::size_t index = 0u; index < inputs.size(); ++index) {
+        const CudaSearchInputEvent &input = inputs[index];
+        if (input.timeMs < mutableFromTimeMs) {
+            if (mutableInputSeen) {
+                return false;
+            }
+            continue;
+        }
+        mutableInputSeen = true;
+        if (input.timeMs < 0 ||
+            input.timeMs < previousMutableTime ||
+            (input.valueKind == 2u &&
+             (input.value < -65536 || input.value > 65536)) ||
+            (input.valueKind == 1u &&
+             input.value != 0 && input.value != 1)) {
+            return false;
+        }
+        for (std::size_t duplicate = index;
+             duplicate != 0u &&
+             inputs[duplicate - 1u].timeMs == input.timeMs;
+             --duplicate) {
+            if (inputs[duplicate - 1u].action == input.action) {
+                return false;
+            }
+        }
+        previousMutableTime = input.timeMs;
+    }
+    return true;
+}
+
 __device__ bool IsAnalog(const CudaSearchInputEvent &event) {
     return event.valueKind == 2u;
 }
@@ -247,8 +282,31 @@ __device__ bool SameEvent(const CudaSearchInputEvent &left,
             left.value == right.value;
 }
 
+__device__ CudaSearchInputEvent CandidateInputAt(
+        const CudaSearchInputEvent *baselineInputs,
+        const CudaSearchInputEvent *materializedInputs,
+        const std::int32_t *compactValues,
+        const std::uint32_t *compactOffsets,
+        bool compact,
+        std::uint32_t index) {
+    if (!compact) {
+        return materializedInputs[index];
+    }
+    CudaSearchInputEvent result = baselineInputs[index];
+    const std::uint32_t offset = compactOffsets[index];
+    if (offset != UINT32_MAX) {
+        result.value = compactValues[offset];
+    }
+    return result;
+}
+
 class DeviceMt19937 {
 public:
+    __device__ DeviceMt19937(std::uint32_t *stateWords,
+                             std::uint32_t slot,
+                             std::uint32_t stride)
+        : stateWords_(stateWords), slot_(slot), stride_(stride) {}
+
     __device__ void Seed(std::uint32_t seed,
                          std::uint64_t candidateId,
                          std::uint32_t passIndex) {
@@ -257,8 +315,8 @@ public:
                 static_cast<std::uint32_t>(candidateId),
                 static_cast<std::uint32_t>(candidateId >> 32u),
                 passIndex};
-        for (std::uint32_t &value : state_) {
-            value = 0x8b8b8b8bu;
+        for (std::uint32_t index = 0u; index < 624u; ++index) {
+            State(index) = 0x8b8b8b8bu;
         }
         constexpr std::uint32_t n = 624u;
         constexpr std::uint32_t s = 4u;
@@ -267,48 +325,48 @@ public:
         {
             const std::uint32_t r1 = 1371501266u;
             const std::uint32_t r2 = r1 + s;
-            state_[p] += r1;
-            state_[q] += r2;
-            state_[0] = r2;
+            State(p) += r1;
+            State(q) += r2;
+            State(0u) = r2;
         }
         for (std::uint32_t k = 1u; k <= s; ++k) {
             const std::uint32_t kn = k % n;
             const std::uint32_t kpn = (k + p) % n;
             const std::uint32_t kqn = (k + q) % n;
             const std::uint32_t argument =
-                    state_[kn] ^ state_[kpn] ^ state_[(k - 1u) % n];
+                    State(kn) ^ State(kpn) ^ State((k - 1u) % n);
             const std::uint32_t r1 =
                     1664525u * (argument ^ (argument >> 27u));
             const std::uint32_t r2 = r1 + kn + seeds[k - 1u];
-            state_[kpn] += r1;
-            state_[kqn] += r2;
-            state_[kn] = r2;
+            State(kpn) += r1;
+            State(kqn) += r2;
+            State(kn) = r2;
         }
         for (std::uint32_t k = s + 1u; k < n; ++k) {
             const std::uint32_t kn = k % n;
             const std::uint32_t kpn = (k + p) % n;
             const std::uint32_t kqn = (k + q) % n;
             const std::uint32_t argument =
-                    state_[kn] ^ state_[kpn] ^ state_[(k - 1u) % n];
+                    State(kn) ^ State(kpn) ^ State((k - 1u) % n);
             const std::uint32_t r1 =
                     1664525u * (argument ^ (argument >> 27u));
             const std::uint32_t r2 = r1 + kn;
-            state_[kpn] += r1;
-            state_[kqn] += r2;
-            state_[kn] = r2;
+            State(kpn) += r1;
+            State(kqn) += r2;
+            State(kn) = r2;
         }
         for (std::uint32_t k = n; k < 2u * n; ++k) {
             const std::uint32_t kn = k % n;
             const std::uint32_t kpn = (k + p) % n;
             const std::uint32_t kqn = (k + q) % n;
             const std::uint32_t argument =
-                    state_[kn] + state_[kpn] + state_[(k - 1u) % n];
+                    State(kn) + State(kpn) + State((k - 1u) % n);
             const std::uint32_t r3 =
                     1566083941u * (argument ^ (argument >> 27u));
             const std::uint32_t r4 = r3 - kn;
-            state_[kpn] ^= r3;
-            state_[kqn] ^= r4;
-            state_[kn] = r4;
+            State(kpn) ^= r3;
+            State(kqn) ^= r4;
+            State(kn) = r4;
         }
         cursor_ = n;
     }
@@ -317,7 +375,7 @@ public:
         if (cursor_ >= 624u) {
             Twist();
         }
-        std::uint32_t value = state_[cursor_++];
+        std::uint32_t value = State(cursor_++);
         value ^= value >> 11u;
         value ^= (value << 7u) & 0x9d2c5680u;
         value ^= (value << 15u) & 0xefc60000u;
@@ -410,35 +468,42 @@ public:
     }
 
 private:
+    __device__ std::uint32_t &State(std::uint32_t index) {
+        return stateWords_[
+                static_cast<std::uint64_t>(index) * stride_ + slot_];
+    }
+
     __device__ void Twist() {
         constexpr std::uint32_t upperMask = 0x80000000u;
         constexpr std::uint32_t lowerMask = 0x7fffffffu;
         constexpr std::uint32_t coefficient = 0x9908b0dfu;
         for (std::uint32_t index = 0u; index < 227u; ++index) {
             const std::uint32_t value =
-                    (state_[index] & upperMask) |
-                    (state_[index + 1u] & lowerMask);
-            state_[index] = state_[index + 397u] ^
+                    (State(index) & upperMask) |
+                    (State(index + 1u) & lowerMask);
+            State(index) = State(index + 397u) ^
                     (value >> 1u) ^
                     ((value & 1u) ? coefficient : 0u);
         }
         for (std::uint32_t index = 227u; index < 623u; ++index) {
             const std::uint32_t value =
-                    (state_[index] & upperMask) |
-                    (state_[index + 1u] & lowerMask);
-            state_[index] = state_[index - 227u] ^
+                    (State(index) & upperMask) |
+                    (State(index + 1u) & lowerMask);
+            State(index) = State(index - 227u) ^
                     (value >> 1u) ^
                     ((value & 1u) ? coefficient : 0u);
         }
         const std::uint32_t value =
-                (state_[623u] & upperMask) |
-                (state_[0u] & lowerMask);
-        state_[623u] = state_[396u] ^ (value >> 1u) ^
+                (State(623u) & upperMask) |
+                (State(0u) & lowerMask);
+        State(623u) = State(396u) ^ (value >> 1u) ^
                 ((value & 1u) ? coefficient : 0u);
         cursor_ = 0u;
     }
 
-    std::uint32_t state_[624]{};
+    std::uint32_t *stateWords_ = nullptr;
+    std::uint32_t slot_ = 0u;
+    std::uint32_t stride_ = 0u;
     std::uint32_t cursor_ = 624u;
 };
 
@@ -497,7 +562,8 @@ __device__ std::uint32_t NormalizeEvents(
         CudaSearchInputEvent *temporary,
         const CudaSearchInputEvent *passBaseline,
         std::uint32_t passBaselineCount,
-        std::int64_t mutableFromTimeMs) {
+        std::int64_t mutableFromTimeMs,
+        bool legacyMutationPipeline) {
     std::uint32_t mutableCount = 0u;
     for (std::uint32_t index = 0u; index < count; ++index) {
         if (events[index].timeMs >= mutableFromTimeMs) {
@@ -697,12 +763,32 @@ __device__ bool ApplyModifier(
         CudaSearchInputEvent *temporary,
         CudaSearchInputEvent *passBaseline,
         std::uint32_t *eligible,
-        const double *smoothWeights) {
+        const double *smoothWeights,
+        bool legacyMutationPipeline,
+        bool *normalized) {
     const std::uint32_t passBaselineCount = *eventCount;
-    for (std::uint32_t index = 0u;
-         index < passBaselineCount; ++index) {
-        passBaseline[index] = events[index];
+    const bool insertionRestoresHeldState =
+            modifier.kind == CudaSearchModifierKind::InputInsertion &&
+            ((modifier.steering.enabled != 0u &&
+              modifier.steering.maximumHoldMs > 0) ||
+             (modifier.accelerate.enabled != 0u &&
+              modifier.accelerate.maximumHoldMs > 0) ||
+             (modifier.brake.enabled != 0u &&
+              modifier.brake.maximumHoldMs > 0));
+    const bool needsPassSnapshot =
+            legacyMutationPipeline ||
+            insertionRestoresHeldState ||
+            modifier.window.minimumTimeMs < mutableFromTimeMs;
+    if (needsPassSnapshot) {
+        for (std::uint32_t index = 0u;
+             index < passBaselineCount; ++index) {
+            passBaseline[index] = events[index];
+        }
     }
+    const CudaSearchInputEvent *normalizationBaseline =
+            needsPassSnapshot ? passBaseline : globalBaseline;
+    const std::uint32_t normalizationBaselineCount =
+            needsPassSnapshot ? passBaselineCount : globalBaselineCount;
     random.Seed(modifier.window.seed, candidateId, passIndex);
 
     switch (modifier.kind) {
@@ -721,10 +807,16 @@ __device__ bool ApplyModifier(
             }
             event.value = value;
         }
+        if (!legacyMutationPipeline &&
+            modifier.window.minimumTimeMs >= mutableFromTimeMs &&
+            *normalized) {
+            break;
+        }
         *eventCount = NormalizeEvents(
                 events, *eventCount, temporary,
-                passBaseline, passBaselineCount,
-                mutableFromTimeMs);
+                normalizationBaseline, normalizationBaselineCount,
+                mutableFromTimeMs, legacyMutationPipeline);
+        *normalized = true;
         break;
     case CudaSearchModifierKind::ExistingEvent: {
         const std::uint32_t eligibleCount = CollectEligible(
@@ -771,10 +863,17 @@ __device__ bool ApplyModifier(
                 event.value = event.value != 0 ? 0 : 1;
             }
         }
+        if (!legacyMutationPipeline &&
+            modifier.timeParameterMs == 0 &&
+            modifier.window.minimumTimeMs >= mutableFromTimeMs &&
+            *normalized) {
+            break;
+        }
         *eventCount = NormalizeEvents(
                 events, *eventCount, temporary,
-                passBaseline, passBaselineCount,
-                mutableFromTimeMs);
+                normalizationBaseline, normalizationBaselineCount,
+                mutableFromTimeMs, legacyMutationPipeline);
+        *normalized = true;
         break;
     }
     case CudaSearchModifierKind::SmoothSteering:
@@ -827,8 +926,9 @@ __device__ bool ApplyModifier(
             }
             *eventCount = NormalizeEvents(
                     events, *eventCount, temporary,
-                    passBaseline, passBaselineCount,
-                    mutableFromTimeMs);
+                    normalizationBaseline, normalizationBaselineCount,
+                    mutableFromTimeMs, legacyMutationPipeline);
+            *normalized = true;
         }
         break;
     case CudaSearchModifierKind::InputInsertion: {
@@ -938,8 +1038,9 @@ __device__ bool ApplyModifier(
         }
         *eventCount = NormalizeEvents(
                 events, *eventCount, temporary,
-                passBaseline, passBaselineCount,
-                mutableFromTimeMs);
+                normalizationBaseline, normalizationBaselineCount,
+                mutableFromTimeMs, legacyMutationPipeline);
+        *normalized = true;
         break;
     }
     case CudaSearchModifierKind::InputDeletion: {
@@ -989,15 +1090,19 @@ __device__ bool ApplyModifier(
         deleteChannel(modifier.steering, 0u);
         deleteChannel(modifier.accelerate, 1u);
         deleteChannel(modifier.brake, 2u);
+        if (!legacyMutationPipeline &&
+            modifier.window.minimumTimeMs >= mutableFromTimeMs &&
+            *normalized) {
+            break;
+        }
         *eventCount = NormalizeEvents(
                 events, *eventCount, temporary,
-                passBaseline, passBaselineCount,
-                mutableFromTimeMs);
+                normalizationBaseline, normalizationBaselineCount,
+                mutableFromTimeMs, legacyMutationPipeline);
+        *normalized = true;
         break;
     }
     }
-    (void)globalBaseline;
-    (void)globalBaselineCount;
     return true;
 }
 
@@ -1357,9 +1462,15 @@ __global__ void GenerateSearchCandidatesKernel(
         std::uint64_t firstCandidateId,
         std::uint32_t candidateCount,
         bool baseline,
+        bool legacyMutationPipeline,
+        bool baselineInputsCanonical,
+        bool compactRandomSteeringPipeline,
         std::uint32_t eventCapacity,
+        const std::uint32_t *compactInputIndices,
+        std::uint32_t compactInputCount,
+        std::int32_t *candidateInputValues,
         DeviceSample *candidateBestSamples,
-        DeviceMt19937 *randomStates,
+        std::uint32_t *randomStateWords,
         CudaSearchInputEvent *candidateEvents,
         CudaSearchInputEvent *temporaryEvents,
         CudaSearchInputEvent *passBaselineEvents,
@@ -1376,21 +1487,44 @@ __global__ void GenerateSearchCandidatesKernel(
     }
     const std::uint64_t candidateId = firstCandidateId + slot;
     CudaSearchInputEvent *events =
-            candidateEvents +
-            static_cast<std::uint64_t>(slot) * eventCapacity;
+            candidateEvents == nullptr
+            ? nullptr
+            : candidateEvents +
+                      static_cast<std::uint64_t>(slot) * eventCapacity;
     CudaSearchInputEvent *temporary =
-            temporaryEvents +
-            static_cast<std::uint64_t>(slot) * eventCapacity;
+            temporaryEvents == nullptr
+            ? nullptr
+            : temporaryEvents +
+                      static_cast<std::uint64_t>(slot) * eventCapacity;
     CudaSearchInputEvent *passBaseline =
-            passBaselineEvents +
-            static_cast<std::uint64_t>(slot) * eventCapacity;
+            passBaselineEvents == nullptr
+            ? nullptr
+            : passBaselineEvents +
+                      static_cast<std::uint64_t>(slot) * eventCapacity;
     std::uint32_t *eligible =
-            eligibleIndices +
-            static_cast<std::uint64_t>(slot) * eventCapacity;
+            eligibleIndices == nullptr
+            ? nullptr
+            : eligibleIndices +
+                      static_cast<std::uint64_t>(slot) * eventCapacity;
+    std::int32_t *compactValues =
+            candidateInputValues == nullptr
+            ? nullptr
+            : candidateInputValues +
+                      static_cast<std::uint64_t>(slot) *
+                              compactInputCount;
+    DeviceMt19937 random(randomStateWords, slot, candidateCount);
     std::uint32_t eventCount = baselineInputCount;
-    for (std::uint32_t index = 0u;
-         index < baselineInputCount; ++index) {
-        events[index] = baselineInputs[index];
+    if (compactRandomSteeringPipeline) {
+        for (std::uint32_t index = 0u;
+             index < compactInputCount; ++index) {
+            compactValues[index] =
+                    baselineInputs[compactInputIndices[index]].value;
+        }
+    } else {
+        for (std::uint32_t index = 0u;
+             index < baselineInputCount; ++index) {
+            events[index] = baselineInputs[index];
+        }
     }
     statuses[slot] = DeviceCandidateStatus::Success;
     candidateBestSamples[slot] = {};
@@ -1402,16 +1536,65 @@ __global__ void GenerateSearchCandidatesKernel(
         mutationCounts[slot] = 0u;
         return;
     }
+    if (compactRandomSteeringPipeline && baseline) {
+        eventCounts[slot] = baselineInputCount;
+        mutationCounts[slot] = 0u;
+        activeCandidates[slot] = true;
+        return;
+    }
     if (!baseline) {
+        if (compactRandomSteeringPipeline) {
+            for (std::uint32_t pass = 0u;
+                 pass < modifierCount; ++pass) {
+                const CudaSearchModifierConfiguration modifier =
+                        modifiers[pass];
+                random.Seed(
+                        modifier.window.seed, candidateId, pass);
+                for (std::uint32_t compactIndex = 0u;
+                     compactIndex < compactInputCount;
+                     ++compactIndex) {
+                    const CudaSearchInputEvent &input =
+                            baselineInputs[
+                                    compactInputIndices[compactIndex]];
+                    if (input.timeMs <
+                                    modifier.window.minimumTimeMs ||
+                        input.timeMs >
+                                    modifier.window.maximumTimeMs) {
+                        continue;
+                    }
+                    std::int32_t value =
+                            random.UniformS32(
+                                    -65536, 65536);
+                    if (value == compactValues[compactIndex]) {
+                        value = value == 65536 ? -65536 : 65536;
+                    }
+                    compactValues[compactIndex] = value;
+                }
+            }
+            std::uint32_t mutationCount = 0u;
+            for (std::uint32_t index = 0u;
+                 index < compactInputCount; ++index) {
+                if (compactValues[index] !=
+                    baselineInputs[compactInputIndices[index]].value) {
+                    ++mutationCount;
+                }
+            }
+            eventCounts[slot] = baselineInputCount;
+            mutationCounts[slot] = mutationCount;
+            activeCandidates[slot] = mutationCount != 0u;
+            return;
+        }
+        bool normalized = baselineInputsCanonical;
         for (std::uint32_t pass = 0u; pass < modifierCount; ++pass) {
             if (!ApplyModifier(
                         modifiers[pass], pass, candidateId,
-                        randomStates[slot],
+                        random,
                         tickDurationMs, branchTimeMs + tickDurationMs,
                         baselineInputs, baselineInputCount,
                         events, &eventCount, eventCapacity,
                         temporary, passBaseline, eligible,
-                        smoothWeights)) {
+                        smoothWeights, legacyMutationPipeline,
+                        &normalized)) {
                 statuses[slot] =
                         DeviceCandidateStatus::CapacityExceeded;
                 activeCandidates[slot] = false;
@@ -1420,14 +1603,17 @@ __global__ void GenerateSearchCandidatesKernel(
                 return;
             }
         }
-        for (std::uint32_t index = 0u;
-             index < baselineInputCount; ++index) {
-            passBaseline[index] = baselineInputs[index];
+        if (legacyMutationPipeline || !normalized) {
+            for (std::uint32_t index = 0u;
+                 index < baselineInputCount; ++index) {
+                passBaseline[index] = baselineInputs[index];
+            }
+            eventCount = NormalizeEvents(
+                    events, eventCount, temporary,
+                    passBaseline, baselineInputCount,
+                    branchTimeMs + tickDurationMs,
+                    legacyMutationPipeline);
         }
-        eventCount = NormalizeEvents(
-                events, eventCount, temporary,
-                passBaseline, baselineInputCount,
-                branchTimeMs + tickDurationMs);
     }
     const std::uint32_t mutationCount = baseline
             ? 0u
@@ -1474,7 +1660,12 @@ __global__ __launch_bounds__(
         bool baseline,
         std::uint32_t eventCapacity,
         DeviceSample *candidateBestSamples,
+        const CudaSearchInputEvent *baselineInputs,
         const CudaSearchInputEvent *candidateEvents,
+        const std::int32_t *candidateInputValues,
+        const std::uint32_t *compactInputOffsets,
+        std::uint32_t compactInputCount,
+        bool compactRandomSteeringPipeline,
         const std::uint32_t *eventCounts,
         DeviceCandidateStatus *statuses,
         const bool *activeCandidates,
@@ -1498,8 +1689,16 @@ __global__ __launch_bounds__(
     }
     const std::uint64_t candidateId = firstCandidateId + slot;
     const CudaSearchInputEvent *events =
-            candidateEvents +
-            static_cast<std::uint64_t>(slot) * eventCapacity;
+            candidateEvents == nullptr
+            ? nullptr
+            : candidateEvents +
+                      static_cast<std::uint64_t>(slot) * eventCapacity;
+    const std::int32_t *compactValues =
+            candidateInputValues == nullptr
+            ? nullptr
+            : candidateInputValues +
+                      static_cast<std::uint64_t>(slot) *
+                              compactInputCount;
     const std::uint32_t eventCount = eventCounts[slot];
     const CudaSearchEvaluatorConfiguration configuredEvaluator =
             *evaluator;
@@ -1532,9 +1731,15 @@ __global__ __launch_bounds__(
             shapeCapacity};
     DeviceControlState controlState;
     std::uint32_t eventCursor = 0u;
-    while (eventCursor < eventCount &&
-           events[eventCursor].timeMs <= branchTimeMs) {
-        ApplyControlEvent(controlState, events[eventCursor]);
+    while (eventCursor < eventCount) {
+        const CudaSearchInputEvent event = CandidateInputAt(
+                baselineInputs, events, compactValues,
+                compactInputOffsets,
+                compactRandomSteeringPipeline, eventCursor);
+        if (event.timeMs > branchTimeMs) {
+            break;
+        }
+        ApplyControlEvent(controlState, event);
         ++eventCursor;
     }
     bool evaluatorReported = false;
@@ -1553,9 +1758,15 @@ __global__ __launch_bounds__(
                 branchTimeMs +
                 static_cast<std::int64_t>(tickIndex + 1u) *
                         tickDurationMs;
-        while (eventCursor < eventCount &&
-               events[eventCursor].timeMs <= publicTime) {
-            ApplyControlEvent(controlState, events[eventCursor]);
+        while (eventCursor < eventCount) {
+            const CudaSearchInputEvent event = CandidateInputAt(
+                    baselineInputs, events, compactValues,
+                    compactInputOffsets,
+                    compactRandomSteeringPipeline, eventCursor);
+            if (event.timeMs > publicTime) {
+                break;
+            }
+            ApplyControlEvent(controlState, event);
             ++eventCursor;
         }
         CudaControlTick tick = baselineTicks[tickIndex];
@@ -1657,7 +1868,12 @@ __global__ void CaptureSearchWinnerStateKernel(
         std::int64_t branchTimeMs,
         std::int64_t evaluationStartTimeMs,
         std::uint32_t eventCapacity,
+        const CudaSearchInputEvent *baselineInputs,
         const CudaSearchInputEvent *candidateEvents,
+        const std::int32_t *candidateInputValues,
+        const std::uint32_t *compactInputOffsets,
+        std::uint32_t compactInputCount,
+        bool compactRandomSteeringPipeline,
         const std::uint32_t *eventCounts,
         DeviceCandidateStatus *statuses,
         cuda::collision::CudaCollision *collisionScratch,
@@ -1682,8 +1898,16 @@ __global__ void CaptureSearchWinnerStateKernel(
     }
     const std::uint32_t slot = winner.candidateSlot;
     const CudaSearchInputEvent *events =
-            candidateEvents +
-            static_cast<std::uint64_t>(slot) * eventCapacity;
+            candidateEvents == nullptr
+            ? nullptr
+            : candidateEvents +
+                      static_cast<std::uint64_t>(slot) * eventCapacity;
+    const std::int32_t *compactValues =
+            candidateInputValues == nullptr
+            ? nullptr
+            : candidateInputValues +
+                      static_cast<std::uint64_t>(slot) *
+                              compactInputCount;
     const std::uint32_t eventCount = eventCounts[slot];
     const std::uint32_t evaluationStartTick =
             static_cast<std::uint32_t>(
@@ -1714,9 +1938,15 @@ __global__ void CaptureSearchWinnerStateKernel(
             static_cast<std::uint32_t>(winner.candidateId);
     DeviceControlState controlState;
     std::uint32_t eventCursor = 0u;
-    while (eventCursor < eventCount &&
-           events[eventCursor].timeMs <= branchTimeMs) {
-        ApplyControlEvent(controlState, events[eventCursor]);
+    while (eventCursor < eventCount) {
+        const CudaSearchInputEvent event = CandidateInputAt(
+                baselineInputs, events, compactValues,
+                compactInputOffsets,
+                compactRandomSteeringPipeline, eventCursor);
+        if (event.timeMs > branchTimeMs) {
+            break;
+        }
+        ApplyControlEvent(controlState, event);
         ++eventCursor;
     }
     for (std::uint32_t tickIndex = 0u;
@@ -1725,9 +1955,15 @@ __global__ void CaptureSearchWinnerStateKernel(
                 branchTimeMs +
                 static_cast<std::int64_t>(tickIndex + 1u) *
                         tickDurationMs;
-        while (eventCursor < eventCount &&
-               events[eventCursor].timeMs <= publicTime) {
-            ApplyControlEvent(controlState, events[eventCursor]);
+        while (eventCursor < eventCount) {
+            const CudaSearchInputEvent event = CandidateInputAt(
+                    baselineInputs, events, compactValues,
+                    compactInputOffsets,
+                    compactRandomSteeringPipeline, eventCursor);
+            if (event.timeMs > publicTime) {
+                break;
+            }
+            ApplyControlEvent(controlState, event);
             ++eventCursor;
         }
         CudaControlTick tick = baselineTicks[tickIndex];
@@ -1795,7 +2031,12 @@ __global__ void FinalizeSearchBatchKernel(
         const DeviceSample *reducedBest,
         const CudaCandidateState *capturedWinnerState,
         const DeviceSample *candidateBestSamples,
+        const CudaSearchInputEvent *baselineInputs,
         const CudaSearchInputEvent *candidateEvents,
+        const std::int32_t *candidateInputValues,
+        const std::uint32_t *compactInputOffsets,
+        std::uint32_t compactInputCount,
+        bool compactRandomSteeringPipeline,
         const std::uint32_t *eventCounts,
         const std::uint32_t *mutationCounts,
         const DeviceCandidateStatus *statuses,
@@ -1856,13 +2097,24 @@ __global__ void FinalizeSearchBatchKernel(
             *globalBestState = *capturedWinnerState;
             *globalBestEventCount = eventCounts[slot];
             *globalBestMutationCount = mutationCounts[slot];
+            const CudaSearchInputEvent *materializedInputs =
+                    candidateEvents == nullptr
+                    ? nullptr
+                    : candidateEvents +
+                              static_cast<std::uint64_t>(slot) *
+                                      eventCapacity;
+            const std::int32_t *compactValues =
+                    candidateInputValues == nullptr
+                    ? nullptr
+                    : candidateInputValues +
+                              static_cast<std::uint64_t>(slot) *
+                                      compactInputCount;
             for (std::uint32_t index = 0u;
                  index < eventCounts[slot]; ++index) {
-                globalBestInputs[index] =
-                        candidateEvents[
-                                static_cast<std::uint64_t>(slot) *
-                                        eventCapacity +
-                                index];
+                globalBestInputs[index] = CandidateInputAt(
+                        baselineInputs, materializedInputs,
+                        compactValues, compactInputOffsets,
+                        compactRandomSteeringPipeline, index);
             }
             result.bestChanged = true;
         }
@@ -1892,6 +2144,12 @@ struct CudaSearchExecutor::Impl {
     std::uint64_t residentBytes = 0u;
     std::uint64_t initialUploadBytes = 0u;
     bool baselineEvaluated = false;
+    bool baselineInputsCanonical = false;
+    bool compactRandomSteeringPipeline = false;
+    bool needsTemporaryEvents = true;
+    bool needsPassBaselineEvents = true;
+    bool needsEligibleIndices = true;
+    std::uint32_t compactInputCount = 0u;
     std::uint32_t multiprocessorCount = 0u;
     SimulationKernelMetrics latencyKernelMetrics;
     SimulationKernelMetrics throughputKernelMetrics;
@@ -1904,8 +2162,11 @@ struct CudaSearchExecutor::Impl {
     DeviceAllocation<CudaSearchEvaluatorConfiguration> evaluator;
     DeviceAllocation<CudaCandidateState> capturedWinnerState;
     DeviceAllocation<DeviceSample> candidateBestSamples;
-    DeviceAllocation<DeviceMt19937> randomStates;
+    DeviceAllocation<std::uint32_t> randomStateWords;
     DeviceAllocation<CudaSearchInputEvent> candidateEvents;
+    DeviceAllocation<std::uint32_t> compactInputIndices;
+    DeviceAllocation<std::uint32_t> compactInputOffsets;
+    DeviceAllocation<std::int32_t> candidateInputValues;
     DeviceAllocation<CudaSearchInputEvent> temporaryEvents;
     DeviceAllocation<CudaSearchInputEvent> passBaselineEvents;
     DeviceAllocation<std::uint32_t> eligibleIndices;
@@ -1944,8 +2205,11 @@ struct CudaSearchExecutor::Impl {
         ADD_BYTES(evaluator);
         ADD_BYTES(capturedWinnerState);
         ADD_BYTES(candidateBestSamples);
-        ADD_BYTES(randomStates);
+        ADD_BYTES(randomStateWords);
         ADD_BYTES(candidateEvents);
+        ADD_BYTES(compactInputIndices);
+        ADD_BYTES(compactInputOffsets);
+        ADD_BYTES(candidateInputValues);
         ADD_BYTES(temporaryEvents);
         ADD_BYTES(passBaselineEvents);
         ADD_BYTES(eligibleIndices);
@@ -2076,6 +2340,9 @@ struct CudaSearchExecutor::Impl {
         const std::uint64_t eventSlots64 =
                 static_cast<std::uint64_t>(candidateCount) *
                 configuration.maximumEventCount;
+        const std::uint64_t compactValueSlots64 =
+                static_cast<std::uint64_t>(candidateCount) *
+                compactInputCount;
         const std::uint64_t scoreSlots64 =
                 1u +
                 static_cast<std::uint64_t>(candidateCount) *
@@ -2098,6 +2365,8 @@ struct CudaSearchExecutor::Impl {
                 static_cast<std::uint64_t>(candidateCount) *
                 cuda::collision::MeshCellHitCapacity;
         if (eventSlots64 >
+                    std::numeric_limits<std::size_t>::max() ||
+            compactValueSlots64 >
                     std::numeric_limits<std::size_t>::max() ||
             scoreSlots64 >
                     std::numeric_limits<std::size_t>::max() ||
@@ -2123,6 +2392,8 @@ struct CudaSearchExecutor::Impl {
         const std::size_t candidates = candidateCount;
         const std::size_t eventSlots =
                 static_cast<std::size_t>(eventSlots64);
+        const std::size_t compactValueSlots =
+                static_cast<std::size_t>(compactValueSlots64);
         const std::size_t scoreSlots =
                 static_cast<std::size_t>(scoreSlots64);
         const std::size_t collisionSlots =
@@ -2138,8 +2409,9 @@ struct CudaSearchExecutor::Impl {
         const std::size_t meshCellSlots =
                 static_cast<std::size_t>(meshCellSlots64);
         DeviceAllocation<DeviceSample> nextCandidateBestSamples;
-        DeviceAllocation<DeviceMt19937> nextRandomStates;
+        DeviceAllocation<std::uint32_t> nextRandomStateWords;
         DeviceAllocation<CudaSearchInputEvent> nextCandidateEvents;
+        DeviceAllocation<std::int32_t> nextCandidateInputValues;
         DeviceAllocation<CudaSearchInputEvent> nextTemporaryEvents;
         DeviceAllocation<CudaSearchInputEvent> nextPassBaselineEvents;
         DeviceAllocation<std::uint32_t> nextEligibleIndices;
@@ -2161,11 +2433,19 @@ struct CudaSearchExecutor::Impl {
                 nextMeshRangeScratch;
         DeviceAllocation<std::uint32_t> nextMeshCellScratch;
         if (!nextCandidateBestSamples.Allocate(candidates) ||
-            !nextRandomStates.Allocate(candidates) ||
-            !nextCandidateEvents.Allocate(eventSlots) ||
-            !nextTemporaryEvents.Allocate(eventSlots) ||
-            !nextPassBaselineEvents.Allocate(eventSlots) ||
-            !nextEligibleIndices.Allocate(eventSlots) ||
+            !nextRandomStateWords.Allocate(candidates * 624u) ||
+            !nextCandidateEvents.Allocate(
+                    compactRandomSteeringPipeline ? 0u : eventSlots) ||
+            !nextCandidateInputValues.Allocate(
+                    compactRandomSteeringPipeline
+                            ? compactValueSlots
+                            : 0u) ||
+            !nextTemporaryEvents.Allocate(
+                    needsTemporaryEvents ? eventSlots : 0u) ||
+            !nextPassBaselineEvents.Allocate(
+                    needsPassBaselineEvents ? eventSlots : 0u) ||
+            !nextEligibleIndices.Allocate(
+                    needsEligibleIndices ? eventSlots : 0u) ||
             !nextEventCounts.Allocate(candidates) ||
             !nextMutationCounts.Allocate(candidates) ||
             !nextStatuses.Allocate(candidates) ||
@@ -2210,8 +2490,10 @@ struct CudaSearchExecutor::Impl {
         }
 
         candidateBestSamples = std::move(nextCandidateBestSamples);
-        randomStates = std::move(nextRandomStates);
+        randomStateWords = std::move(nextRandomStateWords);
         candidateEvents = std::move(nextCandidateEvents);
+        candidateInputValues =
+                std::move(nextCandidateInputValues);
         temporaryEvents = std::move(nextTemporaryEvents);
         passBaselineEvents = std::move(nextPassBaselineEvents);
         eligibleIndices = std::move(nextEligibleIndices);
@@ -2247,6 +2529,27 @@ struct CudaSearchExecutor::Impl {
         result.firstCandidateId = firstCandidateId;
         result.candidateCount = candidateCount;
         result.residentDeviceBytes = residentBytes;
+        result.candidateInputDeviceBytes =
+                candidateEvents.Bytes() +
+                candidateInputValues.Bytes();
+        result.mutationScratchDeviceBytes =
+                randomStateWords.Bytes() +
+                temporaryEvents.Bytes() +
+                passBaselineEvents.Bytes() +
+                eligibleIndices.Bytes();
+        result.mutationDeviceBytes =
+                baselineInputs.Bytes() +
+                modifiers.Bytes() +
+                smoothWeights.Bytes() +
+                candidateEvents.Bytes() +
+                compactInputIndices.Bytes() +
+                compactInputOffsets.Bytes() +
+                candidateInputValues.Bytes() +
+                result.mutationScratchDeviceBytes +
+                eventCounts.Bytes() +
+                mutationCounts.Bytes() +
+                statuses.Bytes() +
+                activeCandidates.Bytes();
         if ((!baseline && !baselineEvaluated) ||
             candidateCount == 0u ||
             candidateCount > configuration.maximumBatchSize) {
@@ -2314,10 +2617,16 @@ struct CudaSearchExecutor::Impl {
                 firstCandidateId,
                 candidateCount,
                 baseline,
+                configuration.useLegacyMutationPipelineForTesting,
+                baselineInputsCanonical,
+                compactRandomSteeringPipeline,
                 static_cast<std::uint32_t>(
                         configuration.maximumEventCount),
+                compactInputIndices.Get(),
+                compactInputCount,
+                candidateInputValues.Get(),
                 candidateBestSamples.Get(),
-                randomStates.Get(),
+                randomStateWords.Get(),
                 candidateEvents.Get(),
                 temporaryEvents.Get(),
                 passBaselineEvents.Get(),
@@ -2372,7 +2681,12 @@ struct CudaSearchExecutor::Impl {
                         static_cast<std::uint32_t>(
                                 configuration.maximumEventCount),
                         candidateBestSamples.Get(),
+                        baselineInputs.Get(),
                         candidateEvents.Get(),
+                        candidateInputValues.Get(),
+                        compactInputOffsets.Get(),
+                        compactInputCount,
+                        compactRandomSteeringPipeline,
                         eventCounts.Get(),
                         statuses.Get(),
                         activeCandidates.Get(),
@@ -2436,7 +2750,12 @@ struct CudaSearchExecutor::Impl {
                 configuration.evaluationStartTimeMs,
                 static_cast<std::uint32_t>(
                         configuration.maximumEventCount),
+                baselineInputs.Get(),
                 candidateEvents.Get(),
+                candidateInputValues.Get(),
+                compactInputOffsets.Get(),
+                compactInputCount,
+                compactRandomSteeringPipeline,
                 eventCounts.Get(),
                 statuses.Get(),
                 collisionScratch.Get(),
@@ -2454,7 +2773,12 @@ struct CudaSearchExecutor::Impl {
                 scores.Get(), scoreCount, reducedBest.Get(),
                 capturedWinnerState.Get(),
                 candidateBestSamples.Get(),
+                baselineInputs.Get(),
                 candidateEvents.Get(),
+                candidateInputValues.Get(),
+                compactInputOffsets.Get(),
+                compactInputCount,
+                compactRandomSteeringPipeline,
                 eventCounts.Get(),
                 mutationCounts.Get(),
                 statuses.Get(),
@@ -2762,6 +3086,102 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
                 static_cast<std::uint32_t>(evaluationTicks);
         impl->collisionShapeCount =
                 packedConfiguration.collisionShapes.count;
+        impl->baselineInputsCanonical = CanonicalBaselineInputs(
+                configuration.baselineInputs,
+                configuration.branchTimeMs +
+                        configuration.tickDurationMs);
+        impl->compactRandomSteeringPipeline =
+                !configuration.useLegacyMutationPipelineForTesting &&
+                impl->baselineInputsCanonical &&
+                std::all_of(
+                        configuration.modifiers.begin(),
+                        configuration.modifiers.end(),
+                        [&](const CudaSearchModifierConfiguration &modifier) {
+                            return modifier.kind ==
+                                           CudaSearchModifierKind::
+                                                   RandomSteering &&
+                                    modifier.window.minimumTimeMs >=
+                                            configuration.branchTimeMs +
+                                            configuration.tickDurationMs;
+                        });
+        std::vector<std::uint32_t> compactInputIndices;
+        std::vector<std::uint32_t> compactInputOffsets;
+        if (impl->compactRandomSteeringPipeline) {
+            compactInputIndices.reserve(
+                    configuration.baselineInputs.size());
+            compactInputOffsets.assign(
+                    configuration.baselineInputs.size(), UINT32_MAX);
+            for (std::size_t inputIndex = 0u;
+                 inputIndex < configuration.baselineInputs.size();
+                 ++inputIndex) {
+                const CudaSearchInputEvent &input =
+                        configuration.baselineInputs[inputIndex];
+                const bool selected =
+                        input.action == 4u && input.valueKind == 2u &&
+                        std::any_of(
+                                configuration.modifiers.begin(),
+                                configuration.modifiers.end(),
+                                [&](const CudaSearchModifierConfiguration
+                                            &modifier) {
+                                    return input.timeMs >=
+                                                    modifier.window.
+                                                            minimumTimeMs &&
+                                            input.timeMs <=
+                                                    modifier.window.
+                                                            maximumTimeMs;
+                                });
+                if (!selected) {
+                    continue;
+                }
+                compactInputOffsets[inputIndex] =
+                        static_cast<std::uint32_t>(
+                                compactInputIndices.size());
+                compactInputIndices.push_back(
+                        static_cast<std::uint32_t>(inputIndex));
+            }
+        }
+        impl->compactInputCount =
+                static_cast<std::uint32_t>(
+                        compactInputIndices.size());
+        const std::int64_t mutableFromTimeMs =
+                configuration.branchTimeMs +
+                configuration.tickDurationMs;
+        impl->needsTemporaryEvents =
+                !impl->compactRandomSteeringPipeline;
+        impl->needsPassBaselineEvents =
+                configuration.useLegacyMutationPipelineForTesting ||
+                !impl->baselineInputsCanonical ||
+                std::any_of(
+                        configuration.modifiers.begin(),
+                        configuration.modifiers.end(),
+                        [&](const CudaSearchModifierConfiguration &modifier) {
+                            const bool heldInsertion =
+                                    modifier.kind ==
+                                            CudaSearchModifierKind::
+                                                    InputInsertion &&
+                                    ((modifier.steering.enabled != 0u &&
+                                      modifier.steering.maximumHoldMs > 0) ||
+                                     (modifier.accelerate.enabled != 0u &&
+                                      modifier.accelerate.maximumHoldMs > 0) ||
+                                     (modifier.brake.enabled != 0u &&
+                                      modifier.brake.maximumHoldMs > 0));
+                            return heldInsertion ||
+                                    modifier.window.minimumTimeMs <
+                                            mutableFromTimeMs;
+                        });
+        impl->needsEligibleIndices =
+                configuration.useLegacyMutationPipelineForTesting ||
+                std::any_of(
+                        configuration.modifiers.begin(),
+                        configuration.modifiers.end(),
+                        [](const CudaSearchModifierConfiguration &modifier) {
+                            return modifier.kind ==
+                                            CudaSearchModifierKind::
+                                                    ExistingEvent ||
+                                    modifier.kind ==
+                                            CudaSearchModifierKind::
+                                                    InputDeletion;
+                        });
         const std::size_t candidates =
                 configuration.maximumBatchSize;
         const std::size_t eventSlots =
@@ -2780,6 +3200,10 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
                 static_cast<std::size_t>(meshRangeCount);
         const std::size_t meshCellSlots =
                 static_cast<std::size_t>(meshCellCount);
+        const std::size_t compactValueSlots =
+                impl->compactRandomSteeringPipeline
+                ? candidates * impl->compactInputCount
+                : 0u;
         if (!impl->branchState.Allocate(1u) ||
             !impl->baselineTicks.Allocate(
                     configuration.baselineTicks.size()) ||
@@ -2792,11 +3216,25 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
             !impl->evaluator.Allocate(1u) ||
             !impl->capturedWinnerState.Allocate(1u) ||
             !impl->candidateBestSamples.Allocate(candidates) ||
-            !impl->randomStates.Allocate(candidates) ||
-            !impl->candidateEvents.Allocate(eventSlots) ||
-            !impl->temporaryEvents.Allocate(eventSlots) ||
-            !impl->passBaselineEvents.Allocate(eventSlots) ||
-            !impl->eligibleIndices.Allocate(eventSlots) ||
+            !impl->randomStateWords.Allocate(candidates * 624u) ||
+            !impl->candidateEvents.Allocate(
+                    impl->compactRandomSteeringPipeline
+                            ? 0u
+                            : eventSlots) ||
+            !impl->compactInputIndices.Allocate(
+                    compactInputIndices.size()) ||
+            !impl->compactInputOffsets.Allocate(
+                    impl->compactRandomSteeringPipeline
+                            ? compactInputOffsets.size()
+                            : 0u) ||
+            !impl->candidateInputValues.Allocate(
+                    compactValueSlots) ||
+            !impl->temporaryEvents.Allocate(
+                    impl->needsTemporaryEvents ? eventSlots : 0u) ||
+            !impl->passBaselineEvents.Allocate(
+                    impl->needsPassBaselineEvents ? eventSlots : 0u) ||
+            !impl->eligibleIndices.Allocate(
+                    impl->needsEligibleIndices ? eventSlots : 0u) ||
             !impl->eventCounts.Allocate(candidates) ||
             !impl->mutationCounts.Allocate(candidates) ||
             !impl->statuses.Allocate(candidates) ||
@@ -2887,6 +3325,12 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
         UPLOAD(impl->smoothWeights,
                configuration.smoothWeights,
                "uploading CUDA smooth weights");
+        UPLOAD(impl->compactInputIndices,
+               compactInputIndices,
+               "uploading CUDA compact input indices");
+        UPLOAD(impl->compactInputOffsets,
+               compactInputOffsets,
+               "uploading CUDA compact input offsets");
 #undef UPLOAD
         error = cudaMemcpy(
                 impl->evaluator.Get(),
