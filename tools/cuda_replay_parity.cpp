@@ -10,12 +10,47 @@
 #include <vector>
 
 #include "validation/api/physics_sandbox_cuda_test_access.h"
+#include "simulation/runtime/replay_simulation_session.h"
 
 namespace {
 
 int Fail(const std::string &message) {
     std::cerr << "cuda_replay_parity: " << message << '\n';
     return 1;
+}
+
+std::size_t FirstDifferentByte(
+        const forevervalidator::simulation::CudaCandidateState &left,
+        const forevervalidator::simulation::CudaCandidateState &right) {
+    const auto *leftBytes =
+            reinterpret_cast<const std::uint8_t *>(&left);
+    const auto *rightBytes =
+            reinterpret_cast<const std::uint8_t *>(&right);
+    for (std::size_t index = 0u; index < sizeof(left); ++index) {
+        if (leftBytes[index] != rightBytes[index]) return index;
+    }
+    return sizeof(left);
+}
+
+bool SameCandidateState(
+        const forevervalidator::simulation::CudaCandidateState &left,
+        const forevervalidator::simulation::CudaCandidateState &right) {
+    using namespace forevervalidator::simulation;
+    if (left.schemaVersion != right.schemaVersion ||
+        left.candidateId != right.candidateId ||
+        left.validationSeed != right.validationSeed ||
+        left.randomState != right.randomState ||
+        left.controlCursor != right.controlCursor) {
+        return false;
+    }
+    ReplaySimulationInstanceClone leftClone;
+    ReplaySimulationInstanceClone rightClone;
+    return DecodeCudaCandidateState(left, &leftClone) ==
+                   CudaStateConversionResult::Success &&
+           DecodeCudaCandidateState(right, &rightClone) ==
+                   CudaStateConversionResult::Success &&
+           ReplaySimulationInstanceSemanticHash(leftClone) ==
+                   ReplaySimulationInstanceSemanticHash(rightClone);
 }
 
 void AddSteeringMutation(
@@ -104,12 +139,14 @@ bool Run(
         checkedBytes += differential.checkedBytes;
         const auto after = Access::CaptureCandidateState(sandbox);
         if (!after.has_value() ||
-            std::memcmp(
-                    &*before, &*after,
-                    sizeof(forevervalidator::simulation::
-                                   CudaCandidateState)) != 0) {
+            !SameCandidateState(*before, *after)) {
             std::cerr << "differential restoration changed state"
-                      << " cursor=" << cursor << '\n';
+                      << " cursor=" << cursor;
+            if (after.has_value()) {
+                std::cerr << " byte="
+                          << FirstDifferentByte(*before, *after);
+            }
+            std::cerr << '\n';
             return false;
         }
         if (!sandbox.RestoreState(snapshot.Value())) {
@@ -119,12 +156,14 @@ bool Run(
         }
         const auto restored = Access::CaptureCandidateState(sandbox);
         if (!restored.has_value() ||
-            std::memcmp(
-                    &*before, &*restored,
-                    sizeof(forevervalidator::simulation::
-                                   CudaCandidateState)) != 0) {
+            !SameCandidateState(*before, *restored)) {
             std::cerr << "snapshot restoration changed state"
-                      << " cursor=" << cursor << '\n';
+                      << " cursor=" << cursor;
+            if (restored.has_value()) {
+                std::cerr << " byte="
+                          << FirstDifferentByte(*before, *restored);
+            }
+            std::cerr << '\n';
             return false;
         }
         if (!sandbox.AdvanceTicks(1u)) {
@@ -135,11 +174,25 @@ bool Run(
             return false;
         }
     }
+    const auto finalState = sandbox.ReadState();
+    if (!finalState) {
+        std::cerr << "could not read final sandbox state\n";
+        return false;
+    }
     std::cout << "{\"mode\":\""
               << (mutate ? "mutated" : "recorded")
               << "\",\"checked_ticks\":" << (end - begin)
               << ",\"checked_state_bytes\":" << checkedBytes
               << ",\"restorations\":" << (end - begin)
+              << ",\"race_completed\":"
+              << (finalState.Value().raceCompleted ? "true" : "false")
+              << ",\"finish_time_ms\":";
+    if (finalState.Value().finishTimeMs.has_value()) {
+        std::cout << *finalState.Value().finishTimeMs;
+    } else {
+        std::cout << "null";
+    }
+    std::cout
               << "}\n";
     return true;
 }

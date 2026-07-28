@@ -1,6 +1,7 @@
 #ifndef FOREVERVALIDATOR_CUDA_DYNAMICS_CUH
 #define FOREVERVALIDATOR_CUDA_DYNAMICS_CUH
 
+#include "simulation/backends/cuda/cuda_collision.cuh"
 #include "simulation/backends/cuda/cuda_exact_math.cuh"
 #include "simulation/backends/cuda/cuda_state_layout.h"
 
@@ -242,52 +243,65 @@ __device__ inline void IntegrateStep(
 
 __device__ inline void PreCollision(
         CudaDynamicBodyState &body,
+        CudaFixedArray<
+                GmVec3,
+                CudaCollisionReplacementOverflowCapacity>
+                &overflowReplacements,
         float dt) {
     const CHmsDyna::CHmsStateDyna source = body.current;
     IntegrateStep(body, source, body.current, dt);
     body.collisionReplacements = {};
+    overflowReplacements.count = 0u;
 }
 
-__device__ inline GmVec3 SynthesizeReplacement(
-        const CudaFixedArray<GmVec3, 64u> &replacements) {
-    if (replacements.count == 0u) {
-        return {};
-    }
-    float sumX = replacements.values[0].x;
-    float sumY = replacements.values[0].y;
-    float sumZ = replacements.values[0].z;
-    for (std::uint32_t index = 1u;
-         index < replacements.count; ++index) {
-        const GmVec3 &next = replacements.values[index];
-        float workX = sumX;
-        float workY = sumY;
-        float workZ = sumZ;
-        const float projection =
-                (next.x * sumX + sumY * next.y) +
-                sumZ * next.z;
-        if (projection > 0.0f) {
-            const float sumLengthSquared =
-                    sumZ * sumZ +
-                    (sumY * sumY + workX * workX);
-            if (1.0e-10f < sumLengthSquared) {
-                float clampedProjection = projection;
-                if (sumLengthSquared < clampedProjection) {
-                    clampedProjection = sumLengthSquared;
-                }
-                const float scale =
-                        clampedProjection / sumLengthSquared;
-                const float projectedX = scale * workX;
-                const float projectedY = scale * workY;
-                const float projectedZ = scale * workZ;
-                workX = workX - projectedX;
-                workY = workY - projectedY;
-                workZ = workZ - projectedZ;
+template<typename Scratch>
+__device__ inline void PreCollision(
+        CudaDynamicBodyState &body,
+        Scratch &scratch,
+        float dt) {
+    const CHmsDyna::CHmsStateDyna source = body.current;
+    IntegrateStep(body, source, body.current, dt);
+    body.collisionReplacements = {};
+    scratch.replacementOverflowCount = 0u;
+}
+
+__device__ inline void AccumulateReplacement(
+        const GmVec3 &next,
+        float &sumX,
+        float &sumY,
+        float &sumZ) {
+    float workX = sumX;
+    float workY = sumY;
+    float workZ = sumZ;
+    const float projection =
+            (next.x * sumX + sumY * next.y) +
+            sumZ * next.z;
+    if (projection > 0.0f) {
+        const float sumLengthSquared =
+                sumZ * sumZ +
+                (sumY * sumY + workX * workX);
+        if (1.0e-10f < sumLengthSquared) {
+            float clampedProjection = projection;
+            if (sumLengthSquared < clampedProjection) {
+                clampedProjection = sumLengthSquared;
             }
+            const float scale =
+                    clampedProjection / sumLengthSquared;
+            const float projectedX = scale * workX;
+            const float projectedY = scale * workY;
+            const float projectedZ = scale * workZ;
+            workX = workX - projectedX;
+            workY = workY - projectedY;
+            workZ = workZ - projectedZ;
         }
-        sumX = workX + next.x;
-        sumY = workY + next.y;
-        sumZ = workZ + next.z;
     }
+    sumX = workX + next.x;
+    sumY = workY + next.y;
+    sumZ = workZ + next.z;
+}
+
+__device__ inline GmVec3 FinalizeReplacement(
+        float sumX, float sumY, float sumZ) {
     const float lengthSquared =
             sumZ * sumZ + (sumY * sumY + sumX * sumX);
     constexpr float DirectionEpsilon = 0.01f;
@@ -306,9 +320,94 @@ __device__ inline GmVec3 SynthesizeReplacement(
     };
 }
 
-__device__ inline void PostCollision(CudaDynamicBodyState &body) {
+__device__ inline GmVec3 SynthesizeReplacement(
+        const CudaFixedArray<
+                GmVec3,
+                CudaCollisionReplacementInlineCapacity> &replacements,
+        const CudaFixedArray<
+                GmVec3,
+                CudaCollisionReplacementOverflowCapacity>
+                &overflowReplacements) {
+    if (replacements.count == 0u &&
+        overflowReplacements.count == 0u) {
+        return {};
+    }
+    const bool hasInline = replacements.count != 0u;
+    const GmVec3 &first = hasInline
+            ? replacements.values[0]
+            : overflowReplacements.values[0];
+    float sumX = first.x;
+    float sumY = first.y;
+    float sumZ = first.z;
+    for (std::uint32_t index = hasInline ? 1u : 0u;
+         index < replacements.count; ++index) {
+        AccumulateReplacement(
+                replacements.values[index], sumX, sumY, sumZ);
+    }
+    for (std::uint32_t index = hasInline ? 0u : 1u;
+         index < overflowReplacements.count; ++index) {
+        AccumulateReplacement(
+                overflowReplacements.values[index],
+                sumX, sumY, sumZ);
+    }
+    return FinalizeReplacement(sumX, sumY, sumZ);
+}
+
+template<typename Scratch>
+__device__ inline GmVec3 SynthesizeReplacement(
+        const CudaFixedArray<
+                GmVec3,
+                CudaCollisionReplacementInlineCapacity> &replacements,
+        const Scratch &scratch) {
+    if (replacements.count == 0u &&
+        scratch.replacementOverflowCount == 0u) {
+        return {};
+    }
+    const bool hasInline = replacements.count != 0u;
+    const GmVec3 &first = hasInline
+            ? replacements.values[0]
+            : collision::detail::ReplacementOverflowAt(scratch, 0u);
+    float sumX = first.x;
+    float sumY = first.y;
+    float sumZ = first.z;
+    for (std::uint32_t index = hasInline ? 1u : 0u;
+         index < replacements.count; ++index) {
+        AccumulateReplacement(
+                replacements.values[index], sumX, sumY, sumZ);
+    }
+    for (std::uint32_t index = hasInline ? 0u : 1u;
+         index < scratch.replacementOverflowCount; ++index) {
+        AccumulateReplacement(
+                collision::detail::ReplacementOverflowAt(
+                        scratch, index),
+                sumX, sumY, sumZ);
+    }
+    return FinalizeReplacement(sumX, sumY, sumZ);
+}
+
+__device__ inline void PostCollision(
+        CudaDynamicBodyState &body,
+        const CudaFixedArray<
+                GmVec3,
+                CudaCollisionReplacementOverflowCapacity>
+                &overflowReplacements) {
     const GmVec3 replacement =
-            SynthesizeReplacement(body.collisionReplacements);
+            SynthesizeReplacement(
+                    body.collisionReplacements,
+                    overflowReplacements);
+    body.current.position.x += replacement.x;
+    body.current.position.y =
+            replacement.y + body.current.position.y;
+    body.current.position.z += replacement.z;
+}
+
+template<typename Scratch>
+__device__ inline void PostCollision(
+        CudaDynamicBodyState &body,
+        const Scratch &scratch) {
+    const GmVec3 replacement =
+            SynthesizeReplacement(
+                    body.collisionReplacements, scratch);
     body.current.position.x += replacement.x;
     body.current.position.y =
             replacement.y + body.current.position.y;

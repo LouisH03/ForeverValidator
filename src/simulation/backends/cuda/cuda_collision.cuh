@@ -46,6 +46,45 @@ __device__ inline const CudaCollision &CollisionAt(
             scratch.slot];
 }
 
+__device__ inline GmVec3 &ReplacementOverflowAt(
+        CudaCollisionScratch &scratch,
+        std::uint32_t index) {
+    return scratch.collisions[index].extraNegated;
+}
+
+__device__ inline const GmVec3 &ReplacementOverflowAt(
+        const CudaCollisionScratch &scratch,
+        std::uint32_t index) {
+    return scratch.collisions[index].extraNegated;
+}
+
+__device__ inline GmVec3 &ReplacementOverflowAt(
+        CudaCollisionSearchScratch &scratch,
+        std::uint32_t index) {
+    return CollisionAt(scratch, index).extraNegated;
+}
+
+__device__ inline const GmVec3 &ReplacementOverflowAt(
+        const CudaCollisionSearchScratch &scratch,
+        std::uint32_t index) {
+    return CollisionAt(scratch, index).extraNegated;
+}
+
+template<typename Scratch>
+__device__ inline void CaptureReplacementOverflow(
+        const Scratch &scratch,
+        CudaFixedArray<
+                GmVec3,
+                CudaCollisionReplacementOverflowCapacity>
+                &destination) {
+    destination.count = scratch.replacementOverflowCount;
+    for (std::uint32_t index = 0u;
+         index < destination.count; ++index) {
+        destination.values[index] =
+                ReplacementOverflowAt(scratch, index);
+    }
+}
+
 __device__ inline CudaCollision &ShapeCollisionAt(
         CudaCollisionScratch &scratch,
         std::uint32_t index) {
@@ -162,6 +201,7 @@ __device__ inline void Clear(Scratch &scratch) {
         scratch.firstVisitedSurface = UINT32_MAX;
     }
     scratch.overflow = false;
+    scratch.overflowReason = OverflowReason::None;
 }
 
 template <typename Scratch>
@@ -170,6 +210,8 @@ __device__ inline CudaCollision *AddShape(
     if (scratch.shapeCollisionCount >=
         ShapeCollisionCapacity) {
         scratch.overflow = true;
+        scratch.overflowReason =
+                OverflowReason::ShapeCollisionCapacity;
         return nullptr;
     }
     CudaCollision *result = &ShapeCollisionAt(
@@ -184,6 +226,7 @@ __device__ inline void AddMain(
         const CudaCollision &value) {
     if (scratch.collisionCount >= CollisionCapacity) {
         scratch.overflow = true;
+        scratch.overflowReason = OverflowReason::CollisionCapacity;
         return;
     }
     CollisionAt(scratch, scratch.collisionCount++) = value;
@@ -1190,6 +1233,8 @@ __device__ inline void SortForResponse(
                 if (low < highCursor) {
                     if (stackDepth >= StackSize) {
                         scratch.overflow = true;
+                        scratch.overflowReason =
+                                OverflowReason::OrderingStackCapacity;
                         return;
                     }
                     lowStack[stackDepth] = low;
@@ -1204,6 +1249,8 @@ __device__ inline void SortForResponse(
                 if (lowCursor < high) {
                     if (stackDepth >= StackSize) {
                         scratch.overflow = true;
+                        scratch.overflowReason =
+                                OverflowReason::OrderingStackCapacity;
                         return;
                     }
                     lowStack[stackDepth] = lowCursor;

@@ -31,10 +31,10 @@ __device__ inline bool AcceptCheckpointSlot(
     CudaRacePhysicsState &race = candidate.race;
     if (checkpointIndex >= race.checkpointSlotsPassed.count ||
         checkpointSlot >= race.checkpointSlotsPassed.count ||
-        race.checkpointSlotsPassed.values[checkpointSlot] != 0u) {
+        race.checkpointSlotsPassed.Get(checkpointSlot)) {
         return false;
     }
-    race.checkpointSlotsPassed.values[checkpointSlot] = 1u;
+    race.checkpointSlotsPassed.Set(checkpointSlot);
     if (checkpointIndex !=
         race.progress.requiredCheckpointCount) {
         ++race.progress.currentLapCheckpointCount;
@@ -121,10 +121,7 @@ __device__ inline void Finish(
         progress.raceCompleted = true;
         return;
     }
-    for (std::uint32_t index = 0u;
-         index < race.checkpointSlotsPassed.count; ++index) {
-        race.checkpointSlotsPassed.values[index] = 0u;
-    }
+    race.checkpointSlotsPassed.Clear();
     progress.currentLapCheckpointCount = 0u;
 }
 

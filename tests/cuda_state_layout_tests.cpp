@@ -81,6 +81,51 @@ int main() {
         std::cerr << "state round trip changed future-affecting data\n";
         return 1;
     }
+    ReplaySimulationInstanceClone checkpointBoundary = BuildState();
+    checkpointBoundary.race.checkpointSlotsPassed.resize(
+            forevervalidator::simulation::CudaCheckpointSlotCapacity);
+    for (std::size_t index = 0u;
+         index < checkpointBoundary.race.checkpointSlotsPassed.size();
+         index += 3u) {
+        checkpointBoundary.race.checkpointSlotsPassed[index] = 1u;
+    }
+    CudaCandidateState checkpointBoundaryEncoded;
+    if (forevervalidator::simulation::EncodeCudaCandidateState(
+                checkpointBoundary, 42u, 987u, 11u, 1234567u,
+                &checkpointBoundaryEncoded) !=
+                    CudaStateConversionResult::Success ||
+        DecodeCudaCandidateState(checkpointBoundaryEncoded, &decoded) !=
+                CudaStateConversionResult::Success ||
+        ReplaySimulationInstanceSemanticHash(checkpointBoundary) !=
+                ReplaySimulationInstanceSemanticHash(decoded)) {
+        std::cerr << "checkpoint boundary did not round trip\n";
+        return 1;
+    }
+    ReplaySimulationInstanceClone replacementBoundary = BuildState();
+    replacementBoundary.runtime.body.pendingCollisionReplacements.resize(
+            forevervalidator::simulation::
+                    CudaCollisionReplacementCapacity);
+    for (std::size_t index = 0u;
+         index < replacementBoundary.runtime.body.
+                         pendingCollisionReplacements.size();
+         ++index) {
+        replacementBoundary.runtime.body.
+                pendingCollisionReplacements[index] = {
+                        static_cast<float>(index),
+                        static_cast<float>(index + 1u),
+                        static_cast<float>(index + 2u)};
+    }
+    CudaCandidateState boundaryEncoded;
+    if (forevervalidator::simulation::EncodeCudaCandidateState(
+                replacementBoundary, 42u, 987u, 11u, 1234567u,
+                &boundaryEncoded) != CudaStateConversionResult::Success ||
+        DecodeCudaCandidateState(boundaryEncoded, &decoded) !=
+                CudaStateConversionResult::Success ||
+        ReplaySimulationInstanceSemanticHash(replacementBoundary) !=
+                ReplaySimulationInstanceSemanticHash(decoded)) {
+        std::cerr << "collision replacement boundary did not round trip\n";
+        return 1;
+    }
     const CudaCandidateState valid = encoded;
     encoded.vehicle.wheels.count = 5u;
     if (DecodeCudaCandidateState(encoded, &decoded) !=
@@ -89,7 +134,9 @@ int main() {
         return 1;
     }
     encoded = valid;
-    encoded.body.collisionReplacements.count = 65u;
+    encoded.collisionReplacementOverflow.count =
+            forevervalidator::simulation::
+                    CudaCollisionReplacementOverflowCapacity + 1u;
     if (DecodeCudaCandidateState(encoded, &decoded) !=
         CudaStateConversionResult::CollisionReplacementOverflow) {
         std::cerr << "collision replacement overflow was not rejected\n";

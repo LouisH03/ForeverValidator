@@ -12,8 +12,8 @@ namespace forevervalidator::simulation::cuda::physics {
 enum class Status : std::uint32_t {
     Success,
     UnsupportedVehicleForce,
-    CollisionFailure,
     UnsupportedForceBase = 100u,
+    CollisionFailureBase = 200u,
 };
 
 template <bool ReuseWheelPassInvariants = false>
@@ -50,7 +50,8 @@ __device__ inline Status CollisionSubstep(
                         Status::UnsupportedForceBase) +
                 static_cast<std::uint32_t>(forceStatus));
     }
-    dynamics::PreCollision(candidate.body, dt);
+    dynamics::PreCollision(
+            candidate.body, scratch, dt);
     collision::Status collisionStatus =
             collision::Detect<
                     TrackCollisionDiagnostics,
@@ -64,9 +65,13 @@ __device__ inline Status CollisionSubstep(
                         scene, configuration, candidate, scratch);
     }
     if (collisionStatus != collision::Status::Success) {
-        return Status::CollisionFailure;
+        return static_cast<Status>(
+                static_cast<std::uint32_t>(
+                        Status::CollisionFailureBase) +
+                static_cast<std::uint32_t>(collisionStatus));
     }
-    dynamics::PostCollision(candidate.body);
+    dynamics::PostCollision(
+            candidate.body, scratch);
     return Status::Success;
 }
 

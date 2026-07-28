@@ -5,6 +5,7 @@
 #include "simulation/backends/cuda/cuda_race.cuh"
 
 namespace forevervalidator::simulation::cuda::collision {
+
 namespace response_detail {
 
 constexpr float ScalarEpsilon = 1.0e-5f;
@@ -123,17 +124,27 @@ __device__ inline Contact MakeVehicleContact(
     return contact;
 }
 
+template<typename Scratch>
 __device__ inline void AddReplacement(
         CudaCandidatePhysicsState &candidate,
+        Scratch &scratch,
         const GmVec3 &replacement,
         bool &overflow) {
     auto &items = candidate.body.collisionReplacements;
-    if (items.count >=
+    if (items.count <
         sizeof(items.values) / sizeof(items.values[0])) {
+        items.values[items.count++] = replacement;
+        candidate.body.dynamicActive = true;
+        return;
+    }
+    if (scratch.replacementOverflowCount >=
+        CudaCollisionReplacementOverflowCapacity) {
         overflow = true;
         return;
     }
-    items.values[items.count++] = replacement;
+    detail::ReplacementOverflowAt(
+            scratch,
+            scratch.replacementOverflowCount++) = replacement;
     candidate.body.dynamicActive = true;
 }
 
@@ -860,8 +871,12 @@ __device__ inline Status Respond(
                           contact.replacement)
                 : detail::Negate(collision.separation);
         response_detail::AddReplacement(
-                candidate, worldReplacement, overflow);
-        if (overflow) return Status::Overflow;
+                candidate, scratch, worldReplacement, overflow);
+        if (overflow) {
+            scratch.overflowReason =
+                    OverflowReason::CollisionReplacementCapacity;
+            return Status::Overflow;
+        }
         if (candidate.vehicle.mobil.absorbContactEnabled &&
             !contact.accepted) {
             continue;

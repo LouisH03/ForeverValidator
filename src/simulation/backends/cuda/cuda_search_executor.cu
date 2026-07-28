@@ -1783,6 +1783,9 @@ __global__ void CaptureSearchWinnerStateKernel(
         state.firstStep = false;
         ++state.controlCursor;
     }
+    cuda::collision::detail::CaptureReplacementOverflow(
+            candidateScratch,
+            state.collisionReplacementOverflow);
     *capturedWinnerState = state;
 }
 

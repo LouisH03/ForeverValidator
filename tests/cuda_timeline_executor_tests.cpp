@@ -146,6 +146,27 @@ int main() {
         }
     }
 
+    std::vector<CudaCandidateTimelineInput> largeBatch(4097u);
+    for (std::size_t index = 0u; index < largeBatch.size(); ++index) {
+        largeBatch[index].initialState.candidateId =
+                static_cast<std::uint32_t>(index);
+        largeBatch[index].initialState.firstStep = false;
+        largeBatch[index].ticks.push_back(tick);
+    }
+    const CudaTimelineBatchResult large =
+            ExecuteCudaTimelineBatch(
+                    deviceScene.Get(), deviceConfiguration.Get(),
+                    largeBatch);
+    if (large.status != CudaTimelineStatus::Success ||
+        large.candidates.size() != largeBatch.size() ||
+        large.metrics.candidateCount != largeBatch.size() ||
+        large.winnerCandidateId != 0u) {
+        std::cerr << "CUDA timeline retained an arbitrary 4096-candidate "
+                     "limit: "
+                  << large.diagnostic << '\n';
+        return 1;
+    }
+
     CudaTimelineBatchResult cancelled = ExecuteCudaTimelineBatch(
             deviceScene.Get(), deviceConfiguration.Get(),
             {batch.front()}, true);

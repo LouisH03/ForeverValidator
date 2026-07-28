@@ -20,7 +20,6 @@
 namespace forevervalidator::simulation {
 namespace {
 
-constexpr std::uint32_t MaximumCandidateCount = 4096u;
 constexpr std::uint64_t MaximumTotalTicks = 100000000u;
 constexpr std::uint64_t MaximumTotalObservations = 10000000u;
 
@@ -257,9 +256,15 @@ __global__ void ExecuteTimelineKernel(
                             UnsupportedPhysicsTransition;
             result.failureTick = index;
             result.failureDetail =
-                    static_cast<std::uint32_t>(physicsStatus);
+                    static_cast<std::uint32_t>(physicsStatus) +
+                    1000u * static_cast<std::uint32_t>(
+                            scratch[candidate].overflowReason) +
+                    100000u * scratch[candidate].collisionCount;
             return;
         }
+        cuda::collision::detail::CaptureReplacementOverflow(
+                scratch[candidate],
+                state.collisionReplacementOverflow);
         if (state.stuntsEnabled) {
             const cuda::stunts::Status stuntStatus =
                     cuda::stunts::Update(state, tick);
@@ -312,7 +317,8 @@ CudaTimelineBatchResult ExecuteCudaTimelineBatch(
     if (deviceScene == nullptr ||
         deviceStaticConfiguration == nullptr ||
         candidates.empty() ||
-        candidates.size() > MaximumCandidateCount) {
+        candidates.size() >
+                std::numeric_limits<std::uint32_t>::max()) {
         result.status = CudaTimelineStatus::InvalidArgument;
         result.diagnostic = "invalid CUDA timeline batch";
         return result;

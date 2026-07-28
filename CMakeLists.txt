@@ -13,8 +13,7 @@ option(FOREVERVALIDATOR_ENABLE_RELEASE_IPO
 option(FOREVERVALIDATOR_ENABLE_CUDA
        "Build the optional NVIDIA CUDA simulation backend" OFF)
 set(FOREVERVALIDATOR_CUDA_SPLIT_COMPILE_JOBS "1" CACHE STRING
-    "Parallel NVCC optimization jobs per CUDA translation unit; may change "
-    "code generation (1 disables)")
+    "Parallel NVCC optimization jobs per CUDA translation unit; may change code generation (1 disables)")
 
 if(FOREVERVALIDATOR_ENABLE_CUDA)
     include(CheckLanguage)
@@ -26,13 +25,13 @@ if(FOREVERVALIDATOR_ENABLE_CUDA)
     endif()
     enable_language(CUDA)
     find_package(CUDAToolkit REQUIRED)
-    if(NOT FOREVERVALIDATOR_CUDA_SPLIT_COMPILE_JOBS
-            MATCHES "^[1-9][0-9]*$")
+    if(NOT ("${FOREVERVALIDATOR_CUDA_SPLIT_COMPILE_JOBS}"
+            MATCHES "^[1-9][0-9]*$"))
         message(FATAL_ERROR
             "FOREVERVALIDATOR_CUDA_SPLIT_COMPILE_JOBS must be a positive "
             "integer")
     endif()
-    if(NOT FOREVERVALIDATOR_CUDA_SPLIT_COMPILE_JOBS STREQUAL "1")
+    if(NOT ("${FOREVERVALIDATOR_CUDA_SPLIT_COMPILE_JOBS}" STREQUAL "1"))
         include(CheckCompilerFlag)
         check_compiler_flag(
             CUDA
@@ -130,7 +129,7 @@ if(FOREVERVALIDATOR_ENABLE_CUDA)
         "$<$<COMPILE_LANGUAGE:CUDA>:--ftz=false>"
         "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-ffp-contract=off>")
     if(FOREVERVALIDATOR_CUDA_SPLIT_COMPILE_SUPPORTED AND
-       NOT FOREVERVALIDATOR_CUDA_SPLIT_COMPILE_JOBS STREQUAL "1")
+       NOT ("${FOREVERVALIDATOR_CUDA_SPLIT_COMPILE_JOBS}" STREQUAL "1"))
         target_compile_options(forevervalidator_core PRIVATE
             "$<$<COMPILE_LANGUAGE:CUDA>:--split-compile=${FOREVERVALIDATOR_CUDA_SPLIT_COMPILE_JOBS}>")
     endif()

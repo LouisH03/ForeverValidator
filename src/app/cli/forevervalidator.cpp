@@ -1,9 +1,11 @@
 #include <algorithm>
 #include <charconv>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <string>
 #include <utility>
@@ -112,9 +114,9 @@ fs::path BatchOutputPath(
 void PrintUsage(const char *program) {
     std::fprintf(stderr,
                  "usage:\n"
-                 "  %s --pak-dir DIR [--backend BACKEND] [--batch-size N] REPLAY [--out PATH]\n"
-                 "  %s --pak-dir DIR [--backend BACKEND] [--batch-size N] --out-dir DIR REPLAY_OR_DIRECTORY [REPLAY_OR_DIRECTORY ...]\n"
-                 "  BACKEND: reference, optimized-cpu, speculative-ticking, cuda, batched; N defaults to 10\n",
+                 "  %s --pak-dir DIR [--backend BACKEND] [--batch-size N] [--requested-samples N] REPLAY [--out PATH]\n"
+                 "  %s --pak-dir DIR [--backend BACKEND] [--batch-size N] [--requested-samples N] --out-dir DIR REPLAY_OR_DIRECTORY [REPLAY_OR_DIRECTORY ...]\n"
+                 "  BACKEND: reference, optimized-cpu, speculative-ticking, cuda, batched; batch size defaults to 10\n",
                  program,
                  program);
 }
@@ -247,6 +249,18 @@ std::optional<std::size_t> ParseBatchSize(const char *value) {
     return result;
 }
 
+std::optional<std::uint32_t> ParseRequestedSamples(const char *value) {
+    const char *end = value + std::strlen(value);
+    std::uint64_t result = 0u;
+    const std::from_chars_result parsed =
+            std::from_chars(value, end, result);
+    if (parsed.ec != std::errc{} || parsed.ptr != end || result == 0u ||
+        result > std::numeric_limits<std::uint32_t>::max()) {
+        return std::nullopt;
+    }
+    return static_cast<std::uint32_t>(result);
+}
+
 ValidationAttempt SerializeValidationAttempt(
         forevervalidator::ReplayValidationAttempt attempt) {
     if (!attempt) {
@@ -274,6 +288,7 @@ int main(int argc, char **argv) {
     std::vector<fs::path> replays;
     bool repeatSameProcess = false;
     std::size_t batchSize = 10u;
+    std::optional<std::uint32_t> requestedSamples;
     std::optional<forevervalidator::SimulationBackend> selectedBackend;
 
     for (int index = 1; index < argc; ++index) {
@@ -303,6 +318,13 @@ int main(int argc, char **argv) {
                 return 64;
             }
             batchSize = *parsed;
+        } else if (std::strcmp(argv[index], "--requested-samples") == 0 &&
+                   index + 1 < argc) {
+            requestedSamples = ParseRequestedSamples(argv[++index]);
+            if (!requestedSamples.has_value()) {
+                PrintUsage(argv[0]);
+                return 64;
+            }
         } else if (argv[index][0] == '-') {
             PrintUsage(argv[0]);
             return 64;
@@ -355,6 +377,9 @@ int main(int argc, char **argv) {
     validationOptions.backend = selectedBackend.value_or(
             singleRun ? forevervalidator::SimulationBackend::Reference
                       : forevervalidator::SimulationBackend::Batched);
+    if (requestedSamples.has_value()) {
+        validationOptions.requestedSamples = *requestedSamples;
+    }
 
     if (singleRun) {
         ValidationAttempt attempt = ValidateReplayPath(

@@ -128,6 +128,10 @@ to the authoritative reference backend. Multi-replay runs default to the
 ordered batched backend.
 `--batch-size N` controls how many replay files are loaded and submitted
 together, and defaults to 10.
+`--requested-samples N` limits trajectory comparison to `N` evenly selected
+ghost samples while preserving complete timeline simulation and final outcome
+evaluation. This is useful for finish/outcome corpus sweeps; omit it for the
+default full trajectory comparison.
 
 A single replay returns exit status 0 for valid, 1 for invalid, and a distinct
 nonzero error code when replay decoding, asset loading, or simulation cannot

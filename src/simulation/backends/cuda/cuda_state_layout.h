@@ -30,6 +30,39 @@ struct CudaFixedArray {
     T values[Capacity]{};
 };
 
+constexpr std::size_t CudaCollisionReplacementInlineCapacity = 64u;
+constexpr std::size_t CudaCollisionReplacementOverflowCapacity = 448u;
+constexpr std::size_t CudaCollisionReplacementCapacity =
+        CudaCollisionReplacementInlineCapacity +
+        CudaCollisionReplacementOverflowCapacity;
+constexpr std::size_t CudaCheckpointSlotCapacity = 1024u;
+
+struct CudaCheckpointSlots {
+    static constexpr std::size_t WordBits = 32u;
+    static constexpr std::size_t WordCount =
+            CudaCheckpointSlotCapacity / WordBits;
+
+    std::uint32_t count = 0u;
+    std::uint32_t words[WordCount]{};
+
+#if defined(__CUDACC__)
+    __host__ __device__ bool Get(std::uint32_t index) const {
+        return (words[index / WordBits] &
+                (1u << (index % WordBits))) != 0u;
+    }
+
+    __host__ __device__ void Set(std::uint32_t index) {
+        words[index / WordBits] |= 1u << (index % WordBits);
+    }
+
+    __host__ __device__ void Clear() {
+        for (std::size_t index = 0u; index < WordCount; ++index) {
+            words[index] = 0u;
+        }
+    }
+#endif
+};
+
 template<typename T>
 struct CudaOptional {
     bool present = false;
@@ -127,14 +160,17 @@ struct CudaDynamicBodyState {
     CHmsDyna::CHmsStateDyna temporary{};
     CHmsDyna::CHmsStateDyna write{};
     CHmsDyna::CHmsStateDyna current{};
-    CudaFixedArray<GmVec3, 64u> collisionReplacements{};
+    CudaFixedArray<
+            GmVec3,
+            CudaCollisionReplacementInlineCapacity>
+            collisionReplacements{};
     bool dynamicActive = false;
     std::uint32_t dynamicType = 0u;
 };
 
 struct CudaRacePhysicsState {
     CTrackManiaPlayer::RuntimeClone player{};
-    CudaFixedArray<std::uint8_t, 1024u> checkpointSlotsPassed{};
+    CudaCheckpointSlots checkpointSlotsPassed{};
     CudaOptional<GmIso4> playerSpawnLocation{};
     CudaOptional<GmIso4> lastAcceptedSpawnLocation{};
     bool currentSpawnLocationInitialized = false;
@@ -177,7 +213,7 @@ struct CudaRaceState : CudaRacePhysicsState {
 };
 
 struct CudaCandidatePhysicsState {
-    static constexpr std::uint32_t SchemaVersion = 5u;
+    static constexpr std::uint32_t SchemaVersion = 8u;
 
     std::uint32_t schemaVersion = SchemaVersion;
     std::uint32_t candidateId = 0u;
@@ -197,6 +233,10 @@ struct CudaCandidatePhysicsState {
 struct CudaCandidateState : CudaCandidatePhysicsState {
     CudaStuntState stunts{};
     CudaFixedArray<ReplayStuntEvent, 2048u> stuntEvents{};
+    CudaFixedArray<
+            GmVec3,
+            CudaCollisionReplacementOverflowCapacity>
+            collisionReplacementOverflow{};
 };
 
 static_assert(std::is_standard_layout_v<CudaCandidatePhysicsState>);

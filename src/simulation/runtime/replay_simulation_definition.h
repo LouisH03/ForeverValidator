@@ -12,6 +12,8 @@ struct ReplayVehicleSourceBundle;
 struct ReplaySimulationDefinition {
     ReplayEnvironmentDefinition environment{};
     VehicleSimulationDefinition vehicle{};
+    // Only Stadium's vehicle and stunt-sensitive kernels are certified exact.
+    bool optimizedCpuStadiumSpecializationsEnabled = true;
 };
 
 enum class ReplaySimulationDefinitionBuildResult : int {

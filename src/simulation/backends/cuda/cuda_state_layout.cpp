@@ -116,9 +116,13 @@ std::optional<T> DecodeOptional(const CudaOptional<T> &source) {
 
 CudaStateConversionResult EncodeBody(
         const ReplayVehicleBody::RuntimeClone &source,
-        CudaDynamicBodyState &destination) {
+        CudaDynamicBodyState &destination,
+        CudaFixedArray<
+                GmVec3,
+                CudaCollisionReplacementOverflowCapacity>
+                &overflowDestination) {
     if (source.pendingCollisionReplacements.size() >
-        std::size(destination.collisionReplacements.values)) {
+        CudaCollisionReplacementCapacity) {
         return CudaStateConversionResult::CollisionReplacementOverflow;
     }
     EncodeOptional(source.maxAngularSpeed, destination.maxAngularSpeed);
@@ -128,12 +132,23 @@ CudaStateConversionResult EncodeBody(
     destination.temporary = source.tempState;
     destination.write = source.writeState;
     destination.current = source.currentState;
+    const std::size_t inlineCount = std::min(
+            source.pendingCollisionReplacements.size(),
+            CudaCollisionReplacementInlineCapacity);
     destination.collisionReplacements.count =
-            static_cast<std::uint32_t>(
-                    source.pendingCollisionReplacements.size());
-    std::copy(source.pendingCollisionReplacements.begin(),
-              source.pendingCollisionReplacements.end(),
-              destination.collisionReplacements.values);
+            static_cast<std::uint32_t>(inlineCount);
+    std::copy_n(
+            source.pendingCollisionReplacements.begin(),
+            inlineCount,
+            destination.collisionReplacements.values);
+    const std::size_t overflowCount =
+            source.pendingCollisionReplacements.size() - inlineCount;
+    overflowDestination.count =
+            static_cast<std::uint32_t>(overflowCount);
+    std::copy_n(
+            source.pendingCollisionReplacements.begin() + inlineCount,
+            overflowCount,
+            overflowDestination.values);
     destination.dynamicActive = source.isDynamicActive;
     destination.dynamicType =
             static_cast<std::uint32_t>(source.dynamicType);
@@ -218,7 +233,7 @@ CudaStateConversionResult EncodeRace(
         CudaStuntState &stunts,
         CudaFixedArray<ReplayStuntEvent, 2048u> &stuntEvents) {
     if (source.checkpointSlotsPassed.size() >
-        std::size(destination.checkpointSlotsPassed.values)) {
+        CudaCheckpointSlotCapacity) {
         return CudaStateConversionResult::CheckpointOverflow;
     }
     if (source.stuntEvents.size() >
@@ -229,9 +244,14 @@ CudaStateConversionResult EncodeRace(
     destination.checkpointSlotsPassed.count =
             static_cast<std::uint32_t>(
                     source.checkpointSlotsPassed.size());
-    std::copy(source.checkpointSlotsPassed.begin(),
-              source.checkpointSlotsPassed.end(),
-              destination.checkpointSlotsPassed.values);
+    for (std::uint32_t index = 0u;
+         index < destination.checkpointSlotsPassed.count; ++index) {
+        if (source.checkpointSlotsPassed[index] != 0u) {
+            destination.checkpointSlotsPassed.words[
+                    index / CudaCheckpointSlots::WordBits] |=
+                    1u << (index % CudaCheckpointSlots::WordBits);
+        }
+    }
     EncodeOptional(source.playerSpawnLocation,
                    destination.playerSpawnLocation);
     EncodeOptional(source.lastAcceptedSpawnLocation,
@@ -307,7 +327,12 @@ CudaStateConversionResult EncodeRace(
     return CudaStateConversionResult::Success;
 }
 
-void DecodeBody(const CudaDynamicBodyState &source,
+void DecodeBody(
+                const CudaDynamicBodyState &source,
+                const CudaFixedArray<
+                        GmVec3,
+                        CudaCollisionReplacementOverflowCapacity>
+                        &overflowSource,
                 ReplayVehicleBody::RuntimeClone &destination) {
     destination.maxAngularSpeed = DecodeOptional(source.maxAngularSpeed);
     destination.dynaParams = source.parameters;
@@ -320,6 +345,10 @@ void DecodeBody(const CudaDynamicBodyState &source,
             source.collisionReplacements.values,
             source.collisionReplacements.values +
                     source.collisionReplacements.count);
+    destination.pendingCollisionReplacements.insert(
+            destination.pendingCollisionReplacements.end(),
+            overflowSource.values,
+            overflowSource.values + overflowSource.count);
     destination.isDynamicActive = source.dynamicActive;
     destination.dynamicType =
             static_cast<CHmsDyna::EDynamicType>(source.dynamicType);
@@ -395,10 +424,18 @@ void DecodeRace(
                         &stuntEvents,
                 CTrackManiaRace::RuntimeClone &destination) {
     destination.player.RestoreRuntimeClone(source.player);
-    destination.checkpointSlotsPassed.assign(
-            source.checkpointSlotsPassed.values,
-            source.checkpointSlotsPassed.values +
-                    source.checkpointSlotsPassed.count);
+    destination.checkpointSlotsPassed.resize(
+            source.checkpointSlotsPassed.count);
+    for (std::uint32_t index = 0u;
+         index < source.checkpointSlotsPassed.count; ++index) {
+        destination.checkpointSlotsPassed[index] =
+                (source.checkpointSlotsPassed.words[
+                         index / CudaCheckpointSlots::WordBits] &
+                 (1u << (index %
+                         CudaCheckpointSlots::WordBits))) != 0u
+                        ? 1u
+                        : 0u;
+    }
     destination.playerSpawnLocation =
             DecodeOptional(source.playerSpawnLocation);
     destination.lastAcceptedSpawnLocation =
@@ -476,7 +513,7 @@ CudaStateConversionResult DecodeCudaRaceState(
         return CudaStateConversionResult::InvalidArgument;
     }
     if (source.checkpointSlotsPassed.count >
-        std::size(source.checkpointSlotsPassed.values)) {
+        CudaCheckpointSlotCapacity) {
         return CudaStateConversionResult::CheckpointOverflow;
     }
     if (source.stuntEvents.count >
@@ -516,7 +553,9 @@ CudaStateConversionResult EncodeCudaCandidateState(
     destination->firstStep = source.runtime.firstStep;
     destination->stuntsEnabled = source.runtime.stuntsEnabled;
     CudaStateConversionResult result =
-            EncodeBody(source.runtime.body, destination->body);
+            EncodeBody(
+                    source.runtime.body, destination->body,
+                    destination->collisionReplacementOverflow);
     if (result != CudaStateConversionResult::Success) {
         return result;
     }
@@ -548,8 +587,12 @@ CudaStateConversionResult DecodeCudaCandidateState(
         std::size(source.body.collisionReplacements.values)) {
         return CudaStateConversionResult::CollisionReplacementOverflow;
     }
+    if (source.collisionReplacementOverflow.count >
+        std::size(source.collisionReplacementOverflow.values)) {
+        return CudaStateConversionResult::CollisionReplacementOverflow;
+    }
     if (source.race.checkpointSlotsPassed.count >
-        std::size(source.race.checkpointSlotsPassed.values)) {
+        CudaCheckpointSlotCapacity) {
         return CudaStateConversionResult::CheckpointOverflow;
     }
     if (source.stuntEvents.count >
@@ -559,7 +602,9 @@ CudaStateConversionResult DecodeCudaCandidateState(
     try {
         ReplaySimulationInstanceClone result;
         result.runtime.world = source.world;
-        DecodeBody(source.body, result.runtime.body);
+        DecodeBody(
+                source.body, source.collisionReplacementOverflow,
+                result.runtime.body);
         DecodeVehicle(source.vehicle, result.runtime.vehicle);
         DecodeRace(
                 source.race, source.stunts,

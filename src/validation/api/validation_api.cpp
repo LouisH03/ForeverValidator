@@ -1083,6 +1083,8 @@ Result<ValidationReport> RunReplayValidation(
         return Result<ValidationReport>::Failure(
                 DefinitionError(definition.Error(), identity));
     }
+    definition.Value().optimizedCpuStadiumSpecializationsEnabled =
+            route.vehicleModel == ::ReplayVehicleModel::StadiumCar;
 
     simulationSession.ActivateStaticScene();
     ReplayFileValidationBuild validation = ValidateReplayFile(
@@ -1896,6 +1898,8 @@ PhysicsSandboxResult<PhysicsSandboxStateView> PhysicsSandbox::LoadReplay(
                             "sandbox vehicle definition could not be built",
                             DefinitionError(definition.Error(), identity)));
         }
+        definition.Value().optimizedCpuStadiumSpecializationsEnabled =
+                route.vehicleModel == ::ReplayVehicleModel::StadiumCar;
         session->ActivateStaticScene();
 
         std::vector<PhysicsSandboxInputEvent> inputs;

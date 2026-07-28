@@ -481,6 +481,10 @@ ReplaySimulationStepExecution ReplaySimulationRuntime::StepOptimizedCpu(
         execution.result = ReplaySimulationRunResult::InvalidControlTimeline;
         return execution;
     }
+    if (state.stuntsEnabled &&
+        !state.definition->optimizedCpuStadiumSpecializationsEnabled) {
+        return Step(tick);
+    }
     state.phase = Phase::Stepping;
 
     if (!state.firstStep) {
@@ -539,6 +543,10 @@ ReplaySimulationRuntime::StepOptimizedCpuNativeBinary32(
         execution.result = ReplaySimulationRunResult::InvalidControlTimeline;
         return execution;
     }
+    if (state.stuntsEnabled &&
+        !state.definition->optimizedCpuStadiumSpecializationsEnabled) {
+        return Step(tick);
+    }
     state.phase = Phase::Stepping;
 
     if (!state.firstStep) {
@@ -569,11 +577,13 @@ ReplaySimulationRuntime::StepOptimizedCpuNativeBinary32(
         }
     }
 
-    state.optimizedCpuVehicleForces.BeginTick(
-            car,
-            forevervalidator::simulation::
-                    OptimizedCpuBinary32MathPath::X86Sse2,
-            enabledComputeForcesCallback);
+    if (state.definition->optimizedCpuStadiumSpecializationsEnabled) {
+        state.optimizedCpuVehicleForces.BeginTick(
+                car,
+                forevervalidator::simulation::
+                        OptimizedCpuBinary32MathPath::X86Sse2,
+                enabledComputeForcesCallback);
+    }
     if (state.optimizedCpuStaticTransforms != nullptr &&
         state.optimizedCpuStaticTransforms->IsCertifiedFor(
                 state.world.CollisionZone())) {

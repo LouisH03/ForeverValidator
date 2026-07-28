@@ -2,6 +2,7 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <new>
@@ -17,6 +18,10 @@ constexpr std::uint32_t StateCount = 32768u;
 
 struct DynamicsInput {
     CudaDynamicBodyState body{};
+    CudaFixedArray<
+            GmVec3,
+            CudaCollisionReplacementOverflowCapacity>
+            overflowReplacements{};
     float dt = 0.0f;
 };
 
@@ -103,13 +108,28 @@ DynamicsInput MakeInput(std::uint32_t index) {
     state.tweakedLinearSpeed = RandomVector(random, 100.0f);
     input.dt = 0.001f *
                static_cast<float>((index % 40u) + 1u);
-    input.body.collisionReplacements.count =
-            static_cast<std::uint32_t>(index % 5u);
+    const std::uint32_t replacementCount =
+            index % (CudaCollisionReplacementCapacity + 1u);
+    input.body.collisionReplacements.count = std::min(
+            replacementCount,
+            static_cast<std::uint32_t>(
+                    CudaCollisionReplacementInlineCapacity));
+    input.overflowReplacements.count =
+            replacementCount -
+            input.body.collisionReplacements.count;
     for (std::uint32_t replacement = 0u;
-         replacement < input.body.collisionReplacements.count;
+         replacement < replacementCount;
          ++replacement) {
-        input.body.collisionReplacements.values[replacement] =
-                RandomVector(random, 0.5f);
+        const GmVec3 value = RandomVector(random, 0.5f);
+        if (replacement <
+            input.body.collisionReplacements.count) {
+            input.body.collisionReplacements.values[replacement] =
+                    value;
+        } else {
+            input.overflowReplacements.values[
+                    replacement -
+                    input.body.collisionReplacements.count] = value;
+        }
     }
     return input;
 }
@@ -127,6 +147,11 @@ CHmsDyna MakeCpuDyna(const DynamicsInput &input) {
             input.body.collisionReplacements.values,
             input.body.collisionReplacements.values +
                     input.body.collisionReplacements.count);
+    clone.pendingCollisionReplacements.insert(
+            clone.pendingCollisionReplacements.end(),
+            input.overflowReplacements.values,
+            input.overflowReplacements.values +
+                    input.overflowReplacements.count);
     clone.dynamicType = static_cast<CHmsDyna::EDynamicType>(
             input.body.dynamicType);
     clone.isDynamicActive = input.body.dynamicActive;
@@ -196,10 +221,13 @@ __global__ void DynamicsKernel(
             blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= count) return;
     CudaDynamicBodyState preBody = inputs[index].body;
-    cuda::dynamics::PreCollision(preBody, inputs[index].dt);
+    auto preOverflow = inputs[index].overflowReplacements;
+    cuda::dynamics::PreCollision(
+            preBody, preOverflow, inputs[index].dt);
     outputs[index].preCollision = preBody.current;
     CudaDynamicBodyState postBody = inputs[index].body;
-    cuda::dynamics::PostCollision(postBody);
+    cuda::dynamics::PostCollision(
+            postBody, inputs[index].overflowReplacements);
     outputs[index].postCollision = postBody.current;
 }
 

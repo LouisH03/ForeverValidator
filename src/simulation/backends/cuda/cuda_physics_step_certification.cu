@@ -39,7 +39,12 @@ __global__ void ExecutePreCollisionKernel(
         *status = static_cast<std::uint32_t>(forceStatus) + 1u;
         return;
     }
-    cuda::dynamics::PreCollision(state->body, dt);
+    CudaFixedArray<
+            GmVec3,
+            CudaCollisionReplacementOverflowCapacity>
+            overflowReplacements{};
+    cuda::dynamics::PreCollision(
+            state->body, overflowReplacements, dt);
     *status = 0u;
 }
 

@@ -20,6 +20,15 @@ enum class Status : std::uint32_t {
     InvalidScene,
 };
 
+enum class OverflowReason : std::uint32_t {
+    None,
+    ShapeCollisionCapacity,
+    CollisionCapacity,
+    OrderingStackCapacity,
+    MeshCellCapacity,
+    CollisionReplacementCapacity,
+};
+
 struct CudaCollision {
     GmVec3 separation{};
     GmVec3 impulseNormal{};
@@ -64,6 +73,8 @@ struct CudaCollisionScratch {
     GmVec3 firstResponseReplacementBefore{};
     GmVec3 firstResponseReplacementAfter{};
     bool overflow = false;
+    OverflowReason overflowReason = OverflowReason::None;
+    std::uint32_t replacementOverflowCount = 0u;
     CudaCollision collisions[CollisionCapacity]{};
     CudaCollision shapeCollisions[ShapeCollisionCapacity]{};
 };
@@ -84,9 +95,11 @@ struct CudaCollisionSearchScratch {
     std::uint32_t slot;
     std::uint32_t stride;
     std::uint32_t shapeCapacity;
+    OverflowReason overflowReason = OverflowReason::None;
     bool surfaceCacheValid = false;
     std::uint32_t meshCellCount = 0u;
     bool meshCacheValid = false;
+    std::uint32_t replacementOverflowCount = 0u;
 };
 
 }  // namespace forevervalidator::simulation::cuda::collision
