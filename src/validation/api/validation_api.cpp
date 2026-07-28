@@ -129,10 +129,14 @@ ValidationError AllocationError(
 }
 
 bool IsCudaSupportedRoute(const ReplayAssetRoute &route) noexcept {
-    return route.mapEnvironment == ReplayMapEnvironment::Stadium &&
-           route.decorationEnvironment ==
-                   ReplayMapEnvironment::Stadium &&
-           route.vehicleModel == ReplayVehicleModel::StadiumCar;
+    const bool stadium =
+            route.mapEnvironment == ReplayMapEnvironment::Stadium &&
+            route.vehicleModel == ReplayVehicleModel::StadiumCar;
+    const bool speed =
+            route.mapEnvironment == ReplayMapEnvironment::Speed &&
+            route.vehicleModel == ReplayVehicleModel::DesertCar;
+    return route.mapEnvironment == route.decorationEnvironment &&
+           (stadium || speed);
 }
 
 ValidationError CudaScopeError(
@@ -144,7 +148,7 @@ ValidationError CudaScopeError(
             ValidationStage::SimulationStartup,
             ValidationFailureReason::CudaUnsupportedSimulationScope,
             identity,
-            "CUDA supports only Stadium maps with the StadiumCar");
+            "CUDA supports only certified map and vehicle combinations");
     error.relatedAsset =
             std::string(ReplayMapEnvironmentName(route.mapEnvironment)) +
             "/" + ReplayVehicleModelName(route.vehicleModel);

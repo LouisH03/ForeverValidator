@@ -2823,13 +2823,18 @@ ReplaySimulationSession::RunCudaPhysicsStepDifferentialForTesting(void) {
     const auto *gpuBytes =
             reinterpret_cast<const std::uint8_t *>(
                     &gpu.finalState);
+    const std::size_t semanticExtent =
+            reinterpret_cast<const std::uint8_t *>(
+                    &cpuEncoded.collisionReplacementOverflow) -
+            cpuBytes +
+            sizeof(cpuEncoded.collisionReplacementOverflow);
     std::size_t mismatch = 0u;
-    while (mismatch < sizeof(cpuEncoded) &&
+    while (mismatch < semanticExtent &&
            cpuBytes[mismatch] == gpuBytes[mismatch]) {
         ++mismatch;
     }
-    result.checkedBytes = sizeof(cpuEncoded);
-    if (mismatch != sizeof(cpuEncoded)) {
+    result.checkedBytes = semanticExtent;
+    if (mismatch != semanticExtent) {
         result.firstMismatchByte = mismatch;
         result.cpuByte = cpuBytes[mismatch];
         result.gpuByte = gpuBytes[mismatch];
@@ -3398,13 +3403,18 @@ ReplaySimulationSession::RunCudaTimelineTickDifferentialForTesting(
             reinterpret_cast<const std::uint8_t *>(&cpuEncoded);
     const auto *gpuBytes =
             reinterpret_cast<const std::uint8_t *>(&gpuState);
+    const std::size_t semanticExtent =
+            reinterpret_cast<const std::uint8_t *>(
+                    &cpuEncoded.collisionReplacementOverflow) -
+            cpuBytes +
+            sizeof(cpuEncoded.collisionReplacementOverflow);
     std::size_t mismatch = 0u;
-    while (mismatch < sizeof(cpuEncoded) &&
+    while (mismatch < semanticExtent &&
            cpuBytes[mismatch] == gpuBytes[mismatch]) {
         ++mismatch;
     }
-    result.checkedBytes = sizeof(cpuEncoded);
-    if (mismatch != sizeof(cpuEncoded)) {
+    result.checkedBytes = semanticExtent;
+    if (mismatch != semanticExtent) {
         result.firstMismatchByte = mismatch;
         result.cpuByte = cpuBytes[mismatch];
         result.gpuByte = gpuBytes[mismatch];

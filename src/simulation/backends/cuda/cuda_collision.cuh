@@ -738,6 +738,123 @@ __device__ inline void TransformNewCollisions(
     }
 }
 
+template <bool TrackDiagnostics, typename Scratch>
+__device__ inline int SphereMesh(
+        const CudaPackedSceneHeader *scene,
+        const CudaPackedStaticConfigurationHeader *configuration,
+        const CudaSceneSurface &surface,
+        std::uint32_t surfaceIndex,
+        std::uint32_t actorIndex,
+        const CudaVehicleCollisionShape &shape,
+        std::uint32_t shapeIndex,
+        const GmIso4 &shapeWorld,
+        Scratch &scratch) {
+    const float radius = shape.localBounds.halfExtents.y;
+    const GmIso4 sphereToMesh =
+            Compose(shapeWorld, surface.worldToLocal);
+    const GmBoxAligned sphereBox = TransformBox(
+            {{0.0f, 0.0f, 0.0f}, {radius, radius, radius}},
+            sphereToMesh);
+    const GmVec3 sphereCenterMesh = sphereToMesh.translation;
+    if constexpr (TrackDiagnostics) {
+        if (scratch.firstVisitedSurface == UINT32_MAX) {
+            scratch.firstVisitedShape = shape.archiveOrder;
+            scratch.firstVisitedSurface = surfaceIndex;
+            scratch.firstShapeWorld = shapeWorld;
+            scratch.firstEllipsoidBox = sphereBox;
+            scratch.firstSurfaceWorldBounds = surface.worldBounds;
+        }
+    }
+    const GmVec3 *vertices =
+            SceneSection<GmVec3>(scene, scene->vertices);
+    const CudaSceneTriangle *triangles =
+            SceneSection<CudaSceneTriangle>(
+                    scene, scene->triangles);
+    const CudaSceneOctreeCell *cells =
+            SceneSection<CudaSceneOctreeCell>(
+                    scene, scene->octreeCells);
+    int hit = 0;
+    std::uint32_t cell = 0u;
+    while (cell < surface.octreeCellCount) {
+        if constexpr (TrackDiagnostics) {
+            ++scratch.meshCellVisits;
+        }
+        const CudaSceneOctreeCell &entry =
+                cells[surface.firstOctreeCell + cell];
+        if (!BoundsIntersect(sphereBox, entry.bounds)) {
+            cell += entry.subtreeEntryCount;
+            continue;
+        }
+        if constexpr (TrackDiagnostics) {
+            ++scratch.meshCellIntersections;
+        }
+        ++cell;
+        if (!entry.containsTriangle ||
+            entry.triangleIndex >= surface.triangleCount) {
+            continue;
+        }
+        if constexpr (TrackDiagnostics) {
+            ++scratch.meshTriangleCells;
+            ++scratch.triangleTests;
+        }
+        const CudaSceneTriangle &triangle =
+                triangles[surface.firstTriangle +
+                          entry.triangleIndex];
+        const GmVec3 triangleVertices[3] = {
+                vertices[surface.firstVertex +
+                         triangle.vertexIndices[0]],
+                vertices[surface.firstVertex +
+                         triangle.vertexIndices[1]],
+                vertices[surface.firstVertex +
+                         triangle.vertexIndices[2]],
+        };
+        const std::uint32_t firstNew =
+                scratch.shapeCollisionCount;
+        UnitSphereTriangleQuery<Scratch> query{
+                scratch,
+                sphereCenterMesh,
+                radius,
+                shape.wheelIndex != UINT32_MAX &&
+                                configuration->tuning.contactResponse.
+                                        singleMaterial <
+                                        EPlugSurfaceMaterialId_Count
+                        ? static_cast<std::uint32_t>(
+                                  configuration->tuning.
+                                          contactResponse.
+                                          singleMaterial)
+                        : shape.surfaceMaterial,
+                triangle.normal,
+                SurfaceMaterial(scene, surface,
+                                triangle.material),
+                shapeIndex,
+                surfaceIndex,
+                actorIndex,
+        };
+        if (query.Collide(triangleVertices)) {
+            if constexpr (TrackDiagnostics) {
+                ++scratch.triangleHits;
+            }
+            for (std::uint32_t index = firstNew;
+                 index < scratch.shapeCollisionCount; ++index) {
+                CudaCollision &collision =
+                        ShapeCollisionAt(scratch, index);
+                collision.impulseNormal = TransformDirection(
+                        surface.localToWorld.rotation,
+                        collision.impulseNormal);
+                collision.separation = TransformDirection(
+                        surface.localToWorld.rotation,
+                        collision.separation);
+                collision.contactPoint = TransformPoint(
+                        surface.localToWorld,
+                        collision.contactPoint);
+            }
+            hit = 1;
+        }
+        if (scratch.overflow) return hit;
+    }
+    return hit;
+}
+
 template <
         bool TrackDiagnostics,
         bool UseMeshCellCache = false,
@@ -1074,6 +1191,43 @@ __device__ inline GmIso4 ShapeBodyPose(
     return shape.bodyPose;
 }
 
+__device__ inline GmIso4 ShapeWorldPose(
+        std::uint32_t shapeIndex,
+        const CudaVehicleCollisionShape *shapes,
+        const CudaCandidatePhysicsState &candidate,
+        const GmIso4 &bodyPose) {
+    const CudaVehicleCollisionShape &shape = shapes[shapeIndex];
+    if (shape.parentShapeIndex == UINT32_MAX ||
+        shape.wheelIndex != UINT32_MAX) {
+        return Compose(
+                ShapeBodyPose(shape, candidate), bodyPose);
+    }
+
+    std::uint32_t depth = 1u;
+    for (std::uint32_t parent = shape.parentShapeIndex;
+         parent != UINT32_MAX;
+         parent = shapes[parent].parentShapeIndex) {
+        ++depth;
+    }
+    GmIso4 world = bodyPose;
+    while (depth != 0u) {
+        std::uint32_t node = shapeIndex;
+        for (std::uint32_t climb = 1u;
+             climb < depth; ++climb) {
+            node = shapes[node].parentShapeIndex;
+        }
+        const CudaVehicleCollisionShape &entry = shapes[node];
+        if (entry.wheelIndex != UINT32_MAX) {
+            world = Compose(
+                    ShapeBodyPose(entry, candidate), bodyPose);
+        } else {
+            world = Compose(entry.localPose, world);
+        }
+        --depth;
+    }
+    return world;
+}
+
 __device__ inline int CompareForResponse(
         const CudaCollision &left,
         const CudaCollision &right) {
@@ -1337,11 +1491,9 @@ __device__ inline Status Detect(
                     break;
                 }
                 const GmIso4 shapeWorld =
-                        detail::Compose(
-                                detail::ShapeBodyPose(
-                                        shapes[shapeIndex],
-                                        candidate),
-                                bodyPose);
+                        detail::ShapeWorldPose(
+                                shapeIndex, shapes,
+                                candidate, bodyPose);
                 detail::ShapeWorldAt(scratch, traversal) =
                         shapeWorld;
                 const GmBoxAligned movingBounds =
@@ -1532,14 +1684,15 @@ __device__ inline Status Detect(
         const CudaVehicleCollisionShape &shape =
                 shapes[shapeIndex];
         if (shape.surfaceType != static_cast<std::uint32_t>(
-                    GmSurf::EGmSurfType::Ellipsoid)) {
+                    GmSurf::EGmSurfType::Ellipsoid) &&
+            shape.surfaceType != static_cast<std::uint32_t>(
+                    GmSurf::EGmSurfType::Sphere)) {
             return Status::UnsupportedGeometry;
         }
         const GmIso4 shapeWorld =
-                detail::Compose(
-                        detail::ShapeBodyPose(
-                                shape, candidate),
-                        bodyPose);
+                detail::ShapeWorldPose(
+                        shapeIndex, shapes,
+                        candidate, bodyPose);
         const GmBoxAligned movingBounds =
                 detail::TransformBox(
                         shape.localBounds, shapeWorld);
@@ -1574,11 +1727,21 @@ __device__ inline Status Detect(
                             GmSurf::EGmSurfType::Mesh)) {
                     return Status::UnsupportedGeometry;
                 }
-                detail::EllipsoidMesh<TrackDiagnostics>(
-                        scene, configuration, surface,
-                        cell.surfaceIndex,
-                        surface.actorIndex, shape, shapeIndex,
-                        shapeWorld, scratch);
+                if (shape.surfaceType ==
+                    static_cast<std::uint32_t>(
+                            GmSurf::EGmSurfType::Sphere)) {
+                    detail::SphereMesh<TrackDiagnostics>(
+                            scene, configuration, surface,
+                            cell.surfaceIndex,
+                            surface.actorIndex, shape, shapeIndex,
+                            shapeWorld, scratch);
+                } else {
+                    detail::EllipsoidMesh<TrackDiagnostics>(
+                            scene, configuration, surface,
+                            cell.surfaceIndex,
+                            surface.actorIndex, shape, shapeIndex,
+                            shapeWorld, scratch);
+                }
                 if (scratch.overflow) return Status::Overflow;
             }
         }

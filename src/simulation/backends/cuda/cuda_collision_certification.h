@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "simulation/backends/cuda/cuda_collision_layout.h"
+#include "simulation/backends/cuda/cuda_static_configuration.h"
 #include "simulation/backends/cuda/cuda_state_layout.h"
 
 namespace forevervalidator::simulation {
@@ -50,6 +51,17 @@ CudaCollisionOrderingExecution
 ExecuteCudaCollisionOrderingForCertification(
         const std::vector<cuda::collision::CudaCollision> &collisions)
         noexcept;
+
+struct CudaShapeWorldPoseExecution {
+    bool success = false;
+    GmIso4 worldPose{};
+    std::string diagnostic;
+};
+
+CudaShapeWorldPoseExecution ExecuteCudaShapeWorldPoseForCertification(
+        const std::vector<CudaVehicleCollisionShape> &shapes,
+        const CudaCandidateState &state,
+        std::uint32_t shapeIndex) noexcept;
 
 }  // namespace forevervalidator::simulation
 

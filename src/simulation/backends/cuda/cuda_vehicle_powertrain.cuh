@@ -14,6 +14,13 @@ constexpr float GearShiftCooldown = 0.025f;
 constexpr float BurnoutReverseGearShiftCooldown = 0.002f;
 constexpr float SlipRpmScaleMaximum = 1.15f;
 constexpr float SlipRpmScaleApproachRate = 0.3f;
+constexpr float LegacyEngineGearChangeCooldown = 0.04f;
+constexpr float LegacyEngineWeightedSpeedXScale = 0.3f;
+constexpr float LegacyEngineWeightedSpeedYScale = 0.1f;
+constexpr float LegacyEngineSpeedNormScale = 0.2f;
+constexpr float LegacyEngineCooldownDecayScale = 1.9f;
+constexpr float LegacyEngineGroundInputRate = 12.0f;
+constexpr float LegacyEngineAirborneInputRate = 3.5f;
 
 __device__ inline float TransmissionValue(
         const CudaPackedStaticConfigurationHeader *configuration,
@@ -217,6 +224,88 @@ __device__ inline void UpdateTransmissionTransitions(
 
 }  // namespace detail
 
+__device__ inline void IntegrateLegacyEngine(
+        CudaVehicleState &vehicle,
+        const CudaPackedStaticConfigurationHeader *configuration,
+        float input,
+        float dt,
+        bool blocked) {
+    input = fabsf(input);
+    const bool groundReady =
+            !blocked &&
+            !(0.0f < vehicle.engine.shiftCooldown);
+    const int storedGear = vehicle.engine.gearIndex;
+    const int ratioIndex =
+            storedGear < 2 ? 0 : storedGear - 1;
+    const GmVec3 &speed = vehicle.gearedDrive.localSpeed;
+    const float weightedSpeed = exact::Sqrt(
+            speed.z * speed.z +
+            detail::LegacyEngineWeightedSpeedXScale *
+                    speed.x * speed.x +
+            detail::LegacyEngineWeightedSpeedYScale *
+                    speed.y * speed.y);
+    const float targetInput =
+            (weightedSpeed /
+             (configuration->tuning.engineSpeedNorm *
+              detail::LegacyEngineSpeedNormScale)) *
+            detail::TransmissionValue(
+                    configuration,
+                    CudaTransmissionArrayId::GearSpeedRatio,
+                    ratioIndex);
+    if (groundReady) {
+        input = targetInput;
+        if (!vehicle.engine.useLowSpeedGateB) {
+            if (storedGear == 0) {
+                vehicle.engine.gearIndex = 1;
+                vehicle.engine.shiftCooldown =
+                        detail::
+                                LegacyEngineGearChangeCooldown;
+            } else if (
+                    detail::TransmissionValue(
+                            configuration,
+                            CudaTransmissionArrayId::
+                                    UpshiftThreshold,
+                            ratioIndex) <
+                            targetInput &&
+                    storedGear < 5) {
+                vehicle.engine.gearIndex = storedGear + 1;
+                vehicle.engine.shiftCooldown =
+                        detail::
+                                LegacyEngineGearChangeCooldown;
+            } else if (
+                    targetInput <
+                            detail::TransmissionValue(
+                                    configuration,
+                                    CudaTransmissionArrayId::
+                                            DownshiftThreshold,
+                                    ratioIndex) &&
+                    storedGear > 1) {
+                vehicle.engine.gearIndex = storedGear - 1;
+                vehicle.engine.shiftCooldown =
+                        detail::
+                                LegacyEngineGearChangeCooldown;
+            }
+        } else if (storedGear != 0) {
+            vehicle.engine.gearIndex = 0;
+            vehicle.engine.shiftCooldown =
+                    detail::LegacyEngineGearChangeCooldown;
+        }
+    } else if (
+            !(vehicle.engine.shiftCooldown < 0.0f) &&
+            !(dt + dt < vehicle.engine.shiftCooldown)) {
+        vehicle.engine.engineInputMemory -=
+                vehicle.engine.engineInputMax * dt *
+                detail::LegacyEngineCooldownDecayScale;
+    }
+    const float rate = groundReady
+            ? detail::LegacyEngineGroundInputRate
+            : detail::LegacyEngineAirborneInputRate;
+    vehicle.engine.engineInputMemory +=
+            (vehicle.engine.engineInputMax * input -
+             vehicle.engine.engineInputMemory) *
+            dt * rate;
+}
+
 __device__ inline void IntegrateGearedEngine(
         CudaVehicleState &vehicle,
         const CudaPackedStaticConfigurationHeader *configuration,
@@ -356,8 +445,16 @@ __device__ inline void IntegrateEngine(
     const bool blocked =
             detail::AllWheelsAirborne(vehicle) ||
             0.0f < vehicle.engine.shiftCooldown;
-    IntegrateGearedEngine(
-            vehicle, configuration, dt, inputActive, blocked);
+    if (configuration->tuning.handlingModel !=
+        static_cast<std::uint32_t>(
+                CSceneVehicleCarHandlingModel_GearedDrive)) {
+        IntegrateLegacyEngine(
+                vehicle, configuration, input, dt, blocked);
+    } else {
+        IntegrateGearedEngine(
+                vehicle, configuration, dt,
+                inputActive, blocked);
+    }
     detail::ClampEngineInput(vehicle);
 }
 

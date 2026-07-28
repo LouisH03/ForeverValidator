@@ -549,9 +549,8 @@ ReplaySimulationRuntime::StepOptimizedCpuNativeBinary32(
         execution.result = ReplaySimulationRunResult::InvalidControlTimeline;
         return execution;
     }
-    if (state.stuntsEnabled &&
-        !state.definition->optimizedCpuStadiumSpecializationsEnabled) {
-        return Step(tick);
+    if (!state.definition->optimizedCpuStadiumSpecializationsEnabled) {
+        return StepOptimizedCpu(tick);
     }
     state.phase = Phase::Stepping;
 

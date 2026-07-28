@@ -950,13 +950,21 @@ __device__ inline void UpdateAirControl(
             vehicle.airControl.memoryAngular.y = angularSpeed.y;
         }
         target.y = vehicle.airControl.memoryAngular.y;
-        if (ScalarEpsilon < vehicle.controls.lowSpeedGateB &&
-            0.0f < vehicle.airControl.memoryAngular.x) {
-            vehicle.airControl.memoryAngular.x = 0.0f;
-        } else {
-            vehicle.airControl.memoryAngular.x = angularSpeed.x;
+        if (configuration->tuning.handlingModel ==
+                    CSceneVehicleCarHandlingModel_SlipResponse ||
+            configuration->tuning.handlingModel ==
+                    CSceneVehicleCarHandlingModel_GearedDrive) {
+            if (ScalarEpsilon <
+                        vehicle.controls.lowSpeedGateB &&
+                0.0f <
+                        vehicle.airControl.memoryAngular.x) {
+                vehicle.airControl.memoryAngular.x = 0.0f;
+            } else {
+                vehicle.airControl.memoryAngular.x =
+                        angularSpeed.x;
+            }
+            target.x = vehicle.airControl.memoryAngular.x;
         }
-        target.x = vehicle.airControl.memoryAngular.x;
         if (strong) {
             torque.x *= 3.0f;
             torque.y *= 3.0f;
@@ -1660,6 +1668,361 @@ struct Model6Result {
     float surfaceFeedback = 0.0f;
     int slipFlag = 0;
 };
+
+template <bool ReuseWheelPassInvariants>
+__device__ inline ForceStatus ComputeModel3Ground(
+        CudaCandidatePhysicsState &candidate,
+        const CudaPackedStaticConfigurationHeader *configuration,
+        const GmVec3 &currentForce,
+        float slopeA,
+        float slopeB,
+        const GmVec3 &linearSpeed,
+        const GmVec3 &angularSpeed,
+        float visualSteerYaw,
+        bool hasMaterial,
+        const VehicleMaterialBlendValues &material,
+        Model6Result &result) {
+    CudaVehicleState &vehicle = candidate.vehicle;
+    const bool lateralHandling =
+            configuration->tuning.handlingModel ==
+            static_cast<std::uint32_t>(
+                    CSceneVehicleCarHandlingModel_Lateral);
+    for (std::uint32_t index = 0u;
+         index < vehicle.wheels.count; ++index) {
+        CudaWheelState &wheel = vehicle.wheels.values[index];
+        WheelSuspensionForce<ReuseWheelPassInvariants>(
+                candidate, configuration, wheel);
+        if (!wheel.realTime.contactPresent ||
+            !(configuration->tuning.gearedDrive.
+                      lateralForceScale > 0.0f) ||
+            !lateralHandling) {
+            continue;
+        }
+        const VehicleMaterialDefinition *wheelMaterial =
+                Material(
+                        configuration,
+                        static_cast<std::uint32_t>(
+                                wheel.realTime.contactMaterial));
+        if (wheelMaterial == nullptr) {
+            return ForceStatus::MissingMaterial;
+        }
+        const float slipGrip = wheel.realTime.slipping
+                ? configuration->tuning.gearedDrive.
+                          slippingSideFrictionScale
+                : 1.0f;
+        const float maximumSide =
+                wheelMaterial->blendableValues.w * slopeA *
+                tuning::EvaluateSpeed(
+                        configuration,
+                        CudaTuningCurveId::
+                                MaxSideFrictionFromSpeed,
+                        linearSpeed.z) *
+                slipGrip;
+        GmVec3 lateral = {
+                wheel.realTime.accumulatedContactNormal.y,
+                -wheel.realTime.accumulatedContactNormal.x,
+                0.0f,
+        };
+        lateral = wheel_detail::NormalizeOr(
+                lateral, {1.0f, 0.0f, 0.0f},
+                VectorEpsilonSquared);
+        if (wheel.axle ==
+            static_cast<std::uint32_t>(
+                    VehicleWheelAxle::Front)) {
+            const exact::SinCosResult sinCos =
+                    exact::SinCos(visualSteerYaw);
+            lateral = {
+                    sinCos.cosine * lateral.x,
+                    sinCos.cosine * lateral.y,
+                    -sinCos.sine +
+                            sinCos.cosine * lateral.z,
+            };
+        }
+        float sideForce =
+                -configuration->tuning.gearedDrive.
+                         lateralForceScale *
+                0.5f *
+                ((linearSpeed.y * lateral.y +
+                  linearSpeed.x * lateral.x) +
+                 linearSpeed.z * lateral.z);
+        const float sideForceMagnitude = fabsf(sideForce);
+        if (!(maximumSide < sideForceMagnitude)) {
+            wheel.realTime.slipping = false;
+        } else {
+            const float capped =
+                    SignNonNegative(sideForce) * maximumSide;
+            sideForce =
+                    (1.0f -
+                     configuration->tuning.gearedDrive.
+                             sideFrictionSlipBlend) *
+                            capped +
+                    configuration->tuning.gearedDrive.
+                            sideFrictionSlipBlend *
+                            sideForce;
+            wheel.realTime.slipping = true;
+        }
+        if (wheel.realTime.slipping) {
+            result.slipFlag = 1;
+        }
+        const GmVec3 lateralForce = {
+                lateral.x * sideForce,
+                lateral.y * sideForce,
+                lateral.z * sideForce,
+        };
+        AddCentralForce(candidate, lateralForce);
+        const float rollover =
+                -tuning::EvaluateSpeed(
+                        configuration,
+                        CudaTuningCurveId::
+                                RolloverLateralFromSpeed,
+                        linearSpeed.z) *
+                slopeA *
+                tuning::Evaluate(
+                        configuration,
+                        CudaTuningCurveId::
+                                RolloverLateralCoefficientFromAngle,
+                        fabsf(lateral.y));
+        AddTorque(candidate, {
+                lateralForce.z * rollover,
+                0.0f,
+                -rollover * lateralForce.x,
+        });
+    }
+    if (!hasMaterial || !lateralHandling) {
+        return ForceStatus::Success;
+    }
+
+    const float speedMagnitude = exact::Sqrt(
+            (linearSpeed.y * linearSpeed.y +
+             linearSpeed.x * linearSpeed.x) +
+            linearSpeed.z * linearSpeed.z);
+    if (!vehicle.controls.forcedLowSpeedFriction) {
+        if (!(speedMagnitude <
+              vehicle.reverseGearSpeedThreshold)) {
+            if (vehicle.controls.lowSpeedGateA >
+                LowSpeedGateThreshold) {
+                vehicle.engine.useLowSpeedGateB = false;
+            }
+        } else if (!(LowSpeedGateThreshold <
+                     vehicle.controls.lowSpeedGateB)) {
+            vehicle.engine.useLowSpeedGateB = false;
+        } else {
+            vehicle.engine.useLowSpeedGateB = true;
+        }
+    }
+    for (std::uint32_t index = 0u;
+         index < vehicle.wheels.count; ++index) {
+        CudaWheelState &wheel = vehicle.wheels.values[index];
+        const bool front =
+                wheel.axle ==
+                static_cast<std::uint32_t>(
+                        VehicleWheelAxle::Front);
+        const float halfTrack =
+                (front
+                         ? vehicle.gearedDrive.
+                                   wheelLongitudinalSpan
+                         : -vehicle.gearedDrive.
+                                   wheelLongitudinalSpan) *
+                0.5f;
+        float steerRamp = 1.0f;
+        if (!(configuration->tuning.steering.
+                      assistFullSpeed < speedMagnitude)) {
+            steerRamp = exact::Sin(
+                    (speedMagnitude /
+                     configuration->tuning.steering.
+                             assistFullSpeed) *
+                    HalfPi);
+        }
+        const float maximumSide =
+                tuning::EvaluateSpeed(
+                        configuration,
+                        CudaTuningCurveId::
+                                MaxSideFrictionFromSpeed,
+                        linearSpeed.z) *
+                material.w;
+        const float wheelSideSpeed =
+                linearSpeed.x +
+                angularSpeed.y * halfTrack;
+        float sideForce =
+                -configuration->tuning.gearedDrive.
+                         lateralForceScale *
+                0.5f * wheelSideSpeed;
+        if (maximumSide < fabsf(sideForce)) {
+            const float blended =
+                    (1.0f -
+                     configuration->tuning.gearedDrive.
+                             driveSideFrictionSlipBlend) *
+                            maximumSide +
+                    configuration->tuning.gearedDrive.
+                            driveSideFrictionSlipBlend *
+                            fabsf(sideForce);
+            sideForce =
+                    SignNonNegative(sideForce) * blended;
+        }
+        float sideTorque =
+                configuration->tuning.gearedDrive.
+                        sideForceToDriveTorqueScale *
+                sideForce;
+        if (front) {
+            const float reverseSign =
+                    !vehicle.engine.useLowSpeedGateB
+                    ? 1.0f
+                    : -1.0f;
+            const float slipScale =
+                    wheel.realTime.slipping
+                    ? configuration->tuning.gearedDrive.
+                              slippingSteerTorqueScale
+                    : 1.0f;
+            const float steerTorque =
+                    tuning::EvaluateSpeed(
+                            configuration,
+                            CudaTuningCurveId::
+                                    SteeringDriveTorqueFromSpeed,
+                            linearSpeed.z);
+            const float steerAssist =
+                    reverseSign * steerRamp *
+                    vehicle.controls.currentSteering *
+                    steerTorque * slipScale;
+            sideTorque = sideTorque - steerAssist;
+        }
+        AddTorque(
+                candidate,
+                {0.0f, sideTorque * halfTrack, 0.0f});
+    }
+
+    const float accelerationBase =
+            tuning::EvaluateSpeed(
+                    configuration,
+                    CudaTuningCurveId::
+                            SlipResponseAccelFromSpeed,
+                    linearSpeed.z);
+    const float sideLimit =
+            tuning::EvaluateSpeed(
+                    configuration,
+                    CudaTuningCurveId::
+                            MaxSideFrictionFromSpeed,
+                    linearSpeed.z) *
+            material.w;
+    float sideSlowdownInput = fabsf(
+            configuration->tuning.gearedDrive.
+                    lateralForceScale *
+            0.5f * linearSpeed.x);
+    if (sideLimit < sideSlowdownInput) {
+        sideSlowdownInput = sideLimit;
+    }
+    const float driveScale =
+            material.y * vehicle.controls.lowSpeedGateA +
+            (vehicle.engine.useLowSpeedGateB ? -1.0f : 0.0f) *
+                    material.y *
+                    vehicle.controls.lowSpeedGateB +
+            (vehicle.turbo.type !=
+                             CSceneVehicleCar::ETurboType_Inactive
+                     ? vehicle.turbo.impulseScale
+                     : 0.0f);
+    float driveForce =
+            (accelerationBase -
+             configuration->tuning.steering.slowDownScale *
+                     sideSlowdownInput *
+                     fabsf(vehicle.controls.currentSteering) *
+                     tuning::EvaluateSpeed(
+                             configuration,
+                             CudaTuningCurveId::
+                                     SteerSlowDownFromSpeed,
+                             linearSpeed.z)) *
+            driveScale;
+    if (vehicle.controls.forcedLowSpeedFriction) {
+        driveForce =
+                vehicle.turbo.type ==
+                                CSceneVehicleCar::
+                                        ETurboType_Inactive
+                ? 0.0f
+                : accelerationBase *
+                          vehicle.turbo.impulseScale;
+    }
+    float opposing = 0.0f;
+    if (linearSpeed.z > 0.0f) {
+        opposing =
+                (configuration->tuning.gearedDrive.
+                         forwardAccelBase +
+                 configuration->tuning.gearedDrive.
+                         forwardAccelSpeedCoef *
+                         linearSpeed.z) *
+                vehicle.controls.lowSpeedGateB;
+        const float cap =
+                material.z *
+                (result.slipFlag == 0
+                         ? configuration->tuning.gearedDrive.
+                                   forwardAccelCap
+                         : configuration->tuning.gearedDrive.
+                                   forwardAccelCapWhenSlipping);
+        if (cap < opposing) {
+            opposing = cap;
+            MarkAllWheelsSlipping(vehicle);
+        }
+    }
+    if (linearSpeed.z < 0.0f &&
+        vehicle.controls.forcedLowSpeedFriction) {
+        opposing =
+                (configuration->tuning.gearedDrive.
+                         forwardAccelBase -
+                 configuration->tuning.gearedDrive.
+                         forwardAccelSpeedCoef *
+                         linearSpeed.z) *
+                vehicle.controls.lowSpeedGateA;
+        const float cap =
+                material.z *
+                (result.slipFlag == 0
+                         ? configuration->tuning.gearedDrive.
+                                   forwardAccelCap
+                         : configuration->tuning.gearedDrive.
+                                   forwardAccelCapWhenSlipping);
+        if (cap < opposing) {
+            opposing = cap;
+            MarkAllWheelsSlipping(vehicle);
+        }
+        opposing = -opposing;
+    }
+    if (vehicle.controls.forcedLowSpeedFriction &&
+        fabsf(linearSpeed.z) < 1.0f) {
+        opposing *= fabsf(linearSpeed.z);
+    }
+    result.surfaceFeedback = opposing;
+    float longitudinal = driveForce - opposing;
+    if (configuration->tuning.engineSpeedNorm *
+                material.x <
+        linearSpeed.z) {
+        longitudinal =
+                -configuration->tuning.gearedDrive.
+                         speedLimitForce;
+    }
+    if (linearSpeed.z <
+        -(configuration->tuning.gearedDrive.
+                  reverseSpeedNorm *
+          material.x)) {
+        longitudinal =
+                configuration->tuning.gearedDrive.
+                        speedLimitForce;
+    }
+    const float forceZ = longitudinal * slopeB;
+    AddCentralForce(candidate, {0.0f, 0.0f, forceZ});
+    AddTorque(candidate, {
+            -forceZ *
+                    configuration->tuning.slipResponse.
+                            longitudinalTorqueScale,
+            0.0f,
+            0.0f,
+    });
+    AddCentralForce(candidate, {
+            0.0f,
+            0.0f,
+            (-configuration->tuning.gearedDrive.
+                     forceZScale *
+             currentForce.z) /
+                    configuration->tuning.bodyAirResponse.
+                            groundedSolidFeedback1,
+    });
+    return ForceStatus::Success;
+}
 
 __device__ inline float SignedAngle(
         const GmVec3 &left,
@@ -2739,9 +3102,17 @@ __device__ inline ForceStatus ComputeForcesModel6(
         force_detail::SetZeroDynamics(candidate);
         return ForceStatus::Success;
     }
-    if (configuration->tuning.handlingModel !=
-        static_cast<std::uint32_t>(
-                CSceneVehicleCarHandlingModel_GearedDrive)) {
+    const bool legacyHandling =
+            configuration->tuning.handlingModel ==
+                    static_cast<std::uint32_t>(
+                            CSceneVehicleCarHandlingModel_Standard) ||
+            configuration->tuning.handlingModel ==
+                    static_cast<std::uint32_t>(
+                            CSceneVehicleCarHandlingModel_Lateral);
+    if (!legacyHandling &&
+        configuration->tuning.handlingModel !=
+                static_cast<std::uint32_t>(
+                        CSceneVehicleCarHandlingModel_GearedDrive)) {
         return ForceStatus::UnsupportedHandlingModel;
     }
     force_detail::CreateFakeContacts(
@@ -2800,18 +3171,32 @@ __device__ inline ForceStatus ComputeForcesModel6(
     const float visualSteerYaw =
             force_detail::VisualSteerYaw(
                     vehicle, configuration, linearSpeed);
+    vehicle.gearedDrive.localSpeed = linearSpeed;
     force_detail::Model6Result modelResult;
-    const int waterActive = force_detail::ApplyWaterForces(
-            candidate, configuration, currentForce);
-    const ForceStatus modelStatus =
-            force_detail::ComputeModel6Ground<
+    if (legacyHandling) {
+        const ForceStatus modelStatus =
+                force_detail::ComputeModel3Ground<
                     ReuseWheelPassInvariants>(
-                    candidate, configuration, dt, currentForce,
-                    slopeA, slopeB, linearSpeed, angularSpeed,
-                    visualSteerYaw, hasMaterial, material,
-                    waterActive, modelResult);
-    if (modelStatus != ForceStatus::Success) {
-        return modelStatus;
+                        candidate, configuration, currentForce,
+                        slopeA, slopeB, linearSpeed, angularSpeed,
+                        visualSteerYaw, hasMaterial, material,
+                        modelResult);
+        if (modelStatus != ForceStatus::Success) {
+            return modelStatus;
+        }
+    } else {
+        const int waterActive = force_detail::ApplyWaterForces(
+                candidate, configuration, currentForce);
+        const ForceStatus modelStatus =
+                force_detail::ComputeModel6Ground<
+                        ReuseWheelPassInvariants>(
+                        candidate, configuration, dt, currentForce,
+                        slopeA, slopeB, linearSpeed, angularSpeed,
+                        visualSteerYaw, hasMaterial, material,
+                        waterActive, modelResult);
+        if (modelStatus != ForceStatus::Success) {
+            return modelStatus;
+        }
     }
 
     bool sideKill = false;

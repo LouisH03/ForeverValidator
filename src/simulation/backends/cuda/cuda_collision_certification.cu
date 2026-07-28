@@ -41,6 +41,17 @@ __global__ void ExecuteCollisionOrderingKernel(
     cuda::collision::detail::SortForResponse(*scratch);
 }
 
+__global__ void ExecuteShapeWorldPoseKernel(
+        const CudaVehicleCollisionShape *shapes,
+        const CudaCandidateState *state,
+        std::uint32_t shapeIndex,
+        GmIso4 *worldPose) {
+    if (blockIdx.x != 0u || threadIdx.x != 0u) return;
+    *worldPose = cuda::collision::detail::ShapeWorldPose(
+            shapeIndex, shapes, *state,
+            cuda::collision::detail::BodyPose(state->body));
+}
+
 std::string Failure(const char *operation, cudaError_t error) {
     return std::string(operation) + " failed: " +
            cudaGetErrorName(error) + " (" +
@@ -225,6 +236,68 @@ ExecuteCudaCollisionOrderingForCertification(
     result.success = true;
     result.diagnostic =
             "CUDA collision response ordering completed";
+    return result;
+}
+
+CudaShapeWorldPoseExecution ExecuteCudaShapeWorldPoseForCertification(
+        const std::vector<CudaVehicleCollisionShape> &shapes,
+        const CudaCandidateState &state,
+        std::uint32_t shapeIndex) noexcept {
+    CudaShapeWorldPoseExecution result;
+    if (shapes.empty() || shapeIndex >= shapes.size() ||
+        state.schemaVersion != CudaCandidateState::SchemaVersion) {
+        result.diagnostic =
+                "invalid CUDA shape-world certification request";
+        return result;
+    }
+    CudaVehicleCollisionShape *deviceShapes = nullptr;
+    CudaCandidateState *deviceState = nullptr;
+    GmIso4 *devicePose = nullptr;
+    cudaError_t error = cudaMalloc(
+            reinterpret_cast<void **>(&deviceShapes),
+            shapes.size() * sizeof(shapes.front()));
+    if (error == cudaSuccess) {
+        error = cudaMalloc(
+                reinterpret_cast<void **>(&deviceState),
+                sizeof(CudaCandidateState));
+    }
+    if (error == cudaSuccess) {
+        error = cudaMalloc(
+                reinterpret_cast<void **>(&devicePose),
+                sizeof(GmIso4));
+    }
+    if (error == cudaSuccess) {
+        error = cudaMemcpy(
+                deviceShapes, shapes.data(),
+                shapes.size() * sizeof(shapes.front()),
+                cudaMemcpyHostToDevice);
+    }
+    if (error == cudaSuccess) {
+        error = cudaMemcpy(
+                deviceState, &state, sizeof(CudaCandidateState),
+                cudaMemcpyHostToDevice);
+    }
+    if (error == cudaSuccess) {
+        ExecuteShapeWorldPoseKernel<<<1u, 1u>>>(
+                deviceShapes, deviceState, shapeIndex, devicePose);
+        error = cudaGetLastError();
+    }
+    if (error == cudaSuccess) {
+        error = cudaMemcpy(
+                &result.worldPose, devicePose, sizeof(GmIso4),
+                cudaMemcpyDeviceToHost);
+    }
+    if (devicePose != nullptr) cudaFree(devicePose);
+    if (deviceState != nullptr) cudaFree(deviceState);
+    if (deviceShapes != nullptr) cudaFree(deviceShapes);
+    if (error != cudaSuccess) {
+        result.diagnostic =
+                Failure("CUDA shape-world certification", error);
+        return result;
+    }
+    result.success = true;
+    result.diagnostic =
+            "CUDA hierarchical shape pose is bit-exact";
     return result;
 }
 
