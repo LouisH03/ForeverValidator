@@ -191,7 +191,8 @@ int main(int argc, char **argv) {
         return Fail(
                 "usage: PACKS REPLAY CANDIDATES TIMELINE_TICKS "
                 "REPETITIONS [BRANCH_TIME_MS] "
-                "[random-steering|existing-event|smooth-steering|"
+                "[random-steering|existing-event|few-existing-events|"
+                "smooth-steering|"
                 "input-insertion|dense-insertion|input-deletion|cancelled] "
                 "[optimized|legacy|differential|"
                 "velocity|point|pose|volume-entry|finish-time] "
@@ -228,6 +229,7 @@ int main(int argc, char **argv) {
     }
     if (modifier != "random-steering" &&
         modifier != "existing-event" &&
+        modifier != "few-existing-events" &&
         modifier != "smooth-steering" &&
         modifier != "input-insertion" &&
         modifier != "dense-insertion" &&
@@ -303,14 +305,16 @@ int main(int argc, char **argv) {
                         {firstTickTimeMs,
                          evaluationEndTimeMs,
                          0x6d2b79f5u}});
-    } else if (modifier == "existing-event") {
+    } else if (modifier == "existing-event" ||
+               modifier == "few-existing-events") {
         PhysicsSandboxCudaExistingEventModifier existing;
         existing.window = {
                 firstTickTimeMs,
                 evaluationEndTimeMs,
                 0x6d2b79f5u};
-        existing.minimumCount = 1u;
-        existing.maximumCount = 16u;
+        const bool few = modifier == "few-existing-events";
+        existing.minimumCount = few ? 3u : 1u;
+        existing.maximumCount = few ? 5u : 16u;
         existing.maximumTimeShiftMs = 100;
         existing.steeringDeltaMinimum = -4096;
         existing.steeringDeltaMaximum = 4096;
@@ -528,6 +532,18 @@ int main(int argc, char **argv) {
                 timelineTicks;
         const double simulationKernelMilliseconds =
                 batch.Value().metrics.simulationKernelMilliseconds;
+        const double wallMilliseconds =
+                Milliseconds(wallBegin, wallEnd);
+        const double attemptsPerSecond =
+                wallMilliseconds == 0.0
+                ? 0.0
+                : batch.Value().evaluatedCandidateCount * 1000.0 /
+                          wallMilliseconds;
+        const double kernelAttemptsPerSecond =
+                batch.Value().metrics.kernelMilliseconds == 0.0
+                ? 0.0
+                : batch.Value().evaluatedCandidateCount * 1000.0 /
+                          batch.Value().metrics.kernelMilliseconds;
         const double normalizedPhysicsNanoseconds =
                 simulatedTicks == 0.0
                 ? 0.0
@@ -606,7 +622,11 @@ int main(int argc, char **argv) {
                   << "\"kernel_ms\":"
                   << batch.Value().metrics.kernelMilliseconds << ","
                   << "\"wall_ms\":"
-                  << Milliseconds(wallBegin, wallEnd) << ","
+                  << wallMilliseconds << ","
+                  << "\"attempts_per_second\":"
+                  << attemptsPerSecond << ","
+                  << "\"kernel_attempts_per_second\":"
+                  << kernelAttemptsPerSecond << ","
                   << "\"score_initialization_kernel_ms\":"
                   << batch.Value().metrics
                              .scoreInitializationKernelMilliseconds
