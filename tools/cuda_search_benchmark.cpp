@@ -615,6 +615,10 @@ int main(int argc, char **argv) {
                   << batch.Value().metrics.mutationKernelMilliseconds << ","
                   << "\"simulation_kernel_ms\":"
                   << simulationKernelMilliseconds << ","
+                  << "\"finish_refinement_kernel_ms\":"
+                  << batch.Value().metrics
+                             .finishRefinementKernelMilliseconds
+                  << ","
                   << "\"winner_kernel_ms\":"
                   << batch.Value().metrics.winnerKernelMilliseconds << ","
                   << "\"winner_reduction_kernel_ms\":"

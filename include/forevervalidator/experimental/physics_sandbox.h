@@ -442,6 +442,7 @@ struct PhysicsSandboxCudaSearchMetrics {
     double scoreInitializationKernelMilliseconds = 0.0;
     double mutationKernelMilliseconds = 0.0;
     double simulationKernelMilliseconds = 0.0;
+    double finishRefinementKernelMilliseconds = 0.0;
     double winnerKernelMilliseconds = 0.0;
     double winnerReductionKernelMilliseconds = 0.0;
     double winnerStateCaptureKernelMilliseconds = 0.0;
