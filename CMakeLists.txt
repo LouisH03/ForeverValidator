@@ -582,6 +582,17 @@ if(FOREVERVALIDATOR_BUILD_TESTS)
             forevervalidator-cuda-race-tests)
         add_test(NAME forevervalidator-cuda-race
                  COMMAND forevervalidator-cuda-race-tests)
+
+        add_executable(forevervalidator-cuda-search-winner-reduction-tests
+            tests/cuda_search_winner_reduction_tests.cu)
+        target_include_directories(
+            forevervalidator-cuda-search-winner-reduction-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src")
+        forevervalidator_configure_target(
+            forevervalidator-cuda-search-winner-reduction-tests)
+        add_test(NAME forevervalidator-cuda-search-winner-reduction
+                 COMMAND
+                 forevervalidator-cuda-search-winner-reduction-tests)
     endif()
 
     add_executable(forevervalidator-render-scene-tests

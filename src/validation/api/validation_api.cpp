@@ -2349,6 +2349,8 @@ PhysicsSandboxCudaSearchSession::Impl::Convert(
             execution.candidateInputDeviceBytes;
     result.metrics.mutationScratchDeviceBytes =
             execution.mutationScratchDeviceBytes;
+    result.metrics.winnerSelectionDeviceBytes =
+            execution.winnerSelectionDeviceBytes;
     result.metrics.hostToDeviceBytes = execution.hostToDeviceBytes;
     result.metrics.deviceToHostBytes = execution.deviceToHostBytes;
     result.metrics.kernelMilliseconds = execution.kernelMilliseconds;
@@ -2388,6 +2390,7 @@ PhysicsSandboxCudaSearchSession::Impl::Convert(
         result.bestCandidateId = best.candidateId;
     }
     result.bestMutationCount = best.mutationCount;
+    result.bestEvaluationTick = best.evaluationTick;
     result.bestScore = best.score;
     result.bestTimeMs = best.timeMs;
     result.bestDetail0 = best.detail0;
