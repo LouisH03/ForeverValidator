@@ -27,7 +27,10 @@ publishing the result. The JSON fields are:
 
 `race_time_ms` remains for compatibility and is the nanosecond estimate
 rounded down to milliseconds. Existing finish-time tolerances and validation
-classification rules are otherwise unchanged.
+classification rules are otherwise unchanged. In particular, classification
+continues to compare the legacy prepared-tick time; changing the precision of
+the reported result does not move an existing replay across a tolerance
+boundary.
 
 ## Refinement contract
 
@@ -65,3 +68,54 @@ claim that the underlying continuous collision event is known exactly.
 The finish bracket and estimate are part of runtime snapshots, CUDA state
 serialization, semantic hashes, differential comparisons, and public
 simulation outcomes.
+
+## Verification evidence
+
+The implementation was checked on 2026-07-28 against CPU baseline `3a0dcb8`.
+The corpus contained 3,745 United replays and 2,169 Stadium replays. Reference
+and OptimizedCpu each produced identical baseline/branch classifications for
+all 5,914 inputs:
+
+| Classification | Count |
+| --- | ---: |
+| Valid | 5,903 |
+| Wrong simulation | 7 |
+| Incompatible replay version | 1 |
+| Processing error | 3 |
+
+The 5,911 serialized reports had zero differences in `status`,
+`validate_result_code`, `valid`, or `wrong_simulation`. The three processing
+errors and all per-directory valid/invalid/error totals also matched.
+
+Backend differential replay `1858.Replay.Gbx` produced the same bracket on
+Reference, OptimizedCpu, and CUDA:
+
+```text
+(2862623472 ns, 2862623473 ns]
+```
+
+CUDA's per-tick CPU/device differential passed all 287 ticks of that replay.
+A separate replay with one respawn produced `(7667909287 ns,
+7667909288 ns]` on all three backends and retained a respawn count of one.
+Five repeated runs on each CPU backend reproduced the same bounds.
+
+## Runtime cost
+
+Measurements used a Release build pinned to one core of an AMD Ryzen 5 7500F.
+Each value is the mean of two 31-sample medians, with five warmups per sample
+set. The 1,000-tick case stops before the finish. The 1,919-tick case includes
+one finish refinement.
+
+| Backend and workload | Baseline | Nanosecond refinement | Change |
+| --- | ---: | ---: | ---: |
+| OptimizedCpu, 1,000 ticks | 7.184 ms | 7.337 ms | +2.13% |
+| Reference, 1,000 ticks | 38.491 ms | 38.439 ms | -0.14% |
+| OptimizedCpu, 1,919 ticks + finish | 12.654 ms | 13.923 ms | +10.03% |
+| Reference, 1,919 ticks + finish | 70.006 ms | 71.530 ms | +2.18% |
+
+The initial host implementation allocated fresh snapshot vectors on every
+tick and measured about 12% overhead on the pre-finish OptimizedCpu workload.
+Reusable snapshot storage now preserves vector capacity, reducing that steady
+state overhead to 2.13%. CUDA performs its extra replay only for candidates
+that finished, so non-finishing timeline candidates do not pay per-tick
+snapshot or probe costs.
