@@ -2644,12 +2644,6 @@ PhysicsSandboxCudaSearchSession::Impl::Convert(
     result.bestChanged = execution.bestChanged;
     result.metrics.residentDeviceBytes =
             execution.residentDeviceBytes;
-    result.metrics.mutationDeviceBytes =
-            execution.mutationDeviceBytes;
-    result.metrics.candidateInputDeviceBytes =
-            execution.candidateInputDeviceBytes;
-    result.metrics.mutationScratchDeviceBytes =
-            execution.mutationScratchDeviceBytes;
     result.metrics.hostToDeviceBytes = execution.hostToDeviceBytes;
     result.metrics.deviceToHostBytes = execution.deviceToHostBytes;
     result.metrics.kernelMilliseconds = execution.kernelMilliseconds;
@@ -2979,8 +2973,6 @@ CreatePhysicsSandboxCudaSearchSession(
         internal.evaluationEndTimeMs =
                 configuration.evaluationEndTimeMs;
         internal.maximumEventCount = maximumEventCount;
-        internal.useLegacyMutationPipelineForTesting =
-                configuration.useLegacyMutationPipelineForTesting;
         internal.baselineTicks.reserve(endCursor - source.cursor);
         for (std::size_t index = source.cursor;
              index < endCursor; ++index) {

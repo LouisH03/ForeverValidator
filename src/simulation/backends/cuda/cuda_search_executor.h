@@ -89,7 +89,6 @@ struct CudaSearchExecutorConfiguration {
     std::int64_t evaluationStartTimeMs = 0;
     std::int64_t evaluationEndTimeMs = 0;
     std::size_t maximumEventCount = 0u;
-    bool useLegacyMutationPipelineForTesting = false;
 };
 
 enum class CudaSearchStatus : std::uint32_t {
@@ -126,9 +125,6 @@ struct CudaSearchBatchExecution {
     bool bestChanged = false;
     CudaSearchBest best{};
     std::uint64_t residentDeviceBytes = 0u;
-    std::uint64_t mutationDeviceBytes = 0u;
-    std::uint64_t candidateInputDeviceBytes = 0u;
-    std::uint64_t mutationScratchDeviceBytes = 0u;
     std::uint64_t hostToDeviceBytes = 0u;
     std::uint64_t deviceToHostBytes = 0u;
     double kernelMilliseconds = 0.0;
