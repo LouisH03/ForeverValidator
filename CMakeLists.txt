@@ -581,4 +581,17 @@ if(FOREVERVALIDATOR_BUILD_TESTS)
         forevervalidator-checkpoint-freewheel-tests)
     add_test(NAME forevervalidator-checkpoint-freewheel
         COMMAND forevervalidator-checkpoint-freewheel-tests)
+
+    add_executable(forevervalidator-replay-decoration-size-tests
+        tests/replay_decoration_size_tests.cpp)
+    target_include_directories(
+        forevervalidator-replay-decoration-size-tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(
+        forevervalidator-replay-decoration-size-tests PRIVATE
+        forevervalidator_core)
+    forevervalidator_configure_target(
+        forevervalidator-replay-decoration-size-tests)
+    add_test(NAME forevervalidator-replay-decoration-size
+        COMMAND forevervalidator-replay-decoration-size-tests)
 endif()
