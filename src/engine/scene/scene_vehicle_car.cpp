@@ -90,6 +90,11 @@ CSceneVehicleCar::~CSceneVehicleCar(void) { DetachPhysicsItem(); }
 CSceneVehicleCar::RuntimeClone
 CSceneVehicleCar::CaptureRuntimeClone(void) const {
   RuntimeClone clone;
+  CaptureRuntimeClone(clone);
+  return clone;
+}
+
+void CSceneVehicleCar::CaptureRuntimeClone(RuntimeClone &clone) const {
   clone.vehicle = CSceneVehicle::CaptureRuntimeClone();
   clone.wheels = wheels;
   for (SSimulationWheel &wheel : clone.wheels) {
@@ -113,7 +118,6 @@ CSceneVehicleCar::CaptureRuntimeClone(void) const {
     clone.dynaPartSprings[index] = dynaParts[index].spring;
   }
   clone.forceAccumulators = forceAccumulators;
-  return clone;
 }
 
 bool CSceneVehicleCar::CanRestoreRuntimeClone(

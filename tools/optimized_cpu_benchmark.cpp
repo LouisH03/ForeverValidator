@@ -34,8 +34,9 @@ void HashValue(std::uint64_t &hash, const T &value) {
     }
 }
 
+template<typename T>
 void HashOptional(std::uint64_t &hash,
-                  const std::optional<std::uint32_t> &value) {
+                  const std::optional<T> &value) {
     const bool present = value.has_value();
     HashValue(hash, present);
     if (present) {
@@ -82,6 +83,7 @@ std::uint64_t Fingerprint(const PhysicsSandboxStateView &view) {
     HashValue(hash, view.totalLaps);
     HashValue(hash, view.raceCompleted);
     HashOptional(hash, view.finishTimeMs);
+    HashOptional(hash, view.finishTime);
     HashValue(hash, view.respawnCount);
     HashOptional(hash, view.stuntsScore);
     return hash;

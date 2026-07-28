@@ -716,6 +716,11 @@ void CHmsDyna::DoPostCollisionDynamic(void) {
 }
 CHmsDyna::RuntimeClone CHmsDyna::CaptureRuntimeClone(void) const {
     RuntimeClone clone;
+    CaptureRuntimeClone(clone);
+    return clone;
+}
+
+void CHmsDyna::CaptureRuntimeClone(RuntimeClone &clone) const {
     clone.maxAngularSpeed = maxAngularSpeed;
     clone.dynaParams = dynaParams;
     clone.tempState = tempState;
@@ -724,7 +729,6 @@ CHmsDyna::RuntimeClone CHmsDyna::CaptureRuntimeClone(void) const {
     clone.pendingCollisionReplacements = pendingCollisionReplacements_;
     clone.isDynamicActive = isDynamicActive;
     clone.dynamicType = dynamicType;
-    return clone;
 }
 
 bool CHmsDyna::PrepareRuntimeCloneRestore(const RuntimeClone &clone) {
