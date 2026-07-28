@@ -42,6 +42,12 @@ struct DeviceTimelineResult {
     std::uint32_t observationCount = 0u;
 };
 
+struct DeviceFinishRefinement {
+    bool present = false;
+    bool failed = false;
+    forevervalidator::FinishTimeEstimate estimate{};
+};
+
 template<typename T>
 class DeviceAllocation {
 public:
@@ -171,6 +177,188 @@ __device__ void RecordObservation(
             state.race.progress.raceCompleted;
     observation.finishTickMs =
             state.race.progress.lastPrepareTimeMs;
+}
+
+__device__ bool RefineFinishTransition(
+        const CudaPackedSceneHeader *scene,
+        const CudaPackedStaticConfigurationHeader *configuration,
+        const CudaCandidatePhysicsState &preSubstep,
+        float fullDt,
+        double substepStartNs,
+        cuda::collision::CudaCollisionScratch &scratch,
+        forevervalidator::FinishTimeEstimate *estimate) {
+    double lower = substepStartNs;
+    double upper =
+            lower + static_cast<double>(fullDt) * 1000000000.0;
+    for (;;) {
+        const std::uint64_t firstInterior =
+                static_cast<std::uint64_t>(floor(lower)) + 1u;
+        const std::uint64_t upperCeiling =
+                static_cast<std::uint64_t>(ceil(upper));
+        if (upperCeiling == 0u || firstInterior >= upperCeiling) {
+            break;
+        }
+        const std::uint64_t lastInterior = upperCeiling - 1u;
+        const std::uint64_t candidateNs =
+                firstInterior +
+                (lastInterior - firstInterior) / 2u;
+        const float partialDt = static_cast<float>(
+                (static_cast<double>(candidateNs) -
+                 substepStartNs) /
+                1000000000.0);
+        if (!(partialDt > 0.0f)) {
+            lower = static_cast<double>(candidateNs);
+            continue;
+        }
+        CudaCandidatePhysicsState probe = preSubstep;
+        const cuda::physics::Status status =
+                cuda::physics::CollisionSubstep(
+                        scene, configuration, probe,
+                        partialDt, scratch);
+        if (status != cuda::physics::Status::Success) {
+            return false;
+        }
+        if (probe.race.progress.raceCompleted) {
+            upper = static_cast<double>(candidateNs);
+        } else {
+            lower = static_cast<double>(candidateNs);
+        }
+    }
+    estimate->lowerBoundNs =
+            static_cast<std::uint64_t>(floor(lower));
+    estimate->upperBoundNs =
+            static_cast<std::uint64_t>(ceil(upper));
+    estimate->estimatedNs = estimate->upperBoundNs;
+    return estimate->lowerBoundNs < estimate->upperBoundNs &&
+           estimate->upperBoundNs - estimate->lowerBoundNs <= 1u;
+}
+
+__device__ cuda::physics::Status StepAndRefineFinish(
+        const CudaPackedSceneHeader *scene,
+        const CudaPackedStaticConfigurationHeader *configuration,
+        CudaCandidateState &candidate,
+        const CudaControlTick &tick,
+        cuda::collision::CudaCollisionScratch &scratch,
+        DeviceFinishRefinement &output) {
+    const float dt =
+            __int2float_rn(static_cast<std::int32_t>(
+                    candidate.world.schemePeriodMs)) *
+            0.001f;
+    if (candidate.body.dynamicActive) {
+        candidate.body.temporary = candidate.body.current;
+        const GmVec3 &linear = candidate.body.current.linearSpeed;
+        const GmVec3 &angular = candidate.body.current.angularSpeed;
+        const float linearLength = cuda::exact::Sqrt(
+                (linear.y * linear.y + linear.x * linear.x) +
+                linear.z * linear.z);
+        const float angularLength = cuda::exact::Sqrt(
+                (angular.x * angular.x + angular.y * angular.y) +
+                angular.z * angular.z);
+        const float scaled =
+                ((linearLength + angularLength) * dt) /
+                candidate.body.parameters.maxStepDistance;
+        std::uint32_t substeps =
+                cuda::exact::TruncateToUint32Modulo(scaled) + 1u;
+        if (substeps > 1000u) substeps = 1000u;
+
+        float remaining = dt;
+        double elapsed = 0.0;
+        const std::uint64_t tickStartNs =
+                static_cast<std::uint64_t>(
+                        tick.timeMs - tick.periodMs) *
+                1000000u;
+        for (std::uint32_t index = 0u; index < substeps; ++index) {
+            const float substepDt =
+                    index + 1u < substeps
+                    ? dt / cuda::exact::FromUnsignedInteger(substeps)
+                    : remaining;
+            const CudaCandidatePhysicsState preSubstep = candidate;
+            const bool wasFinished =
+                    preSubstep.race.progress.raceCompleted;
+            const cuda::physics::Status status =
+                    cuda::physics::CollisionSubstep(
+                            scene, configuration, candidate,
+                            substepDt, scratch);
+            if (status != cuda::physics::Status::Success) {
+                return status;
+            }
+            if (!wasFinished &&
+                candidate.race.progress.raceCompleted) {
+                const double substepStartNs =
+                        static_cast<double>(tickStartNs) +
+                        elapsed * 1000000000.0;
+                output.present = RefineFinishTransition(
+                        scene, configuration, preSubstep,
+                        substepDt, substepStartNs, scratch,
+                        &output.estimate);
+                output.failed = !output.present;
+                return status;
+            }
+            elapsed += static_cast<double>(substepDt);
+            remaining -= substepDt;
+        }
+        candidate.body.write = candidate.body.temporary;
+    }
+    if (candidate.vehicle.mobil.physicsUpdatesEnabled) {
+        cuda::vehicle::AfterContacts(candidate, configuration);
+    }
+    return cuda::physics::Status::Success;
+}
+
+__global__ void RefineFinishTimesKernel(
+        const void *sceneData,
+        const void *configurationData,
+        CudaCandidateState *states,
+        const DeviceTimelineDescriptor *descriptors,
+        const CudaControlTick *ticks,
+        const std::uint8_t *required,
+        DeviceFinishRefinement *outputs,
+        cuda::collision::CudaCollisionScratch *scratch,
+        std::uint32_t candidateCount) {
+    const std::uint32_t candidate =
+            blockIdx.x * blockDim.x + threadIdx.x;
+    if (candidate >= candidateCount || !required[candidate]) {
+        return;
+    }
+    auto *scene = static_cast<const CudaPackedSceneHeader *>(sceneData);
+    auto *configuration =
+            static_cast<const CudaPackedStaticConfigurationHeader *>(
+                    configurationData);
+    CudaCandidateState &state = states[candidate];
+    const DeviceTimelineDescriptor descriptor = descriptors[candidate];
+    for (std::uint32_t index = 0u;
+         index < descriptor.tickCount; ++index) {
+        const CudaControlTick &tick =
+                ticks[descriptor.firstTick + index];
+        ApplyControlAndTimingPrefix(state, tick, false);
+        if (!state.firstStep) {
+            cuda::transition::PrepareStep(
+                    state, tick, configuration);
+        }
+        state.vehicle.mobil.absorbContactEnabled = true;
+        state.vehicle.mobil.physicsUpdatesEnabled =
+                (tick.actionFlags &
+                 CudaControlActionSuppressVehicleForceCallbacks) == 0u;
+        for (std::uint32_t respawn = 0u;
+             respawn < tick.respawnAtCheckpointCount; ++respawn) {
+            if (cuda::transition::Respawn(state, configuration)) {
+                ++state.incrementalRespawnCount;
+            }
+        }
+        const cuda::physics::Status status = StepAndRefineFinish(
+                scene, configuration, state, tick,
+                scratch[candidate], outputs[candidate]);
+        if (status != cuda::physics::Status::Success) {
+            outputs[candidate].failed = true;
+            return;
+        }
+        if (outputs[candidate].present ||
+            outputs[candidate].failed) {
+            return;
+        }
+        state.firstStep = false;
+    }
+    outputs[candidate].failed = true;
 }
 
 __global__ void ExecuteTimelineKernel(
@@ -559,6 +747,151 @@ static CudaTimelineBatchResult ExecuteCudaTimelineBatchImpl(
                 deviceStates.Bytes() +
                 deviceResultsAllocation.Bytes() +
                 deviceObservations.Bytes();
+
+        std::vector<std::uint8_t> finishRefinementRequired(
+                candidates.size(), 0u);
+        bool anyFinishRefinement = false;
+        for (std::size_t index = 0u;
+             index < candidates.size(); ++index) {
+            const bool required =
+                    deviceResults[index].status ==
+                            CudaTimelineStatus::Success &&
+                    !candidates[index].initialState.
+                            race.progress.raceCompleted &&
+                    states[index].race.progress.raceCompleted &&
+                    !states[index].finishTime.present;
+            finishRefinementRequired[index] = required ? 1u : 0u;
+            anyFinishRefinement = anyFinishRefinement || required;
+        }
+        if (anyFinishRefinement) {
+            std::vector<CudaCandidateState> refinementStates;
+            std::vector<DeviceFinishRefinement> finishRefinements(
+                    candidates.size());
+            refinementStates.reserve(candidates.size());
+            for (const CudaCandidateTimelineInput &candidate :
+                 candidates) {
+                refinementStates.push_back(candidate.initialState);
+            }
+            DeviceAllocation<std::uint8_t> deviceFinishRequired;
+            DeviceAllocation<DeviceFinishRefinement>
+                    deviceFinishRefinements;
+            if (!deviceFinishRequired.Allocate(candidates.size()) ||
+                !deviceFinishRefinements.Allocate(candidates.size())) {
+                result.status = CudaTimelineStatus::DeviceFailure;
+                result.diagnostic =
+                        "CUDA finish refinement allocation failed";
+                return result;
+            }
+            result.metrics.peakDeviceBytes +=
+                    deviceFinishRequired.Bytes() +
+                    deviceFinishRefinements.Bytes();
+            const auto refinementTransferStart =
+                    std::chrono::steady_clock::now();
+            cudaResult = cudaMemcpy(
+                    deviceStates.Get(), refinementStates.data(),
+                    deviceStates.Bytes(), cudaMemcpyHostToDevice);
+            if (cudaResult == cudaSuccess) {
+                cudaResult = cudaMemcpy(
+                        deviceFinishRequired.Get(),
+                        finishRefinementRequired.data(),
+                        deviceFinishRequired.Bytes(),
+                        cudaMemcpyHostToDevice);
+            }
+            if (cudaResult == cudaSuccess) {
+                cudaResult = cudaMemcpy(
+                        deviceFinishRefinements.Get(),
+                        finishRefinements.data(),
+                        deviceFinishRefinements.Bytes(),
+                        cudaMemcpyHostToDevice);
+            }
+            if (cudaResult != cudaSuccess) {
+                result.status = CudaTimelineStatus::DeviceFailure;
+                result.diagnostic = CudaFailure(
+                        "CUDA finish refinement upload",
+                        cudaResult);
+                return result;
+            }
+            result.metrics.hostToDeviceBytes +=
+                    deviceStates.Bytes() +
+                    deviceFinishRequired.Bytes() +
+                    deviceFinishRefinements.Bytes();
+
+            Event refinementStart;
+            Event refinementEnd;
+            if (!refinementStart.Valid() ||
+                !refinementEnd.Valid()) {
+                result.status = CudaTimelineStatus::DeviceFailure;
+                result.diagnostic =
+                        "CUDA finish refinement event creation failed";
+                return result;
+            }
+            cudaEventRecord(refinementStart.Get());
+            RefineFinishTimesKernel<<<blocks, Threads>>>(
+                    deviceScene, deviceStaticConfiguration,
+                    deviceStates.Get(), deviceDescriptors.Get(),
+                    deviceTicks.Get(), deviceFinishRequired.Get(),
+                    deviceFinishRefinements.Get(),
+                    deviceScratch.Get(),
+                    static_cast<std::uint32_t>(
+                            candidates.size()));
+            cudaResult = cudaGetLastError();
+            if (cudaResult == cudaSuccess) {
+                cudaEventRecord(refinementEnd.Get());
+                cudaResult =
+                        cudaEventSynchronize(refinementEnd.Get());
+            }
+            if (cudaResult != cudaSuccess) {
+                result.status = CudaTimelineStatus::DeviceFailure;
+                result.diagnostic = CudaFailure(
+                        "CUDA finish refinement", cudaResult);
+                return result;
+            }
+            float refinementMilliseconds = 0.0f;
+            cudaEventElapsedTime(
+                    &refinementMilliseconds,
+                    refinementStart.Get(),
+                    refinementEnd.Get());
+            result.metrics.kernelMilliseconds +=
+                    refinementMilliseconds;
+            cudaResult = cudaMemcpy(
+                    finishRefinements.data(),
+                    deviceFinishRefinements.Get(),
+                    deviceFinishRefinements.Bytes(),
+                    cudaMemcpyDeviceToHost);
+            if (cudaResult != cudaSuccess) {
+                result.status = CudaTimelineStatus::DeviceFailure;
+                result.diagnostic = CudaFailure(
+                        "CUDA finish refinement download",
+                        cudaResult);
+                return result;
+            }
+            const auto refinementTransferEnd =
+                    std::chrono::steady_clock::now();
+            result.metrics.transferMilliseconds +=
+                    std::chrono::duration<double, std::milli>(
+                            refinementTransferEnd -
+                            refinementTransferStart).count();
+            result.metrics.deviceToHostBytes +=
+                    deviceFinishRefinements.Bytes();
+            for (std::size_t index = 0u;
+                 index < candidates.size(); ++index) {
+                if (!finishRefinementRequired[index]) {
+                    continue;
+                }
+                if (finishRefinements[index].failed ||
+                    !finishRefinements[index].present ||
+                    !finishRefinements[index].estimate.IsValid()) {
+                    result.status =
+                            CudaTimelineStatus::DeviceFailure;
+                    result.diagnostic =
+                            "CUDA finish refinement failed";
+                    return result;
+                }
+                states[index].finishTime.present = true;
+                states[index].finishTime.value =
+                        finishRefinements[index].estimate;
+            }
+        }
 
         result.candidates.resize(candidates.size());
         result.status = CudaTimelineStatus::Success;

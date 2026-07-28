@@ -34,6 +34,7 @@ public:
     CPlugSolid &Solid();
     CHmsCorpus &Corpus();
     RuntimeClone CaptureRuntimeClone() const;
+    void CaptureRuntimeClone(RuntimeClone &clone) const;
     bool PrepareRuntimeCloneRestore(const RuntimeClone &clone);
     void RestoreRuntimeClone(RuntimeClone clone) noexcept;
 

@@ -55,6 +55,19 @@ int main() {
         std::cerr << "race candidate winner ordering is not exact\n";
         return 1;
     }
+    ranked[1].finalState.race.progress.lastPrepareTimeMs = 1100u;
+    ranked[1].finalState.finishTime.value =
+            forevervalidator::FinishTimeEstimate{
+                    1099999998u, 1099999999u, 1099999999u};
+    ranked[1].finalState.finishTime.present = true;
+    ranked[2].finalState.finishTime.value =
+            forevervalidator::FinishTimeEstimate{
+                    1099999999u, 1100000000u, 1100000000u};
+    ranked[2].finalState.finishTime.present = true;
+    if (SelectCudaTimelineWinner(ranked) != 1u) {
+        std::cerr << "race candidate winner ignored nanosecond estimate\n";
+        return 1;
+    }
     for (CudaCandidateTimelineOutput &candidate : ranked) {
         candidate.finalState.race.replayPlayMode =
                 static_cast<std::uint32_t>(

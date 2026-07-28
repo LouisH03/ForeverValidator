@@ -772,6 +772,7 @@ ReplayTrajectoryObservation ObserveReplayTrajectory(
     observation.simulatedPosition = execution.simulatedFrame.position;
     observation.writePosition = execution.writeFrame.position;
     observation.finishTickMs = execution.finishTickMs;
+    observation.finishTime = execution.finishTime;
     if (!tick.comparisonTarget.has_value()) {
         return observation;
     }
@@ -1067,6 +1068,7 @@ struct ReplaySimulationSession::Impl {
         result.executedRespawnCount =
                 output.executedRespawnCount;
         result.finishTimeMs = instance.runtime->FinishTimeMs();
+        result.finishTime = instance.runtime->FinishTime();
         result.stuntsScore = instance.runtime->StuntsScore();
         result.raceCompleted = result.finishTimeMs.has_value();
         result.result = ReplaySimulationRunResult::Success;
@@ -1434,6 +1436,7 @@ ReplaySimulationTimelineResult ReplaySimulationSession::SimulateTimeline(
         }
     }
     result.finishTimeMs = impl->instance.runtime->FinishTimeMs();
+    result.finishTime = impl->instance.runtime->FinishTime();
     result.stuntsScore = impl->instance.runtime->StuntsScore();
     result.raceCompleted = result.finishTimeMs.has_value();
     result.result = ReplaySimulationRunResult::Success;
@@ -1570,6 +1573,7 @@ ReplaySimulationTimelineResult ReplaySimulationSession::AdvanceIncremental(
         }
     }
     result.finishTimeMs = impl->instance.runtime->FinishTimeMs();
+    result.finishTime = impl->instance.runtime->FinishTime();
     result.stuntsScore = impl->instance.runtime->StuntsScore();
     result.raceCompleted = result.finishTimeMs.has_value();
     result.executedRespawnCount = impl->instance.incrementalRespawnCount;
@@ -1587,6 +1591,7 @@ ReplaySimulationSession::CurrentState() const {
     result.controls = impl->instance.runtime->CurrentControls();
     result.race = impl->instance.runtime->RaceProgress();
     result.finishTimeMs = impl->instance.runtime->FinishTimeMs();
+    result.finishTime = impl->instance.runtime->FinishTime();
     result.stuntsScore = impl->instance.runtime->StuntsScore();
     result.respawnCount = impl->instance.incrementalRespawnCount;
     return result;

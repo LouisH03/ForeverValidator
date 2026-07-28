@@ -298,6 +298,11 @@ void CTrackManiaRace::OnCheckpointContact(
 CTrackManiaRace::RuntimeClone
 CTrackManiaRace::CaptureRuntimeClone() const {
     RuntimeClone clone;
+    CaptureRuntimeClone(clone);
+    return clone;
+}
+
+void CTrackManiaRace::CaptureRuntimeClone(RuntimeClone &clone) const {
     clone.player = player;
     clone.checkpointSlotsPassed = checkpointSlotsPassed_;
     clone.playerSpawnLocation = playerSpawnLocation_;
@@ -332,7 +337,6 @@ CTrackManiaRace::CaptureRuntimeClone() const {
     clone.replayStuntFigureScores = replayStuntFigureScores_;
     clone.stuntsScore = stuntsScore_;
     clone.stuntEvents = stuntEvents_;
-    return clone;
 }
 
 bool CTrackManiaRace::PrepareRuntimeCloneRestore(

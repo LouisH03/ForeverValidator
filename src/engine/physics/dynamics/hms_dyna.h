@@ -170,6 +170,7 @@ struct CHmsDyna {
     void ComputeSynthetizedReplacement(
             GmVec3 &out);
     RuntimeClone CaptureRuntimeClone(void) const;
+    void CaptureRuntimeClone(RuntimeClone &clone) const;
     bool PrepareRuntimeCloneRestore(const RuntimeClone &clone);
     void RestoreRuntimeClone(RuntimeClone clone) noexcept;
 

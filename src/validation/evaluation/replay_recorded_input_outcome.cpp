@@ -51,6 +51,7 @@ bool ApplyReplayRecordedInputOutcome(
         plan.validationMode == ReplayValidationMode::Stunts) {
         simulationResult->raceCompleted = false;
         simulationResult->finishTimeMs.reset();
+        simulationResult->finishTime.reset();
     }
     simulationResult->executedRespawnCount = recorded.respawnCount;
     if (!recorded.finishRaceTimeMs.has_value()) {

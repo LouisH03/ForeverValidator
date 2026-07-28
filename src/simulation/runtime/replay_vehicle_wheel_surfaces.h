@@ -33,6 +33,7 @@ public:
         return true;
     }
     RuntimeClone CaptureRuntimeClone() const;
+    void CaptureRuntimeClone(RuntimeClone &clone) const;
     bool CanRestoreRuntimeClone(const RuntimeClone &clone,
                                 const CSceneVehicleCar &car) const noexcept;
     void RestoreRuntimeClone(const RuntimeClone &clone,
