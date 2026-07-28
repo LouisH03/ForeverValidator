@@ -282,7 +282,6 @@ struct PhysicsSandboxStateView {
     std::uint32_t totalLaps = 1u;
     bool raceCompleted = false;
     std::optional<std::uint32_t> finishTimeMs;
-    std::optional<FinishTimeEstimate> finishTime;
     std::uint32_t respawnCount = 0u;
     std::optional<std::uint32_t> stuntsScore;
 };

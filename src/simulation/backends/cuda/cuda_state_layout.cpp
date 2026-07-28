@@ -550,10 +550,6 @@ CudaStateConversionResult EncodeCudaCandidateState(
     destination->world = source.runtime.world;
     destination->incrementalRespawnCount =
             source.incrementalRespawnCount;
-    if (source.runtime.finishTime.has_value()) {
-        destination->finishTime.present = true;
-        destination->finishTime.value = *source.runtime.finishTime;
-    }
     destination->firstStep = source.runtime.firstStep;
     destination->stuntsEnabled = source.runtime.stuntsEnabled;
     CudaStateConversionResult result =
@@ -616,9 +612,6 @@ CudaStateConversionResult DecodeCudaCandidateState(
                 result.race);
         result.incrementalRespawnCount =
                 source.incrementalRespawnCount;
-        if (source.finishTime.present) {
-            result.runtime.finishTime = source.finishTime.value;
-        }
         result.randomState = source.randomState;
         result.runtime.firstStep = source.firstStep;
         result.runtime.stuntsEnabled = source.stuntsEnabled;

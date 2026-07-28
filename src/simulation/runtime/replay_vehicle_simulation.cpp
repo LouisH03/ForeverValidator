@@ -233,15 +233,8 @@ std::optional<u32> ReplayVehicleSimulation::FinishTimeMs() const {
 
 ReplayVehicleSimulation::RuntimeClone
 ReplayVehicleSimulation::CaptureRuntimeClone() const {
-    RuntimeClone clone;
-    CaptureRuntimeClone(clone);
-    return clone;
-}
-
-void ReplayVehicleSimulation::CaptureRuntimeClone(
-        RuntimeClone &clone) const {
-    car_.CaptureRuntimeClone(clone.car);
-    wheelSurfaces_.CaptureRuntimeClone(clone.wheelSurfaces);
+    return {car_.CaptureRuntimeClone(),
+            wheelSurfaces_.CaptureRuntimeClone()};
 }
 
 bool ReplayVehicleSimulation::CanRestoreRuntimeClone(

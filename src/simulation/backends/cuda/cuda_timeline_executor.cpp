@@ -98,14 +98,6 @@ std::optional<std::size_t> SelectCudaTimelineWinner(
                    rightRace.totalCheckpointEventCount;
         }
         if (leftRace.raceCompleted &&
-            left.finalState.finishTime.present &&
-            right.finalState.finishTime.present &&
-            left.finalState.finishTime.value.estimatedNs !=
-                    right.finalState.finishTime.value.estimatedNs) {
-            return left.finalState.finishTime.value.estimatedNs <
-                   right.finalState.finishTime.value.estimatedNs;
-        }
-        if (leftRace.raceCompleted &&
             leftRace.lastPrepareTimeMs != rightRace.lastPrepareTimeMs) {
             return leftRace.lastPrepareTimeMs <
                    rightRace.lastPrepareTimeMs;

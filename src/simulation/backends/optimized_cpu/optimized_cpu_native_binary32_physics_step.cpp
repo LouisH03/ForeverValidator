@@ -102,7 +102,6 @@ void CHmsZoneDynamic::PhysicsStep2OptimizedCpuNativeBinary32(
                 for (u32 remainingSplitCount = substeps - 1;
                      remainingSplitCount != 0;
                      remainingSplitCount--) {
-                    NotifyBeforeCollisionSubstep(*corpus, splitDt);
                     ComputeCorpusForcesOptimizedCpuVehicle(
                             corpus, splitDt, vehicleForceContext);
                     dyna->DoPreCollisionDynamic(splitDt);
@@ -112,12 +111,10 @@ void CHmsZoneDynamic::PhysicsStep2OptimizedCpuNativeBinary32(
                                     collisionBuffer_, corpus);
                     ComputeCollisionResponse();
                     dyna->DoPostCollisionDynamic();
-                    NotifyAfterCollisionSubstep(*corpus, splitDt);
                     remainingDt = ((remainingDt) - (splitDt));
                 }
             }
 
-            NotifyBeforeCollisionSubstep(*corpus, remainingDt);
             ComputeCorpusForcesOptimizedCpuVehicle(
                     corpus, remainingDt, vehicleForceContext);
             dyna->DoPreCollisionDynamic(remainingDt);
@@ -127,7 +124,6 @@ void CHmsZoneDynamic::PhysicsStep2OptimizedCpuNativeBinary32(
                             collisionBuffer_, corpus);
             ComputeCollisionResponse();
             dyna->DoPostCollisionDynamic();
-            NotifyAfterCollisionSubstep(*corpus, remainingDt);
             dyna->CopyTempToState();
         }
     }

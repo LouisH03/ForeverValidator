@@ -25,7 +25,6 @@ struct ReplaySimulationStepExecution {
     ReplayDynaFrameState simulatedFrame{};
     ReplayDynaFrameState writeFrame{};
     std::optional<std::uint32_t> finishTickMs;
-    std::optional<forevervalidator::FinishTimeEstimate> finishTime;
     std::uint32_t respawnExecutedCount = 0u;
 };
 
@@ -47,7 +46,6 @@ public:
         ReplayPhysicsWorld::RuntimeClone world{};
         ReplayVehicleBody::RuntimeClone body{};
         ReplayVehicleSimulation::RuntimeClone vehicle{};
-        std::optional<forevervalidator::FinishTimeEstimate> finishTime;
         bool firstStep = true;
         bool stuntsEnabled = false;
     };
@@ -78,7 +76,6 @@ public:
                     const CHmsCollisionManagerSZone &expectedPersistentZone)
                     const noexcept;
     std::optional<std::uint32_t> FinishTimeMs() const;
-    std::optional<forevervalidator::FinishTimeEstimate> FinishTime() const;
     std::optional<std::uint32_t> StuntsScore() const;
     ReplayDynaFrameState CurrentFrame() const;
     ReplayVehicleControlState CurrentControls() const;
@@ -86,7 +83,6 @@ public:
     std::optional<std::uint32_t> ApplyReplayStuntTimePenalty(
             std::uint32_t overtimeMs);
     std::optional<RuntimeClone> CaptureRuntimeClone() const;
-    bool CaptureRuntimeClone(RuntimeClone &clone) const;
     std::optional<RuntimeClone>
             CaptureVehiclePrefixReferenceForTesting(float dt);
     std::optional<RuntimeClone>
@@ -109,13 +105,6 @@ public:
     Phase CurrentPhase() const noexcept;
 
 private:
-    void EstimateFinishTime(
-            const ReplayControlTick &tick,
-            std::uint8_t physicsPath,
-            RuntimeClone preTickRuntime,
-            CTrackManiaRace::RuntimeClone preTickRace);
-    bool ProbeFinishSubstep(float dt, std::uint8_t physicsPath);
-
     struct State;
     std::unique_ptr<State> state_;
 };

@@ -162,10 +162,6 @@ bool CompareState(const PhysicsSandboxStateView &reference,
                         reference.finishTimeMs,
                         optimized.finishTimeMs,
                         difference) &&
-           CompareValue("finishTime",
-                        reference.finishTime,
-                        optimized.finishTime,
-                        difference) &&
            CompareValue("respawnCount",
                         reference.respawnCount,
                         optimized.respawnCount,

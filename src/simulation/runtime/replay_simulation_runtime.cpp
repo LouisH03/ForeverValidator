@@ -3,7 +3,6 @@
 #include "simulation/backends/optimized_cpu/optimized_cpu_vehicle_forces.h"
 #include "simulation/backends/cuda/cuda_backend.h"
 #include "simulation/backends/cuda/cuda_vehicle_cpu_reference.h"
-#include "simulation/runtime/replay_finish_time_estimator.h"
 #include <cstring>
 #include <new>
 #include <utility>
@@ -20,14 +19,6 @@
 #include "simulation/runtime/replay_validation_spawn.h"
 #include "engine/game/trackmania_race.h"
 namespace {
-
-enum FinishProbePhysicsPath : std::uint8_t {
-    FinishProbeReference,
-    FinishProbeOptimizedCpu,
-    FinishProbeOptimizedCpuCached,
-    FinishProbeOptimizedCpuNativeBinary32,
-    FinishProbeOptimizedCpuNativeBinary32Cached,
-};
 
 class ProjectionHash {
 public:
@@ -317,12 +308,7 @@ ReplayStuntSimulationState BuildReplayStuntSimulationState(
     return state;
 }
 
-struct ReplaySimulationRuntime::State : CHmsCollisionSubstepObserver {
-    struct Snapshot {
-        RuntimeClone runtime;
-        CTrackManiaRace::RuntimeClone race;
-    };
-
+struct ReplaySimulationRuntime::State {
     State(CTrackManiaRace &race,
           forevervalidator::SimulationBackend requestedBackend)
         : vehicle(race),
@@ -334,9 +320,6 @@ struct ReplaySimulationRuntime::State : CHmsCollisionSubstepObserver {
                 backend == forevervalidator::SimulationBackend::OptimizedCpu ||
                 backend == forevervalidator::SimulationBackend::Cuda);
     }
-
-    void BeforeCollisionSubstep(CHmsCorpus &corpus, float dt) override;
-    void AfterCollisionSubstep(CHmsCorpus &corpus, float dt) override;
 
     ReplayPhysicsWorld world;
     ReplayEnvironment environment;
@@ -353,49 +336,7 @@ struct ReplaySimulationRuntime::State : CHmsCollisionSubstepObserver {
             optimizedCpuVehicleForces;
     std::unique_ptr<OptimizedCpuStaticSurfaceTransformCache>
             optimizedCpuStaticTransforms;
-    std::optional<forevervalidator::FinishTimeEstimate> finishTime;
-    bool captureFinishTransition = false;
-    bool finishTransitionFound = false;
-    bool finishBeforeSubstep = false;
-    double finishElapsedSeconds = 0.0;
-    double finishSubstepStartSeconds = 0.0;
-    float finishSubstepDurationSeconds = 0.0f;
-    std::optional<Snapshot> finishSubstepSnapshot;
-    Snapshot finishTickSnapshot;
 };
-
-void ReplaySimulationRuntime::State::BeforeCollisionSubstep(
-        CHmsCorpus &corpus, float dt) {
-    (void)dt;
-    if (!captureFinishTransition || finishTransitionFound ||
-        &corpus != &body.Corpus()) {
-        return;
-    }
-    Snapshot snapshot;
-    snapshot.runtime.world = world.CaptureRuntimeClone();
-    snapshot.runtime.body = body.CaptureRuntimeClone();
-    snapshot.runtime.vehicle = vehicle.CaptureRuntimeClone();
-    snapshot.runtime.finishTime = finishTime;
-    snapshot.runtime.firstStep = firstStep;
-    snapshot.runtime.stuntsEnabled = stuntsEnabled;
-    snapshot.race = race.CaptureRuntimeClone();
-    finishSubstepSnapshot = std::move(snapshot);
-    finishSubstepStartSeconds = finishElapsedSeconds;
-    finishBeforeSubstep = race.Progress().raceCompleted;
-}
-
-void ReplaySimulationRuntime::State::AfterCollisionSubstep(
-        CHmsCorpus &corpus, float dt) {
-    if (!captureFinishTransition || &corpus != &body.Corpus()) {
-        return;
-    }
-    if (!finishTransitionFound && !finishBeforeSubstep &&
-        race.Progress().raceCompleted) {
-        finishTransitionFound = true;
-        finishSubstepDurationSeconds = dt;
-    }
-    finishElapsedSeconds += static_cast<double>(dt);
-}
 
 ReplaySimulationRuntime::ReplaySimulationRuntime(
         CTrackManiaRace &race,
@@ -412,10 +353,6 @@ ReplaySimulationRunResult ReplaySimulationRuntime::Start(
         std::uint32_t validationSeed) {
     State &state = *state_;
     state.optimizedCpuVehicleForces.Reset();
-    state.finishTime.reset();
-    state.captureFinishTransition = false;
-    state.finishTransitionFound = false;
-    state.finishSubstepSnapshot.reset();
     state.definition = &definition;
     const ReplayMapSceneResult sceneResult = state.world.ConnectMapScene(
             mapScene, &state.vehicle.Car(), state.race);
@@ -500,13 +437,6 @@ ReplaySimulationStepExecution ReplaySimulationRuntime::Step(
         execution.result = ReplaySimulationRunResult::InvalidControlTimeline;
         return execution;
     }
-    const bool finishPreCaptured =
-            !state.captureFinishTransition &&
-            !state.race.Progress().raceCompleted &&
-            CaptureRuntimeClone(state.finishTickSnapshot.runtime);
-    if (finishPreCaptured) {
-        state.race.CaptureRuntimeClone(state.finishTickSnapshot.race);
-    }
     state.phase = Phase::Stepping;
 
     if (!state.firstStep) {
@@ -546,15 +476,6 @@ ReplaySimulationStepExecution ReplaySimulationRuntime::Step(
     execution.finishTickMs = state.vehicle.FinishTimeMs();
     state.firstStep = false;
     state.phase = Phase::Idle;
-    if (finishPreCaptured &&
-        !state.finishTickSnapshot.race.progress.raceCompleted &&
-        state.race.Progress().raceCompleted) {
-        EstimateFinishTime(
-                tick, FinishProbeReference,
-                state.finishTickSnapshot.runtime,
-                state.finishTickSnapshot.race);
-    }
-    execution.finishTime = state.finishTime;
     return execution;
 }
 
@@ -569,13 +490,6 @@ ReplaySimulationStepExecution ReplaySimulationRuntime::StepOptimizedCpu(
     if (state.stuntsEnabled &&
         !state.definition->optimizedCpuStadiumSpecializationsEnabled) {
         return Step(tick);
-    }
-    const bool finishPreCaptured =
-            !state.captureFinishTransition &&
-            !state.race.Progress().raceCompleted &&
-            CaptureRuntimeClone(state.finishTickSnapshot.runtime);
-    if (finishPreCaptured) {
-        state.race.CaptureRuntimeClone(state.finishTickSnapshot.race);
     }
     state.phase = Phase::Stepping;
 
@@ -623,21 +537,6 @@ ReplaySimulationStepExecution ReplaySimulationRuntime::StepOptimizedCpu(
     execution.finishTickMs = state.vehicle.FinishTimeMs();
     state.firstStep = false;
     state.phase = Phase::Idle;
-    const std::uint8_t finishPath =
-            state.optimizedCpuStaticTransforms != nullptr &&
-                    state.optimizedCpuStaticTransforms->IsCertifiedFor(
-                            state.world.CollisionZone())
-            ? FinishProbeOptimizedCpuCached
-            : FinishProbeOptimizedCpu;
-    if (finishPreCaptured &&
-        !state.finishTickSnapshot.race.progress.raceCompleted &&
-        state.race.Progress().raceCompleted) {
-        EstimateFinishTime(
-                tick, finishPath,
-                state.finishTickSnapshot.runtime,
-                state.finishTickSnapshot.race);
-    }
-    execution.finishTime = state.finishTime;
     return execution;
 }
 
@@ -652,13 +551,6 @@ ReplaySimulationRuntime::StepOptimizedCpuNativeBinary32(
     }
     if (!state.definition->optimizedCpuStadiumSpecializationsEnabled) {
         return StepOptimizedCpu(tick);
-    }
-    const bool finishPreCaptured =
-            !state.captureFinishTransition &&
-            !state.race.Progress().raceCompleted &&
-            CaptureRuntimeClone(state.finishTickSnapshot.runtime);
-    if (finishPreCaptured) {
-        state.race.CaptureRuntimeClone(state.finishTickSnapshot.race);
     }
     state.phase = Phase::Stepping;
 
@@ -722,210 +614,11 @@ ReplaySimulationRuntime::StepOptimizedCpuNativeBinary32(
     execution.finishTickMs = state.vehicle.FinishTimeMs();
     state.firstStep = false;
     state.phase = Phase::Idle;
-    const std::uint8_t finishPath =
-            state.optimizedCpuStaticTransforms != nullptr &&
-                    state.optimizedCpuStaticTransforms->IsCertifiedFor(
-                            state.world.CollisionZone())
-            ? FinishProbeOptimizedCpuNativeBinary32Cached
-            : FinishProbeOptimizedCpuNativeBinary32;
-    if (finishPreCaptured &&
-        !state.finishTickSnapshot.race.progress.raceCompleted &&
-        state.race.Progress().raceCompleted) {
-        EstimateFinishTime(
-                tick, finishPath,
-                state.finishTickSnapshot.runtime,
-                state.finishTickSnapshot.race);
-    }
-    execution.finishTime = state.finishTime;
     return execution;
 }
 
 std::optional<std::uint32_t> ReplaySimulationRuntime::FinishTimeMs() const {
     return state_->vehicle.FinishTimeMs();
-}
-
-std::optional<forevervalidator::FinishTimeEstimate>
-ReplaySimulationRuntime::FinishTime() const {
-    return state_->finishTime;
-}
-
-bool ReplaySimulationRuntime::ProbeFinishSubstep(
-        float dt, std::uint8_t physicsPath) {
-    State &state = *state_;
-    if (state.phase != Phase::Idle || !(dt > 0.0f)) {
-        return false;
-    }
-
-    CSceneVehicleCar &car = state.vehicle.Car();
-    CHmsItem *item = car.HmsItem();
-    CHmsItem::CCallback *computeForcesCallback =
-            item != nullptr
-                    ? item->CallbackGet(
-                              CHmsItem::ECallback_ComputeForces)
-                    : nullptr;
-    CHmsCorpus &corpus = state.body.Corpus();
-    CHmsDyna &dyna = state.body.Dyna();
-    CHmsCollisionManagerSZone &collisionZone =
-            state.world.CollisionZone();
-    CHmsCollisionBuffer collisionBuffer;
-    state.world.InstallSimulationTimeAsCurrent();
-    collisionZone.PrepareCollisions();
-    state.phase = Phase::Stepping;
-
-    const bool nativeBinary32 =
-            physicsPath == FinishProbeOptimizedCpuNativeBinary32 ||
-            physicsPath ==
-                    FinishProbeOptimizedCpuNativeBinary32Cached;
-    if (nativeBinary32) {
-        state.optimizedCpuVehicleForces.BeginTick(
-                car,
-                forevervalidator::simulation::
-                        OptimizedCpuBinary32MathPath::X86Sse2,
-                computeForcesCallback);
-        state.world.Zone().ComputeCorpusForcesOptimizedCpuVehicle(
-                &corpus, dt, state.optimizedCpuVehicleForces);
-    } else {
-        state.world.Zone().ComputeCorpusForces(&corpus, dt);
-    }
-    dyna.DoPreCollisionDynamic(dt);
-
-    switch (physicsPath) {
-    case FinishProbeOptimizedCpu:
-        collisionZone.DetectCollisionsCorpusOptimizedCpu(
-                collisionBuffer, &corpus);
-        break;
-    case FinishProbeOptimizedCpuCached:
-        if (state.optimizedCpuStaticTransforms == nullptr) {
-            state.phase = Phase::Idle;
-            return false;
-        }
-        collisionZone.DetectCollisionsCorpusOptimizedCpuCached(
-                collisionBuffer, &corpus,
-                *state.optimizedCpuStaticTransforms);
-        break;
-    case FinishProbeOptimizedCpuNativeBinary32:
-        collisionZone.DetectCollisionsCorpusOptimizedCpuNativeBinary32(
-                collisionBuffer, &corpus);
-        break;
-    case FinishProbeOptimizedCpuNativeBinary32Cached:
-        if (state.optimizedCpuStaticTransforms == nullptr) {
-            state.phase = Phase::Idle;
-            return false;
-        }
-        collisionZone.
-                DetectCollisionsCorpusOptimizedCpuNativeBinary32Cached(
-                        collisionBuffer, &corpus,
-                        *state.optimizedCpuStaticTransforms);
-        break;
-    case FinishProbeReference:
-    default:
-        collisionZone.DetectCollisionsCorpus(
-                collisionBuffer, &corpus);
-        break;
-    }
-    state.world.Zone().ComputeCollisionResponse(collisionBuffer);
-    dyna.DoPostCollisionDynamic();
-    const bool finished = state.race.Progress().raceCompleted;
-    state.phase = Phase::Idle;
-    return finished;
-}
-
-void ReplaySimulationRuntime::EstimateFinishTime(
-        const ReplayControlTick &tick,
-        std::uint8_t physicsPath,
-        RuntimeClone preTickRuntime,
-        CTrackManiaRace::RuntimeClone preTickRace) {
-    State &state = *state_;
-    std::optional<RuntimeClone> finalRuntime = CaptureRuntimeClone();
-    if (!finalRuntime.has_value()) {
-        return;
-    }
-    CTrackManiaRace::RuntimeClone finalRace =
-            state.race.CaptureRuntimeClone();
-    if (!state.race.PrepareRuntimeCloneRestore(preTickRace) ||
-        !PrepareRuntimeCloneRestore(preTickRuntime)) {
-        return;
-    }
-
-    state.race.RestoreRuntimeClone(std::move(preTickRace));
-    RestoreRuntimeClone(std::move(preTickRuntime));
-    state.captureFinishTransition = true;
-    state.finishTransitionFound = false;
-    state.finishBeforeSubstep = false;
-    state.finishElapsedSeconds = 0.0;
-    state.finishSubstepStartSeconds = 0.0;
-    state.finishSubstepDurationSeconds = 0.0f;
-    state.finishSubstepSnapshot.reset();
-    state.world.Zone().SetCollisionSubstepObserver(&state);
-
-    ReplaySimulationStepExecution replay;
-    switch (physicsPath) {
-    case FinishProbeOptimizedCpu:
-    case FinishProbeOptimizedCpuCached:
-        replay = StepOptimizedCpu(tick);
-        break;
-    case FinishProbeOptimizedCpuNativeBinary32:
-    case FinishProbeOptimizedCpuNativeBinary32Cached:
-        replay = StepOptimizedCpuNativeBinary32(tick);
-        break;
-    case FinishProbeReference:
-    default:
-        replay = Step(tick);
-        break;
-    }
-    state.world.Zone().SetCollisionSubstepObserver(nullptr);
-    state.captureFinishTransition = false;
-
-    std::optional<State::Snapshot> transition =
-            std::move(state.finishSubstepSnapshot);
-    const bool transitionReady =
-            replay.result == ReplaySimulationRunResult::Success &&
-            state.finishTransitionFound && transition.has_value();
-    const ReplayFinishSubstep substep{
-            tick.timeMs,
-            tick.periodMs,
-            state.finishSubstepStartSeconds,
-            state.finishSubstepDurationSeconds,
-    };
-
-    if (!state.race.PrepareRuntimeCloneRestore(finalRace) ||
-        !PrepareRuntimeCloneRestore(*finalRuntime)) {
-        return;
-    }
-    state.race.RestoreRuntimeClone(finalRace);
-    RestoreRuntimeClone(*finalRuntime);
-    if (!transitionReady) {
-        return;
-    }
-
-    const State::Snapshot exactPreSubstep = std::move(*transition);
-    const auto restoreExactPreSubstep = [&]() {
-        if (!state.race.PrepareRuntimeCloneRestore(
-                    exactPreSubstep.race) ||
-            !PrepareRuntimeCloneRestore(
-                    exactPreSubstep.runtime)) {
-            return false;
-        }
-        state.race.RestoreRuntimeClone(exactPreSubstep.race);
-        RestoreRuntimeClone(exactPreSubstep.runtime);
-        return true;
-    };
-    const std::optional<forevervalidator::FinishTimeEstimate> estimate =
-            RefineReplayFinishTime(
-                    substep,
-                    [&](float partialDt) {
-                        return restoreExactPreSubstep() &&
-                               ProbeFinishSubstep(
-                                       partialDt, physicsPath);
-                    });
-
-    if (!state.race.PrepareRuntimeCloneRestore(finalRace) ||
-        !PrepareRuntimeCloneRestore(*finalRuntime)) {
-        return;
-    }
-    state.race.RestoreRuntimeClone(std::move(finalRace));
-    RestoreRuntimeClone(std::move(*finalRuntime));
-    state.finishTime = estimate;
 }
 
 std::optional<std::uint32_t> ReplaySimulationRuntime::StuntsScore() const {
@@ -990,7 +683,6 @@ std::uint64_t ReplaySimulationRuntimeSemanticHash(
     hash.Add(clone.world);
     hash.Add(HashDynamicBody(clone.body));
     hash.Add(HashVehicle(clone.vehicle));
-    hash.AddOptional(clone.finishTime);
     hash.Add(clone.firstStep);
     hash.Add(clone.stuntsEnabled);
     return hash.Value();
@@ -1017,25 +709,16 @@ ReplaySimulationRuntime::ApplyReplayStuntTimePenalty(
 
 std::optional<ReplaySimulationRuntime::RuntimeClone>
 ReplaySimulationRuntime::CaptureRuntimeClone() const {
-    RuntimeClone clone;
-    if (!CaptureRuntimeClone(clone)) {
+    if (state_->phase != Phase::Idle || state_->definition == nullptr) {
         return std::nullopt;
     }
-    return clone;
-}
-
-bool ReplaySimulationRuntime::CaptureRuntimeClone(
-        RuntimeClone &clone) const {
-    if (state_->phase != Phase::Idle || state_->definition == nullptr) {
-        return false;
-    }
+    RuntimeClone clone;
     clone.world = state_->world.CaptureRuntimeClone();
-    state_->body.CaptureRuntimeClone(clone.body);
-    state_->vehicle.CaptureRuntimeClone(clone.vehicle);
-    clone.finishTime = state_->finishTime;
+    clone.body = state_->body.CaptureRuntimeClone();
+    clone.vehicle = state_->vehicle.CaptureRuntimeClone();
     clone.firstStep = state_->firstStep;
     clone.stuntsEnabled = state_->stuntsEnabled;
-    return true;
+    return clone;
 }
 
 std::optional<ReplaySimulationRuntime::RuntimeClone>
@@ -1265,7 +948,6 @@ void ReplaySimulationRuntime::RestoreRuntimeClone(
     }
     state_->firstStep = clone.firstStep;
     state_->stuntsEnabled = clone.stuntsEnabled;
-    state_->finishTime = clone.finishTime;
     state_->phase = Phase::Idle;
 }
 

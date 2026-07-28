@@ -354,7 +354,6 @@ ValidationReport ToPublicReport(
     report.metadata.eventCount = source.metadata.eventCount;
     report.simulation.raceCompleted = source.raceOutcome.raceCompleted;
     report.simulation.raceTimeMs = source.raceOutcome.raceTimeMs;
-    report.simulation.raceTime = source.raceOutcome.raceTime;
     report.simulation.stuntsScore = source.raceOutcome.stuntsScore;
     report.simulation.respawnCount = source.raceOutcome.respawnCount;
     return report;
@@ -1789,27 +1788,7 @@ struct PhysicsSandbox::Impl {
         view.completedLaps = state->race.completedLapCount;
         view.totalLaps = state->race.requiredLapCount;
         view.raceCompleted = state->race.raceCompleted;
-        if (state->finishTime.has_value()) {
-            const std::uint64_t prestartNs =
-                    static_cast<std::uint64_t>(
-                            options.prestartDurationMs) *
-                    1000000u;
-            view.finishTime = *state->finishTime;
-            view.finishTime->lowerBoundNs =
-                    view.finishTime->lowerBoundNs >= prestartNs
-                    ? view.finishTime->lowerBoundNs - prestartNs
-                    : 0u;
-            view.finishTime->upperBoundNs =
-                    view.finishTime->upperBoundNs >= prestartNs
-                    ? view.finishTime->upperBoundNs - prestartNs
-                    : 0u;
-            view.finishTime->estimatedNs =
-                    view.finishTime->estimatedNs >= prestartNs
-                    ? view.finishTime->estimatedNs - prestartNs
-                    : 0u;
-            view.finishTimeMs = static_cast<std::uint32_t>(
-                    view.finishTime->estimatedNs / 1000000u);
-        } else if (state->finishTimeMs.has_value()) {
+        if (state->finishTimeMs.has_value()) {
             view.finishTimeMs = *state->finishTimeMs >=
                             options.prestartDurationMs
                     ? *state->finishTimeMs - options.prestartDurationMs

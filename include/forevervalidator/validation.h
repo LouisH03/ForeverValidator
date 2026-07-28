@@ -10,7 +10,6 @@
 #include <string_view>
 #include <vector>
 
-#include <forevervalidator/finish_time.h>
 #include <forevervalidator/result.h>
 
 #define FOREVERVALIDATOR_HAS_SPECULATIVE_TICKING 1
@@ -312,7 +311,6 @@ struct ValidationMetadata {
 struct SimulationOutcome {
     std::optional<bool> raceCompleted;
     std::optional<std::int32_t> raceTimeMs;
-    std::optional<FinishTimeEstimate> raceTime;
     std::optional<std::int32_t> stuntsScore;
     std::uint32_t respawnCount = 0u;
 };

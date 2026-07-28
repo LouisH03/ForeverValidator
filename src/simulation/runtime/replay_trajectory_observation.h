@@ -4,8 +4,6 @@
 #include <cstdint>
 #include <optional>
 
-#include <forevervalidator/finish_time.h>
-
 #include "engine/core/gm_types.h"
 struct ReplayTrajectoryDeviation {
     GmVec3 targetPosition{};
@@ -18,7 +16,6 @@ struct ReplayTrajectoryObservation {
     GmVec3 writePosition{};
     std::optional<ReplayTrajectoryDeviation> comparison;
     std::optional<std::uint32_t> finishTickMs;
-    std::optional<forevervalidator::FinishTimeEstimate> finishTime;
 };
 
 #endif

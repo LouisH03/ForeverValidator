@@ -38,8 +38,6 @@ ReplayValidationOutcome OutcomeFromComparison(
 struct ReplayEvaluationMetadata {
     std::optional<bool> raceCompleted;
     std::optional<s32> raceTimeMs;
-    std::optional<forevervalidator::FinishTimeEstimate> raceTime;
-    std::optional<s32> validationRaceTimeMs;
     std::optional<s32> stuntsScore;
     std::optional<s32> respawns;
 };
@@ -151,50 +149,24 @@ ReplayEvaluationMetadata ResolveActualMetadata(
         const ReplayValidationPlan &plan,
         const ReplaySimulationTimelineResult &simulationResult,
         const std::optional<s32> &simulatedFinishRaceTimeMs) {
-    ReplayEvaluationMetadata actual;
-    actual.raceCompleted = simulationResult.raceCompleted;
-    actual.respawns = static_cast<s32>(SaturateReplayRespawnCount(
-            simulationResult.executedRespawnCount));
+    ReplayEvaluationMetadata actual{
+        simulationResult.raceCompleted,
+        std::nullopt,
+        std::nullopt,
+        static_cast<s32>(SaturateReplayRespawnCount(
+                simulationResult.executedRespawnCount)),
+    };
     if (simulationResult.stuntsScore.has_value() &&
         *simulationResult.stuntsScore <=
                 static_cast<u32>(std::numeric_limits<s32>::max())) {
         actual.stuntsScore = static_cast<s32>(
                 *simulationResult.stuntsScore);
     }
-    const std::uint64_t prestartNs =
-            static_cast<std::uint64_t>(plan.validationPrestartMs) *
-            1000000u;
     if (simulationResult.finishTimeMs.has_value() &&
         *simulationResult.finishTimeMs >= plan.validationPrestartMs) {
-        actual.validationRaceTimeMs = static_cast<s32>(
-                *simulationResult.finishTimeMs -
-                plan.validationPrestartMs);
-    } else if (plan.validationMode != ReplayValidationMode::Platform &&
-               plan.validationMode != ReplayValidationMode::Puzzle &&
-               plan.validationMode != ReplayValidationMode::Stunts &&
-               simulatedFinishRaceTimeMs.has_value()) {
-        actual.validationRaceTimeMs = simulatedFinishRaceTimeMs;
-    }
-    if (simulationResult.finishTime.has_value() &&
-        simulationResult.finishTime->estimatedNs >= prestartNs) {
         actual.raceCompleted = true;
-        actual.raceTime = *simulationResult.finishTime;
-        actual.raceTime->lowerBoundNs =
-                actual.raceTime->lowerBoundNs >= prestartNs
-                ? actual.raceTime->lowerBoundNs - prestartNs
-                : 0u;
-        actual.raceTime->upperBoundNs -= prestartNs;
-        actual.raceTime->estimatedNs -= prestartNs;
-        const std::uint64_t raceTimeMs =
-                actual.raceTime->estimatedNs / 1000000u;
-        if (raceTimeMs <= static_cast<std::uint64_t>(
-                                  std::numeric_limits<s32>::max())) {
-            actual.raceTimeMs = static_cast<s32>(raceTimeMs);
-        }
-    } else if (simulationResult.finishTimeMs.has_value() &&
-        *simulationResult.finishTimeMs >= plan.validationPrestartMs) {
-        actual.raceCompleted = true;
-        actual.raceTimeMs = actual.validationRaceTimeMs;
+        actual.raceTimeMs = static_cast<s32>(
+                *simulationResult.finishTimeMs - plan.validationPrestartMs);
     } else if (plan.validationMode != ReplayValidationMode::Platform &&
                plan.validationMode != ReplayValidationMode::Puzzle &&
                plan.validationMode != ReplayValidationMode::Stunts &&
@@ -272,26 +244,20 @@ void FinalizeValidation(
         respawnCount < 0 ? 0u : static_cast<u32>(respawnCount),
         output.maxDeviationTimeMs,
         output.maxDeviationDistance,
-        actual.validationRaceTimeMs.has_value()
-                ? actual.validationRaceTimeMs
-                : actual.raceTimeMs,
+        actual.raceTimeMs,
         actual.stuntsScore,
         *actual.raceCompleted,
     };
     const ReplayValidationComparison comparison =
             ReplayValidationCompareResult(expectedComparison, observation);
-    ReplayEvaluationMetadata expected;
-    expected.raceTimeMs = plan.expectedRaceTimeMs;
-    expected.stuntsScore = plan.expectedStuntsScore;
-    expected.respawns = plan.expectedRespawns;
-    ReplayEvaluationMetadata validationActual = actual;
-    if (actual.validationRaceTimeMs.has_value()) {
-        validationActual.raceTimeMs =
-                actual.validationRaceTimeMs;
-    }
+    const ReplayEvaluationMetadata expected{
+        std::nullopt,
+        plan.expectedRaceTimeMs,
+        plan.expectedStuntsScore,
+        plan.expectedRespawns,
+    };
     output.outcome = OutcomeFromComparison(comparison.result);
-    output.status = StatusFromComparison(
-            comparison, expected, validationActual);
+    output.status = StatusFromComparison(comparison, expected, actual);
     output.wrongSimulation =
             comparison.result == ReplayValidationComparisonResult::WrongSimulation;
 }
@@ -309,7 +275,6 @@ ReplayValidationExecutionOutput EvaluateReplayValidation(
     FinalizeValidation(plan, actual, output.validation);
     output.raceOutcome.raceCompleted = actual.raceCompleted;
     output.raceOutcome.raceTimeMs = actual.raceTimeMs;
-    output.raceOutcome.raceTime = actual.raceTime;
     output.raceOutcome.stuntsScore = actual.stuntsScore;
     output.raceOutcome.respawnCount = SaturateReplayRespawnCount(
             simulationResult.executedRespawnCount);

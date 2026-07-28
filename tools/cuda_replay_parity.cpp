@@ -192,12 +192,6 @@ bool Run(
     } else {
         std::cout << "null";
     }
-    std::cout << ",\"finish_time_ns\":";
-    if (finalState.Value().finishTime.has_value()) {
-        std::cout << finalState.Value().finishTime->estimatedNs;
-    } else {
-        std::cout << "null";
-    }
     std::cout
               << "}\n";
     return true;

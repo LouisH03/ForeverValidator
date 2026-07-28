@@ -5,8 +5,6 @@
 #include <cstdint>
 #include <type_traits>
 
-#include <forevervalidator/finish_time.h>
-
 #include "engine/game/trackmania_race.h"
 #include "simulation/control/replay_control_timeline.h"
 #include "simulation/runtime/replay_physics_world.h"
@@ -215,7 +213,7 @@ struct CudaRaceState : CudaRacePhysicsState {
 };
 
 struct CudaCandidatePhysicsState {
-    static constexpr std::uint32_t SchemaVersion = 9u;
+    static constexpr std::uint32_t SchemaVersion = 8u;
 
     std::uint32_t schemaVersion = SchemaVersion;
     std::uint32_t candidateId = 0u;
@@ -227,10 +225,9 @@ struct CudaCandidatePhysicsState {
     CudaVehicleState vehicle{};
     CudaRacePhysicsState race{};
     std::uint32_t incrementalRespawnCount = 0u;
-    CudaOptional<forevervalidator::FinishTimeEstimate> finishTime{};
     bool firstStep = true;
     bool stuntsEnabled = false;
-    std::uint8_t reserved[5]{};
+    std::uint8_t reserved[10]{};
 };
 
 struct CudaCandidateState : CudaCandidatePhysicsState {

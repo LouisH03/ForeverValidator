@@ -28,7 +28,6 @@ struct ReplaySimulationTimelineResult {
     std::vector<ReplayTrajectoryObservation> observations;
     bool raceCompleted = false;
     std::optional<std::uint32_t> finishTimeMs;
-    std::optional<forevervalidator::FinishTimeEstimate> finishTime;
     std::optional<std::uint32_t> stuntsScore;
     std::uint32_t executedRespawnCount = 0u;
 };
@@ -38,7 +37,6 @@ struct ReplaySimulationStateView {
     ReplayVehicleControlState controls{};
     ReplayRaceProgress race{};
     std::optional<std::uint32_t> finishTimeMs;
-    std::optional<forevervalidator::FinishTimeEstimate> finishTime;
     std::optional<std::uint32_t> stuntsScore;
     std::uint32_t respawnCount = 0u;
 };

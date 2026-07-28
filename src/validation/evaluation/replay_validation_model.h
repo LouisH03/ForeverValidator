@@ -5,8 +5,6 @@
 #include <cstdint>
 #include <optional>
 
-#include <forevervalidator/finish_time.h>
-
 #include "engine/game/game_ctn_types.h"
 #include "simulation/control/replay_control_timeline.h"
 #include "validation/evaluation/replay_validation_mode.h"
@@ -65,7 +63,6 @@ struct ReplayValidationMetadata {
 struct ReplayRaceOutcome {
     std::optional<bool> raceCompleted;
     std::optional<std::int32_t> raceTimeMs;
-    std::optional<forevervalidator::FinishTimeEstimate> raceTime;
     std::optional<std::int32_t> stuntsScore;
     std::uint32_t respawnCount = 0u;
 };

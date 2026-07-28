@@ -91,26 +91,22 @@ void CHmsZoneDynamic::PhysicsStep2() {
                 for (u32 remainingSplitCount = substeps - 1;
                  remainingSplitCount != 0;
                  remainingSplitCount--) {
-                    NotifyBeforeCollisionSubstep(*corpus, splitDt);
                     ComputeCorpusForces(corpus, splitDt);
                     dyna->DoPreCollisionDynamic(splitDt);
                     collisionBuffer_.Clear();
                     collisionManagerZone->DetectCollisionsCorpus(collisionBuffer_, corpus);
                     ComputeCollisionResponse();
                     dyna->DoPostCollisionDynamic();
-                    NotifyAfterCollisionSubstep(*corpus, splitDt);
                     remainingDt = ((remainingDt) - (splitDt));
                 }
             }
 
-            NotifyBeforeCollisionSubstep(*corpus, remainingDt);
             ComputeCorpusForces(corpus, remainingDt);
             dyna->DoPreCollisionDynamic(remainingDt);
             collisionBuffer_.Clear();
             collisionManagerZone->DetectCollisionsCorpus(collisionBuffer_, corpus);
             ComputeCollisionResponse();
             dyna->DoPostCollisionDynamic();
-            NotifyAfterCollisionSubstep(*corpus, remainingDt);
             dyna->CopyTempToState();
         }
     }
@@ -185,7 +181,6 @@ void CHmsZoneDynamic::PhysicsStep2OptimizedCpu() {
                 for (u32 remainingSplitCount = substeps - 1;
                  remainingSplitCount != 0;
                  remainingSplitCount--) {
-                    NotifyBeforeCollisionSubstep(*corpus, splitDt);
                     ComputeCorpusForces(corpus, splitDt);
                     dyna->DoPreCollisionDynamic(splitDt);
                     collisionBuffer_.Clear();
@@ -193,12 +188,10 @@ void CHmsZoneDynamic::PhysicsStep2OptimizedCpu() {
                             collisionBuffer_, corpus);
                     ComputeCollisionResponse();
                     dyna->DoPostCollisionDynamic();
-                    NotifyAfterCollisionSubstep(*corpus, splitDt);
                     remainingDt = ((remainingDt) - (splitDt));
                 }
             }
 
-            NotifyBeforeCollisionSubstep(*corpus, remainingDt);
             ComputeCorpusForces(corpus, remainingDt);
             dyna->DoPreCollisionDynamic(remainingDt);
             collisionBuffer_.Clear();
@@ -206,7 +199,6 @@ void CHmsZoneDynamic::PhysicsStep2OptimizedCpu() {
                     collisionBuffer_, corpus);
             ComputeCollisionResponse();
             dyna->DoPostCollisionDynamic();
-            NotifyAfterCollisionSubstep(*corpus, remainingDt);
             dyna->CopyTempToState();
         }
     }
