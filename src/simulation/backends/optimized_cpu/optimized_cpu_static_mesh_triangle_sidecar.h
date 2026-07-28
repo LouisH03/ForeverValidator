@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <type_traits>
 #include <vector>
 
@@ -25,11 +26,50 @@ struct OptimizedCpuStaticMeshDirectTrianglePosting {
     u32 triangleIndex = 0u;
 };
 
+// Compiled only after the source hierarchy has passed topology validation.
+// Keep every field consumed by the packet traversal in one 36-byte stream;
+// the source cell's optional payload and the separate depth stream are not
+// needed in the hot loop.
+struct OptimizedCpuStaticMeshPacketCell {
+    GmBoxAligned bounds{};
+    u32 subtreeEntryCount = 0u;
+    u32 triangleIndex = 0u;
+    std::uint8_t depth = 0u;
+    std::uint8_t containsTriangle = 0u;
+    // One-based index into the optional depth-two sibling-group stream.
+    // Zero preserves the ordinary per-cell traversal.
+    std::uint16_t packetGroupOrdinal = 0u;
+
+    bool ContainsTriangle(void) const noexcept {
+        return containsTriangle != 0u;
+    }
+};
+
+// A conservative certificate for up to four consecutive depth-two sibling
+// roots. It stores the minimum and maximum child centers and the maximum child
+// half extent independently per axis. The packet traversal can prove that all
+// active query boxes reject every member without changing child ordering.
+struct OptimizedCpuStaticMeshPacketGroup {
+    GmVec4 minimumCenter{};
+    GmVec4 maximumCenter{};
+    GmVec3 maximumHalfExtents{};
+    u32 subtreeEntryCount = 0u;
+};
+
 struct OptimizedCpuStaticMeshTriangleHierarchyView {
     const GmMeshOctreeCell *cells = nullptr;
-    const u32 *postingIndices = nullptr;
+    const std::uint8_t *depths = nullptr;
+    const OptimizedCpuStaticMeshPacketCell *packetCells = nullptr;
+    const OptimizedCpuStaticMeshPacketGroup *packetGroups = nullptr;
     std::size_t count = 0u;
+    std::size_t packetGroupCount = 0u;
+    std::size_t maximumTraversalDepth = 0u;
 };
+
+bool MeasureOptimizedCpuStaticMeshTraversalDepth(
+        const GmMeshOctreeCell *cells,
+        std::size_t count,
+        std::size_t *maximumDepth) noexcept;
 
 static_assert(std::is_standard_layout_v<
               OptimizedCpuStaticMeshDirectTrianglePosting>);
@@ -39,6 +79,12 @@ static_assert(sizeof(OptimizedCpuStaticMeshDirectTrianglePosting) ==
               sizeof(GmBoxAligned) + sizeof(u32));
 static_assert(alignof(OptimizedCpuStaticMeshDirectTrianglePosting) ==
               alignof(GmBoxAligned));
+static_assert(sizeof(OptimizedCpuStaticMeshPacketCell) == 36u);
+static_assert(alignof(OptimizedCpuStaticMeshPacketCell) ==
+              alignof(GmBoxAligned));
+static_assert(sizeof(OptimizedCpuStaticMeshPacketGroup) == 48u);
+static_assert(alignof(OptimizedCpuStaticMeshPacketGroup) ==
+              alignof(GmVec3));
 
 class OptimizedCpuStaticMeshTriangleSidecar {
 public:
@@ -64,12 +110,19 @@ public:
             noexcept {
         if (result == nullptr || sourceCells_ == nullptr ||
             sourceCellCount_ == 0u ||
-            directPostingIndexByCell_.size() != sourceCellCount_) {
+            traversalDepths_.size() != sourceCellCount_ ||
+            packetCells_.size() != sourceCellCount_) {
             return false;
         }
         result->cells = sourceCells_;
-        result->postingIndices = directPostingIndexByCell_.data();
+        result->depths = traversalDepths_.data();
+        result->packetCells = packetCells_.data();
+        result->packetGroups = packetGroups_.empty()
+                ? nullptr
+                : packetGroups_.data();
         result->count = sourceCellCount_;
+        result->packetGroupCount = packetGroups_.size();
+        result->maximumTraversalDepth = maximumTraversalDepth_;
         return true;
     }
 
@@ -82,6 +135,10 @@ public:
         return directTrianglePostings_.size();
     }
 
+    std::size_t MaximumTraversalDepth(void) const noexcept {
+        return maximumTraversalDepth_;
+    }
+
 private:
     friend struct OptimizedCpuStaticMeshTriangleSidecarTestAccess;
 
@@ -92,10 +149,13 @@ private:
     std::size_t sourceVertexCount_ = 0u;
     std::size_t sourceTriangleCount_ = 0u;
     std::size_t sourceCellCount_ = 0u;
+    std::size_t maximumTraversalDepth_ = 0u;
+    std::vector<std::uint8_t> traversalDepths_;
+    std::vector<OptimizedCpuStaticMeshPacketCell> packetCells_;
+    std::vector<OptimizedCpuStaticMeshPacketGroup> packetGroups_;
     std::vector<OptimizedCpuStaticMeshTriangleData> triangles_;
     std::vector<OptimizedCpuStaticMeshDirectTrianglePosting>
             directTrianglePostings_;
-    std::vector<u32> directPostingIndexByCell_;
     OptimizedCpuStaticUniformGrid triangleGrid_;
     OptimizedCpuStaticBvh triangleBvh_;
 };

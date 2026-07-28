@@ -3,6 +3,11 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <random>
+
+#if defined(__i386__) || defined(__x86_64__)
+#include <xmmintrin.h>
+#endif
 
 #include "engine/core/gm_types.h"
 #include "simulation/backends/optimized_cpu/optimized_cpu_static_bounds_overlap.h"
@@ -33,6 +38,14 @@ GmBoxAligned Box(
     return {{centerX, centerY, centerZ}, {extentX, extentY, extentZ}};
 }
 
+void SetInexactStatus(void) {
+    std::feclearexcept(FE_ALL_EXCEPT);
+    std::feraiseexcept(FE_INEXACT);
+#if defined(__i386__) || defined(__x86_64__)
+    _mm_setcsr((_mm_getcsr() & ~0x3fu) | _MM_EXCEPT_INEXACT);
+#endif
+}
+
 bool RunCase(const TestCase &testCase) {
     std::feclearexcept(FE_ALL_EXCEPT);
     const int reference = testCase.moving.TestInter(testCase.fixed);
@@ -55,6 +68,67 @@ bool RunCase(const TestCase &testCase) {
                 referenceExceptions,
                 optimizedExceptions);
         return false;
+    }
+    return true;
+}
+
+bool RunPacketCases(void) {
+    std::mt19937 random(0x6e41a259u);
+    std::uniform_real_distribution<float> center(-10000.0f, 10000.0f);
+    std::uniform_real_distribution<float> extent(0.0f, 100.0f);
+    for (std::size_t caseIndex = 0u; caseIndex < 4096u; ++caseIndex) {
+        forevervalidator::simulation::OptimizedCpuStaticBoundsPacket8 packet;
+        GmBoxAligned lanes[8];
+        for (std::size_t lane = 0u; lane < 8u; ++lane) {
+            lanes[lane] = Box(
+                    center(random), center(random), center(random),
+                    extent(random), extent(random), extent(random));
+            packet.SetLane(lane, lanes[lane]);
+        }
+        const GmBoxAligned fixed = Box(
+                center(random), center(random), center(random),
+                extent(random), extent(random), extent(random));
+        std::uint32_t reference = 0u;
+        SetInexactStatus();
+        for (std::size_t lane = 0u; lane < 8u; ++lane) {
+            if (OptimizedCpuStaticBoundsOverlap(lanes[lane], fixed)) {
+                reference |= 1u << static_cast<std::uint32_t>(lane);
+            }
+        }
+        const int referenceExceptions = std::fetestexcept(FE_ALL_EXCEPT);
+#if defined(__i386__) || defined(__x86_64__)
+        const unsigned int referenceMxcsr = _mm_getcsr() & 0x3fu;
+#else
+        const unsigned int referenceMxcsr = 0u;
+#endif
+
+        SetInexactStatus();
+        const std::uint32_t optimized =
+                forevervalidator::simulation::
+                        OptimizedCpuStaticBoundsOverlapPacket8(packet, fixed);
+        const int optimizedExceptions = std::fetestexcept(FE_ALL_EXCEPT);
+#if defined(__i386__) || defined(__x86_64__)
+        const unsigned int optimizedMxcsr = _mm_getcsr() & 0x3fu;
+#else
+        const unsigned int optimizedMxcsr = 0u;
+#endif
+        if (reference != optimized ||
+            referenceExceptions != optimizedExceptions ||
+            referenceMxcsr != optimizedMxcsr) {
+            std::fprintf(
+                    stderr,
+                    "static_bounds_packet_differential: case=%zu "
+                    "ref=%x opt=%x ref_fenv=%x opt_fenv=%x "
+                    "ref_mxcsr=%x opt_mxcsr=%x\n",
+                    caseIndex,
+                    reference,
+                    optimized,
+                    referenceExceptions,
+                    optimizedExceptions,
+                    referenceMxcsr,
+                    optimizedMxcsr);
+            return false;
+        }
     }
     return true;
 }
@@ -123,10 +197,13 @@ int main() {
         }
         ++completed;
     }
+    if (!RunPacketCases()) {
+        return 1;
+    }
 
     std::printf(
             "static_bounds_overlap_cases=%zu bit_identical=true "
-            "fenv_identical=true\n",
+            "packet_cases=4096 fenv_identical=true\n",
             completed);
     return 0;
 }

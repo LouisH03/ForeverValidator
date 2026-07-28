@@ -15,11 +15,31 @@
 #include "engine/core/binary32_math.h"
 #include "engine/core/func_keys_real.h"
 #include "engine/scene/scene_vehicle_car.h"
+#include "engine/scene/scene_vehicle_math.h"
 #include "simulation/backends/optimized_cpu/optimized_cpu_compiled_tuning_curve.h"
 #include "simulation/backends/optimized_cpu/optimized_cpu_vehicle_forces.h"
 #include "simulation/runtime/replay_deterministic_execution.h"
 
 namespace {
+
+class ConservativeWheelObserver final
+        : public CSceneVehicleCarWheelSurfaceObserver {
+public:
+    void OnWheelSurfaceUpdated(
+            CSceneVehicleCar &,
+            CSceneVehicleCar::SSimulationWheel &) override {}
+};
+
+class PreservingWheelObserver final
+        : public CSceneVehicleCarWheelSurfaceObserver {
+public:
+    bool PreservesVehicleDynamics(void) const noexcept override {
+        return true;
+    }
+    void OnWheelSurfaceUpdated(
+            CSceneVehicleCar &,
+            CSceneVehicleCar::SSimulationWheel &) override {}
+};
 
 using forevervalidator::simulation::OptimizedCpuBinary32MathPath;
 using forevervalidator::simulation::OptimizedCpuEvaluateVehicleCurveForDifferential;
@@ -32,6 +52,7 @@ std::size_t completedCompiledFallbackCases = 0u;
 std::size_t completedInvalidationCases = 0u;
 std::size_t completedRoutingCases = 0u;
 std::size_t completedFenvCases = 0u;
+std::size_t completedNativeSqrtCases = 0u;
 
 std::uint32_t FloatBits(float value) noexcept {
     std::uint32_t bits = 0u;
@@ -48,6 +69,31 @@ float FloatFromBits(std::uint32_t bits) noexcept {
 bool Fail(const std::string &message) {
     std::fprintf(stderr, "vehicle_forces_differential: %s\n", message.c_str());
     return false;
+}
+
+bool RunWheelObserverContractCases(void) {
+    CSceneVehicleCar car;
+    ++completedRoutingCases;
+    if (!car.WheelSurfaceObserverPreservesDynamics()) {
+        return Fail("null wheel observer did not preserve dynamics");
+    }
+
+    ConservativeWheelObserver conservative;
+    car.BindWheelSurfaceObserver(conservative);
+    ++completedRoutingCases;
+    if (car.WheelSurfaceObserverPreservesDynamics()) {
+        return Fail("conservative wheel observer certified dynamics");
+    }
+
+    PreservingWheelObserver preserving;
+    car.BindWheelSurfaceObserver(preserving);
+    ++completedRoutingCases;
+    if (!car.WheelSurfaceObserverPreservesDynamics()) {
+        return Fail("preserving wheel observer lost its certificate");
+    }
+
+    car.ClearWheelSurfaceObserver();
+    return true;
 }
 
 float EvaluateReference(
@@ -213,6 +259,17 @@ bool RunCurveCases(OptimizedCpuBinary32MathPath selectedPath) {
                     {0.0f, 2.0f},
                     {std::numeric_limits<float>::max(), 3.0f},
             },
+            {
+                    {10.0f, 1.0f},
+                    {-10.0f, 2.0f},
+                    {0.0f, 3.0f},
+            },
+            {
+                    {-1.0f, 1.0f},
+                    {-1.0f, 2.0f},
+                    {0.0f, 3.0f},
+                    {1.0f, 4.0f},
+            },
     };
 
     std::vector<float> inputs = {
@@ -357,6 +414,80 @@ public:
     void ComputeForces(CHmsItem *, float) override { ++calls; }
     unsigned calls = 0u;
 };
+
+bool RunPhysicsCallbackEnsureCases(void) {
+    CSceneVehicleCar car;
+    CHmsItem *item = car.HmsItem();
+    car.EnableAbsorbContactCallback(1);
+    car.EnablePhysicsUpdates(1);
+    CHmsItem::CCallback *canonicalCompute =
+            item->CallbackGet(CHmsItem::ECallback_ComputeForces);
+    CHmsItem::CCallback *canonicalAfter =
+            item->CallbackGet(CHmsItem::ECallback_AfterContacts);
+    CHmsItem::CCallback *canonicalAbsorb =
+            item->CallbackGet(CHmsItem::ECallback_AbsorbContact);
+    ++completedRoutingCases;
+    car.EnsurePhysicsCallbacks(1, 1);
+    if (item->CallbackGet(CHmsItem::ECallback_ComputeForces) !=
+                    canonicalCompute ||
+        item->CallbackGet(CHmsItem::ECallback_AfterContacts) !=
+                    canonicalAfter ||
+        item->CallbackGet(CHmsItem::ECallback_AbsorbContact) !=
+                    canonicalAbsorb) {
+        return Fail("matching callback configuration changed identity");
+    }
+
+    CustomComputeForcesCallback custom;
+    item->CallbackSet(CHmsItem::ECallback_ComputeForces, &custom);
+    item->CallbackSet(CHmsItem::ECallback_AfterContacts, nullptr);
+    item->CallbackSet(CHmsItem::ECallback_AbsorbContact, nullptr);
+    ++completedRoutingCases;
+    car.EnsurePhysicsCallbacks(1, 1);
+    if (item->CallbackGet(CHmsItem::ECallback_ComputeForces) !=
+                    canonicalCompute ||
+        item->CallbackGet(CHmsItem::ECallback_AfterContacts) !=
+                    canonicalAfter ||
+        item->CallbackGet(CHmsItem::ECallback_AbsorbContact) !=
+                    canonicalAbsorb) {
+        return Fail("callback ensure did not repair canonical identities");
+    }
+
+    ++completedRoutingCases;
+    car.EnsurePhysicsCallbacks(0, 0);
+    if (car.IsAbsorbContactEnabled() != 0 ||
+        car.ArePhysicsUpdatesEnabled() != 0 ||
+        item->CallbackGet(CHmsItem::ECallback_ComputeForces) != nullptr ||
+        item->CallbackGet(CHmsItem::ECallback_AfterContacts) != nullptr ||
+        item->CallbackGet(CHmsItem::ECallback_AbsorbContact) != nullptr) {
+        return Fail("callback ensure did not disable callbacks");
+    }
+
+    ++completedRoutingCases;
+    car.EnsurePhysicsCallbacks(1, 1);
+    if (car.IsAbsorbContactEnabled() == 0 ||
+        car.ArePhysicsUpdatesEnabled() == 0 ||
+        item->CallbackGet(CHmsItem::ECallback_ComputeForces) !=
+                    canonicalCompute ||
+        item->CallbackGet(CHmsItem::ECallback_AfterContacts) !=
+                    canonicalAfter ||
+        item->CallbackGet(CHmsItem::ECallback_AbsorbContact) !=
+                    canonicalAbsorb) {
+        return Fail("callback ensure did not restore callbacks");
+    }
+
+    CHmsItem trigger;
+    car.AttachTriggerPhysicsItem(trigger);
+    CHmsItem::CCallback *triggerCompute =
+            trigger.CallbackGet(CHmsItem::ECallback_ComputeForces);
+    trigger.CallbackSet(CHmsItem::ECallback_ComputeForces, &custom);
+    ++completedRoutingCases;
+    car.EnsurePhysicsCallbacks(1, 1);
+    if (trigger.CallbackGet(CHmsItem::ECallback_ComputeForces) !=
+            triggerCompute) {
+        return Fail("callback ensure did not repair trigger callback");
+    }
+    return true;
+}
 
 class DerivedCar final : public CSceneVehicleCar {};
 class DerivedTuning final : public CSceneVehicleCarTuning {};
@@ -514,7 +645,189 @@ bool RunRoutingCases(OptimizedCpuBinary32MathPath selectedPath) {
     return true;
 }
 
+bool RunQuarterPiSineCases(void) {
+    const int originalRounding = std::fegetround();
+#if defined(__i386__) || defined(__x86_64__)
+    const unsigned int originalMxcsr = _mm_getcsr();
+#endif
+    const int roundingModes[] = {
+        FE_TONEAREST,
+        FE_DOWNWARD,
+        FE_UPWARD,
+        FE_TOWARDZERO,
+    };
+    for (int roundingMode : roundingModes) {
+        if (std::fesetround(roundingMode) != 0) {
+            return Fail("could not set quarter-pi sine rounding mode");
+        }
+        for (unsigned int existingStatus : {0u, 0x1fu}) {
+            std::feclearexcept(FE_ALL_EXCEPT);
+#if defined(__i386__) || defined(__x86_64__)
+            unsigned int referenceMxcsr = _mm_getcsr();
+            referenceMxcsr =
+                    (referenceMxcsr & ~0x3fu) | existingStatus;
+            _mm_setcsr(referenceMxcsr);
+#endif
+            const float reference =
+                    CIsin(SceneVehicleMath::QuarterPi);
+            const int referenceExceptions =
+                    std::fetestexcept(FE_ALL_EXCEPT);
+#if defined(__i386__) || defined(__x86_64__)
+            referenceMxcsr = _mm_getcsr();
+#endif
+
+            std::feclearexcept(FE_ALL_EXCEPT);
+#if defined(__i386__) || defined(__x86_64__)
+            unsigned int candidateMxcsr = _mm_getcsr();
+            candidateMxcsr =
+                    (candidateMxcsr & ~0x3fu) | existingStatus;
+            _mm_setcsr(candidateMxcsr);
+#endif
+            const float candidate = CIsinQuarterPi();
+            const int candidateExceptions =
+                    std::fetestexcept(FE_ALL_EXCEPT);
+#if defined(__i386__) || defined(__x86_64__)
+            candidateMxcsr = _mm_getcsr();
+#endif
+            ++completedFenvCases;
+            if (!Binary32::HaveSameEncoding(reference, candidate) ||
+                referenceExceptions != candidateExceptions
+#if defined(__i386__) || defined(__x86_64__)
+                || (referenceMxcsr & 0x3fu) !=
+                           (candidateMxcsr & 0x3fu)
+#endif
+            ) {
+#if defined(__i386__) || defined(__x86_64__)
+                _mm_setcsr(originalMxcsr);
+#endif
+                std::fesetround(originalRounding);
+                return Fail("quarter-pi sine contract mismatch");
+            }
+        }
+    }
+#if defined(__i386__) || defined(__x86_64__)
+    _mm_setcsr(originalMxcsr);
+#endif
+    if (std::fesetround(originalRounding) != 0) {
+        return Fail("could not restore quarter-pi sine rounding mode");
+    }
+    return true;
+}
+
+bool RunNativeSqrtScopeCases(void) {
+    const int originalRounding = std::fegetround();
+    if (std::fesetround(FE_TONEAREST) != 0) {
+        return Fail("could not set native sqrt rounding mode");
+    }
+#if defined(__i386__) || defined(__x86_64__)
+    const unsigned int originalMxcsr = _mm_getcsr();
+#endif
+    const std::uint32_t representativeBits[] = {
+        0x00000000u,
+        0x80000000u,
+        0x00000001u,
+        0x007fffffu,
+        0x00800000u,
+        0x3f800000u,
+        0x40000000u,
+        0x40800000u,
+        0x7f7fffffu,
+        0x7f800000u,
+        0xff800000u,
+        0x7fc00000u,
+        0xffc00000u,
+        0x7f800001u,
+        0xbf800000u,
+    };
+    for (std::uint32_t bits : representativeBits) {
+        for (unsigned int existingStatus : {0u, 0x1fu}) {
+            const float input = FloatFromBits(bits);
+            std::feclearexcept(FE_ALL_EXCEPT);
+#if defined(__i386__) || defined(__x86_64__)
+            unsigned int referenceMxcsr = _mm_getcsr();
+            referenceMxcsr =
+                    (referenceMxcsr & ~0x3fu) | existingStatus;
+            _mm_setcsr(referenceMxcsr);
+#endif
+            const float reference = CIsqrt(input);
+            const int referenceExceptions =
+                    std::fetestexcept(FE_ALL_EXCEPT);
+#if defined(__i386__) || defined(__x86_64__)
+            referenceMxcsr = _mm_getcsr();
+#endif
+
+            std::feclearexcept(FE_ALL_EXCEPT);
+#if defined(__i386__) || defined(__x86_64__)
+            unsigned int candidateMxcsr = _mm_getcsr();
+            candidateMxcsr =
+                    (candidateMxcsr & ~0x3fu) | existingStatus;
+            _mm_setcsr(candidateMxcsr);
+#endif
+            float candidate = 0.0f;
+            {
+                Binary32::NativeSqrtScope scope;
+                candidate = CIsqrt(input);
+            }
+            const int candidateExceptions =
+                    std::fetestexcept(FE_ALL_EXCEPT);
+#if defined(__i386__) || defined(__x86_64__)
+            candidateMxcsr = _mm_getcsr();
+#endif
+            ++completedNativeSqrtCases;
+            if (!Binary32::HaveSameEncoding(reference, candidate) ||
+                referenceExceptions != candidateExceptions
+#if defined(__i386__) || defined(__x86_64__)
+                || (referenceMxcsr & 0x3fu) !=
+                           (candidateMxcsr & 0x3fu)
+#endif
+            ) {
+#if defined(__i386__) || defined(__x86_64__)
+                _mm_setcsr(originalMxcsr);
+#endif
+                std::fesetround(originalRounding);
+                return Fail("native sqrt special-value contract mismatch");
+            }
+        }
+    }
+
+    std::uint32_t state = 0x6d2b79f5u;
+    for (std::size_t caseIndex = 0u; caseIndex < 131072u; ++caseIndex) {
+        state = state * 1664525u + 1013904223u;
+        const float input = FloatFromBits(state);
+        std::feclearexcept(FE_ALL_EXCEPT);
+        const float reference = CIsqrt(input);
+        std::feclearexcept(FE_ALL_EXCEPT);
+        float candidate = 0.0f;
+        {
+            Binary32::NativeSqrtScope outer;
+            Binary32::NativeSqrtScope inner;
+            candidate = CIsqrt(input);
+        }
+        ++completedNativeSqrtCases;
+        if (!Binary32::HaveSameEncoding(reference, candidate)) {
+#if defined(__i386__) || defined(__x86_64__)
+            _mm_setcsr(originalMxcsr);
+#endif
+            std::fesetround(originalRounding);
+            return Fail("native sqrt randomized encoding mismatch");
+        }
+    }
+#if defined(__i386__) || defined(__x86_64__)
+    _mm_setcsr(originalMxcsr);
+#endif
+    if (std::fesetround(originalRounding) != 0) {
+        return Fail("could not restore native sqrt rounding mode");
+    }
+    return true;
+}
+
 bool RunFenvCases(OptimizedCpuBinary32MathPath selectedPath) {
+    if (!RunNativeSqrtScopeCases()) {
+        return false;
+    }
+    if (!RunQuarterPiSineCases()) {
+        return false;
+    }
     if (SelectOptimizedCpuBinary32MathPathForActiveExecution() != selectedPath) {
         return Fail("active selector changed unexpectedly");
     }
@@ -587,7 +900,9 @@ int main(void) {
 
     if (!RunFenvCases(selectedPath) || !RunCurveCases(selectedPath) ||
         !RunCompiledCurveInvalidationCases() ||
-        !RunRoutingCases(selectedPath)) {
+        !RunRoutingCases(selectedPath) ||
+        !RunPhysicsCallbackEnsureCases() ||
+        !RunWheelObserverContractCases()) {
         return 1;
     }
 
@@ -595,6 +910,7 @@ int main(void) {
             "vehicle_curve_cases=%zu compiled_curve_cases=%zu "
             "compiled_fallback_cases=%zu "
             "invalidation_cases=%zu routing_cases=%zu fenv_cases=%zu "
+            "native_sqrt_cases=%zu "
             "binary32_path=%s result=identical\n",
             completedCurveCases,
             completedCompiledCurveCases,
@@ -602,6 +918,7 @@ int main(void) {
             completedInvalidationCases,
             completedRoutingCases,
             completedFenvCases,
+            completedNativeSqrtCases,
             selectedPath == OptimizedCpuBinary32MathPath::X86Sse2
                     ? "x86_sse2"
                     : "reference");

@@ -2,8 +2,17 @@
 #include <cstring>
 #include <limits>
 
+#if defined(__x86_64__) || defined(_M_X64)
+#include <xmmintrin.h>
+#define TMNF_BINARY32_HAS_NATIVE_SQRT 1
+#else
+#define TMNF_BINARY32_HAS_NATIVE_SQRT 0
+#endif
+
 #include "engine/core/binary32_math.h"
 namespace {
+
+thread_local bool nativeSqrtEnabled = false;
 
 constexpr double kPi = 3.14159265358979323846264338327950288;
 constexpr double kHalfPi = 1.57079632679489661923132169163975144;
@@ -205,6 +214,15 @@ uint64_t RoundPositiveToNearestEven(double value) {
 
 namespace Binary32 {
 
+NativeSqrtScope::NativeSqrtScope(void) noexcept
+        : previous_(nativeSqrtEnabled) {
+    nativeSqrtEnabled = true;
+}
+
+NativeSqrtScope::~NativeSqrtScope(void) {
+    nativeSqrtEnabled = previous_;
+}
+
 float FromDouble(double value) {
     if (std::isnan(value)) {
         return std::copysign(QuietNaN(), value);
@@ -268,7 +286,20 @@ bool HaveSameEncoding(float left, float right) {
 
 } // namespace Binary32
 
-float CIsqrt(float value) { return Binary32::FromDouble((std::sqrt((static_cast<double>(value))))); }
+float CIsqrt(float value) {
+#if TMNF_BINARY32_HAS_NATIVE_SQRT
+    if (nativeSqrtEnabled) {
+        uint32_t bits = 0u;
+        std::memcpy(&bits, &value, sizeof(bits));
+        constexpr uint32_t PositiveInfinityBits = 0x7f800000u;
+        constexpr uint32_t NegativeZeroBits = 0x80000000u;
+        if (bits <= PositiveInfinityBits || bits == NegativeZeroBits) {
+            return _mm_cvtss_f32(_mm_sqrt_ss(_mm_set_ss(value)));
+        }
+    }
+#endif
+    return Binary32::FromDouble(std::sqrt(static_cast<double>(value)));
+}
 
 float CIacos(float value) {
     if (IsNaNFloat(value) || value < -1.0f || value > 1.0f) {
@@ -393,3 +424,5 @@ float CIcos(float value) {
     }
     return Binary32::FromDouble(result);
 }
+
+#undef TMNF_BINARY32_HAS_NATIVE_SQRT

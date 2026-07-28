@@ -124,6 +124,11 @@ struct CHmsCollisionManager {
             CPlugTree *tree = nullptr;
             std::unique_ptr<SHmsSphereBufferContact> contact;
         };
+        struct TreeSphereContactCacheEntry {
+            CPlugTree *tree = nullptr;
+            SHmsSphereBufferContact *contact = nullptr;
+        };
+        static constexpr std::size_t TreeSphereContactCacheSize = 32u;
 
         CSceneVehicleWaterZone waterZone;
         SZone(unsigned long zoneId, CHmsCollisionManager *manager);
@@ -229,6 +234,8 @@ struct CHmsCollisionManager {
         std::vector<CHmsCorpus *> registeredCorpuses;
         u32 nextCorpusRegistrationOrder = 0u;
         std::vector<TreeSphereContact> ownedSphereContacts;
+        std::array<TreeSphereContactCacheEntry,
+                   TreeSphereContactCacheSize> sphereContactCache{};
         std::vector<SHmsSphereBufferContact *> sphereBufferContacts;
         std::vector<CHmsZoneDynamic *> boundDynamicZones;
 

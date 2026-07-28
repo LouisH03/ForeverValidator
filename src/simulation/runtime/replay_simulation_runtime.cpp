@@ -413,8 +413,9 @@ void ReplaySimulationRuntime::
 CertifyOptimizedCpuStaticTransformsForAdvance(void) noexcept {
     State &state = *state_;
     if (state.optimizedCpuStaticTransforms != nullptr) {
-        state.optimizedCpuStaticTransforms->CertifyForAdvance(
-                state.world.CollisionZone());
+        CPlugTree *movingTree = state.body.Corpus().CollisionTree();
+        state.optimizedCpuStaticTransforms->CertifyForRuntimeAdvance(
+                state.world.CollisionZone(), movingTree);
     }
 }
 
@@ -554,8 +555,9 @@ ReplaySimulationRuntime::StepOptimizedCpuNativeBinary32(
     }
 
     CSceneVehicleCar &car = state.vehicle.Car();
-    car.EnableAbsorbContactCallback(1);
-    car.EnablePhysicsUpdates(!tick.actions.suppressVehicleForceCallbacks);
+    car.EnsurePhysicsCallbacks(
+            1,
+            tick.actions.suppressVehicleForceCallbacks ? 0 : 1);
     CHmsItem *enabledItem = car.HmsItem();
     CHmsItem::CCallback *enabledComputeForcesCallback =
             enabledItem != nullptr
@@ -936,7 +938,9 @@ void ReplaySimulationRuntime::RestoreRuntimeClone(
     state_->body.RestoreRuntimeClone(std::move(clone.body));
     state_->vehicle.RestoreRuntimeClone(clone.vehicle);
     if (state_->optimizedCpuStaticTransforms != nullptr) {
-        state_->optimizedCpuStaticTransforms->ClearTemporalCandidates();
+        state_->optimizedCpuStaticTransforms->ClearRuntimeTemporalCandidates(
+                state_->world.CollisionZone(),
+                state_->body.Corpus().CollisionTree());
     }
     state_->firstStep = clone.firstStep;
     state_->stuntsEnabled = clone.stuntsEnabled;

@@ -29,6 +29,9 @@ public:
     void OnWheelSurfaceUpdated(
             CSceneVehicleCar &car,
             CSceneVehicleCar::SSimulationWheel &wheel) override;
+    bool PreservesVehicleDynamics(void) const noexcept override {
+        return true;
+    }
     RuntimeClone CaptureRuntimeClone() const;
     bool CanRestoreRuntimeClone(const RuntimeClone &clone,
                                 const CSceneVehicleCar &car) const noexcept;

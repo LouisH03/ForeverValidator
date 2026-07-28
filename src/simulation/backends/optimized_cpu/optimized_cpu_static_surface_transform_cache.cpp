@@ -1,5 +1,6 @@
 #include "simulation/backends/optimized_cpu/optimized_cpu_static_surface_transform_cache.h"
 
+#include <cmath>
 #include <cstring>
 #include <new>
 #include <typeinfo>
@@ -10,6 +11,18 @@
 #include "simulation/backends/optimized_cpu/optimized_cpu_static_bounds_overlap.h"
 
 namespace {
+
+bool IsFiniteTransform(const GmIso4 &transform) noexcept {
+    const float *values = reinterpret_cast<const float *>(&transform);
+    for (std::size_t index = 0u;
+         index < sizeof(transform) / sizeof(float);
+         ++index) {
+        if (!std::isfinite(values[index])) {
+            return false;
+        }
+    }
+    return true;
+}
 
 const OptimizedCpuStaticMeshTriangleSidecar *FindTriangleSidecar(
         const std::vector<std::unique_ptr<
@@ -73,6 +86,140 @@ bool IsBoundedMovingTree(const CPlugTree &tree) noexcept {
 }
 
 }  // namespace
+
+bool OptimizedCpuMovingEllipsoidPacketPlan::TryBuild(
+        const CPlugTree &root) noexcept {
+    OptimizedCpuMovingEllipsoidPacketPlan candidate;
+    candidate.sourceRoot_ = &root;
+    u32 nextTemporalSlotOrdinal = 0u;
+    if (!candidate.TryAppendTree(
+                root, NoParent, &nextTemporalSlotOrdinal) ||
+        candidate.laneCount_ < 2u) {
+        Clear();
+        return false;
+    }
+    candidate.directLaneStar_ = candidate.HasDirectLaneStarTopology();
+    *this = candidate;
+    return true;
+}
+
+bool OptimizedCpuMovingEllipsoidPacketPlan::
+HasDirectLaneStarTopology(void) const noexcept {
+    if (sourceRoot_ == nullptr || laneCount_ < 2u ||
+        nodeCount_ != laneCount_ + 1u ||
+        operationCount_ != laneCount_ * 2u + 1u ||
+        nodes_[0u].tree != sourceRoot_ ||
+        nodes_[0u].parentNodeIndex != NoParent ||
+        operations_[0u].kind != OperationKind::ComposeNode ||
+        operations_[0u].index != 0u) {
+        return false;
+    }
+    for (std::size_t laneIndex = 0u;
+         laneIndex < laneCount_;
+         ++laneIndex) {
+        const std::uint8_t nodeIndex = static_cast<std::uint8_t>(
+                laneIndex + 1u);
+        const Node &node = nodes_[nodeIndex];
+        const Lane &lane = lanes_[laneIndex];
+        const Operation &compose = operations_[laneIndex * 2u + 1u];
+        const Operation &emit = operations_[laneIndex * 2u + 2u];
+        if (node.parentNodeIndex != 0u ||
+            lane.nodeIndex != nodeIndex ||
+            lane.tree != node.tree ||
+            compose.kind != OperationKind::ComposeNode ||
+            compose.index != nodeIndex ||
+            emit.kind != OperationKind::EmitLane ||
+            emit.index != laneIndex) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool OptimizedCpuMovingEllipsoidPacketPlan::TryAppendTree(
+        const CPlugTree &tree,
+        std::uint8_t parentNodeIndex,
+        u32 *nextTemporalSlotOrdinal) noexcept {
+    const u32 temporalSlotOrdinal = (*nextTemporalSlotOrdinal)++;
+    if (!tree.HasWorldBox()) {
+        return true;
+    }
+    if (nodeCount_ >= nodes_.size() ||
+        operationCount_ >= operations_.size()) {
+        return false;
+    }
+
+    const std::uint8_t nodeIndex =
+            static_cast<std::uint8_t>(nodeCount_++);
+    nodes_[nodeIndex] = {
+        &tree,
+        parentNodeIndex,
+        tree.HasLocalTransform() != 0,
+    };
+    operations_[operationCount_++] = {
+        OperationKind::ComposeNode,
+        nodeIndex,
+    };
+
+    const u32 childCount = tree.GetChildCount();
+    for (u32 childIndex = 0u; childIndex < childCount; ++childIndex) {
+        CPlugTree *child = tree.GetChild(childIndex);
+        if (child == nullptr ||
+            !TryAppendTree(
+                    *child,
+                    nodeIndex,
+                    nextTemporalSlotOrdinal)) {
+            return false;
+        }
+    }
+
+    CPlugSurface *surface = tree.Surface();
+    if (surface == nullptr) {
+        return true;
+    }
+    const GmSurf *geometry = surface->Geometry();
+    if (geometry == nullptr ||
+        typeid(*geometry) != typeid(GmSurfEllipsoid) ||
+        !surface->UsesSphereContactBuffer() ||
+        laneCount_ >= lanes_.size() ||
+        operationCount_ >= operations_.size()) {
+        return false;
+    }
+    const GmVec3 radii =
+            static_cast<const GmSurfEllipsoid &>(*geometry).radii;
+    if (!(0.0f < radii.x && 0.0f < radii.y && 0.0f < radii.z) ||
+        !std::isfinite(radii.x) || !std::isfinite(radii.y) ||
+        !std::isfinite(radii.z)) {
+        return false;
+    }
+
+    const std::uint8_t laneIndex =
+            static_cast<std::uint8_t>(laneCount_++);
+    lanes_[laneIndex] = {
+        const_cast<CPlugTree *>(&tree),
+        surface,
+        nodeIndex,
+        temporalSlotOrdinal,
+    };
+    operations_[operationCount_++] = {
+        OperationKind::EmitLane,
+        laneIndex,
+    };
+    return true;
+}
+
+void OptimizedCpuMovingEllipsoidPacketPlan::Clear(void) noexcept {
+    sourceRoot_ = nullptr;
+    nodeCount_ = 0u;
+    laneCount_ = 0u;
+    operationCount_ = 0u;
+    directLaneStar_ = false;
+}
+
+bool OptimizedCpuMovingEllipsoidPacketPlan::IsFor(
+        const CPlugTree &root) const noexcept {
+    return sourceRoot_ == &root && laneCount_ >= 2u;
+}
 
 bool OptimizedCpuStaticSurfaceTransformGroup::
 WholeTreeBoundsOverlapAnySurface(
@@ -338,6 +485,7 @@ bool OptimizedCpuStaticSurfaceTransformCache::TryRebuild(
             }
             cachedGroup.inverses_.resize(records.size());
             cachedGroup.triangleSidecars_.resize(records.size(), nullptr);
+            cachedGroup.certifiedMeshPackets_.resize(records.size());
             std::vector<OptimizedCpuStaticBvh::Entry> surfaceEntries;
             surfaceEntries.reserve(records.size());
             for (std::size_t recordIndex = 0u;
@@ -385,6 +533,18 @@ bool OptimizedCpuStaticSurfaceTransformCache::TryRebuild(
                             std::move(candidate));
                 }
                 cachedGroup.triangleSidecars_[recordIndex] = sidecar;
+                OptimizedCpuStaticMeshTriangleHierarchyView hierarchy;
+                if (IsFiniteTransform(
+                            cachedGroup.inverses_[recordIndex]) &&
+                    sidecar->TriangleHierarchyView(&hierarchy)) {
+                    cachedGroup.certifiedMeshPackets_[recordIndex] = {
+                        &mesh,
+                        surface.location,
+                        cachedGroup.inverses_[recordIndex],
+                        sidecar,
+                        hierarchy,
+                    };
+                }
             }
             cachedGroup.surfaceBvh_.TryBuild(
                     surfaceEntries, records.size());
@@ -400,6 +560,8 @@ bool OptimizedCpuStaticSurfaceTransformCache::TryRebuild(
 void OptimizedCpuStaticSurfaceTransformCache::Clear(void) noexcept {
     sourceZone_ = nullptr;
     certifiedZone_ = nullptr;
+    certifiedMovingTree_ = nullptr;
+    movingEllipsoidPacketPlan_.Clear();
     for (OptimizedCpuStaticSurfaceTransformGroup &group : groups_) {
         group.ClearTemporalCandidates();
         group.sourceGroup_ = nullptr;
@@ -411,6 +573,7 @@ void OptimizedCpuStaticSurfaceTransformCache::Clear(void) noexcept {
         group.wholePassPredictions_.fill({});
         group.inverses_.clear();
         group.triangleSidecars_.clear();
+        group.certifiedMeshPackets_.clear();
         group.surfaceBvh_.Clear();
     }
     triangleSidecars_.clear();
@@ -418,8 +581,11 @@ void OptimizedCpuStaticSurfaceTransformCache::Clear(void) noexcept {
 }
 
 bool OptimizedCpuStaticSurfaceTransformCache::CertifyForAdvance(
-        const CHmsCollisionManagerSZone &zone) noexcept {
+        const CHmsCollisionManagerSZone &zone,
+        const CPlugTree *movingTree) noexcept {
     certifiedZone_ = nullptr;
+    certifiedMovingTree_ = nullptr;
+    movingEllipsoidPacketPlan_.Clear();
     if (sourceZone_ != &zone) {
         return false;
     }
@@ -442,7 +608,8 @@ bool OptimizedCpuStaticSurfaceTransformCache::CertifyForAdvance(
         if (cachedGroup.sourceRecords_ != records.data() ||
             cachedGroup.sourceRecordCount_ != records.size() ||
             cachedGroup.inverses_.size() != records.size() ||
-            cachedGroup.triangleSidecars_.size() != records.size()) {
+            cachedGroup.triangleSidecars_.size() != records.size() ||
+            cachedGroup.certifiedMeshPackets_.size() != records.size()) {
             return false;
         }
         for (std::size_t recordIndex = 0u;
@@ -476,19 +643,88 @@ bool OptimizedCpuStaticSurfaceTransformCache::CertifyForAdvance(
                         static_cast<const GmSurfMesh &>(*geometry))) {
                 return false;
             }
+            const OptimizedCpuCertifiedStaticMeshPacket &packet =
+                    cachedGroup.certifiedMeshPackets_[recordIndex];
+            if (!packet.IsAvailable()) {
+                continue;
+            }
+            OptimizedCpuStaticMeshTriangleHierarchyView hierarchy;
+            if (packet.sourceMesh != geometry ||
+                packet.triangles != sidecar ||
+                std::memcmp(&packet.meshIso,
+                            &surface.location,
+                            sizeof(GmIso4)) != 0 ||
+                std::memcmp(&packet.meshInverse,
+                            &cachedGroup.inverses_[recordIndex],
+                            sizeof(GmIso4)) != 0 ||
+                !sidecar->TriangleHierarchyView(&hierarchy) ||
+                packet.hierarchy.cells != hierarchy.cells ||
+                packet.hierarchy.depths != hierarchy.depths ||
+                packet.hierarchy.packetCells != hierarchy.packetCells ||
+                packet.hierarchy.packetGroups != hierarchy.packetGroups ||
+                packet.hierarchy.count != hierarchy.count ||
+                packet.hierarchy.packetGroupCount !=
+                        hierarchy.packetGroupCount ||
+                packet.hierarchy.maximumTraversalDepth !=
+                        hierarchy.maximumTraversalDepth) {
+                return false;
+            }
         }
     }
 
+    if (movingTree != nullptr) {
+        (void)movingEllipsoidPacketPlan_.TryBuild(*movingTree);
+    }
     certifiedZone_ = &zone;
+    certifiedMovingTree_ = movingTree;
     return true;
+}
+
+bool OptimizedCpuStaticSurfaceTransformCache::CertifyForRuntimeAdvance(
+        const CHmsCollisionManagerSZone &zone,
+        const CPlugTree *movingTree) noexcept {
+    // Replay runtime construction owns the static scene and the vehicle
+    // collision-tree topology for the lifetime of this cache. Dynamic clone
+    // restore changes transforms and physics state in place, but not either
+    // identity. Keep the full CertifyForAdvance path available to callers
+    // that can mutate scene data directly.
+    if (certifiedZone_ == &zone &&
+        certifiedMovingTree_ == movingTree) {
+        return true;
+    }
+    return CertifyForAdvance(zone, movingTree);
+}
+
+void OptimizedCpuStaticSurfaceTransformCache::
+ClearRuntimeTemporalCandidates(
+        const CHmsCollisionManagerSZone &zone,
+        const CPlugTree *movingTree) noexcept {
+    if (certifiedZone_ != &zone ||
+        certifiedMovingTree_ != movingTree) {
+        ClearTemporalCandidates();
+        return;
+    }
+    for (OptimizedCpuStaticSurfaceTransformGroup &group : groups_) {
+        group.ClearTemporalCandidates();
+    }
 }
 
 void OptimizedCpuStaticSurfaceTransformCache::ClearTemporalCandidates(
         void) noexcept {
     certifiedZone_ = nullptr;
+    certifiedMovingTree_ = nullptr;
+    movingEllipsoidPacketPlan_.Clear();
     for (OptimizedCpuStaticSurfaceTransformGroup &group : groups_) {
         group.ClearTemporalCandidates();
     }
+}
+
+const OptimizedCpuMovingEllipsoidPacketPlan *
+OptimizedCpuStaticSurfaceTransformCache::MovingEllipsoidPacketPlanFor(
+        const CPlugTree &movingTree) const noexcept {
+    return movingEllipsoidPacketPlan_.IsFor(movingTree)
+            ? &movingEllipsoidPacketPlan_
+            : nullptr;
 }
 
 bool OptimizedCpuStaticSurfaceTransformCache::IsFor(

@@ -84,11 +84,6 @@ float ExactSpeedInput(float speed) noexcept {
     return ExactNativeFromDouble(converted);
 }
 
-bool IsWithinBounds(float input, float lower, float upper) noexcept {
-    return !std::isnan(input) && !std::isnan(lower) &&
-           !std::isnan(upper) && input >= lower && input <= upper;
-}
-
 #if FV_COMPILED_CURVE_X86_SSE2
 __attribute__((target("sse2")))
 void RaiseInexactStatus(void) noexcept {
@@ -126,6 +121,8 @@ bool OptimizedCpuCompiledTuningCurve::TryBuild(
         rebuilt.upperBounds_.resize(count);
         rebuilt.lowerRaisesInexact_.resize(count);
         rebuilt.upperRaisesInexact_.resize(count);
+        rebuilt.orderedLookupRaisesInexact_.resize(count);
+        rebuilt.positionsAreNondecreasing_ = true;
         for (std::size_t index = 0u; index < count; ++index) {
             const float position = curve.XAt(index);
             if (!std::isfinite(position)) {
@@ -140,6 +137,27 @@ bool OptimizedCpuCompiledTuningCurve::TryBuild(
             rebuilt.upperBounds_[index] = upper.value;
             rebuilt.lowerRaisesInexact_[index] = lower.raisesInexact;
             rebuilt.upperRaisesInexact_[index] = upper.raisesInexact;
+            if (index != 0u &&
+                rebuilt.positions_[index - 1u] > position) {
+                rebuilt.positionsAreNondecreasing_ = false;
+            }
+        }
+        if (count >= 2u) {
+            rebuilt.lowerClampRaisesInexact_ =
+                    rebuilt.lowerRaisesInexact_.front() != 0u;
+            rebuilt.upperClampRaisesInexact_ =
+                    rebuilt.lowerClampRaisesInexact_ ||
+                    rebuilt.upperRaisesInexact_.back() != 0u;
+            bool raisesInexact = rebuilt.upperClampRaisesInexact_;
+            for (std::size_t index = 0u;
+                 index + 1u < count;
+                 ++index) {
+                raisesInexact = raisesInexact ||
+                        rebuilt.lowerRaisesInexact_[index] != 0u ||
+                        rebuilt.upperRaisesInexact_[index + 1u] != 0u;
+                rebuilt.orderedLookupRaisesInexact_[index] =
+                        raisesInexact ? 1u : 0u;
+            }
         }
         *this = std::move(rebuilt);
         return true;
@@ -157,8 +175,12 @@ void OptimizedCpuCompiledTuningCurve::Clear(void) noexcept {
     upperBounds_.clear();
     lowerRaisesInexact_.clear();
     upperRaisesInexact_.clear();
+    orderedLookupRaisesInexact_.clear();
     sourceStorageRevision_ = 0u;
     interpolation_ = 0u;
+    positionsAreNondecreasing_ = false;
+    lowerClampRaisesInexact_ = false;
+    upperClampRaisesInexact_ = false;
 }
 
 bool OptimizedCpuCompiledTuningCurve::IsFor(
@@ -170,13 +192,7 @@ bool OptimizedCpuCompiledTuningCurve::IsFor(
 bool OptimizedCpuCompiledTuningCurve::IsStorageFor(
         const CFuncKeysReal &curve) const noexcept {
     return source_ == &curve &&
-           sourceStorageRevision_ == curve.StorageRevision() &&
-           positions_.size() == curve.KeyCount() &&
-           values_.size() == positions_.size() &&
-           lowerBounds_.size() == positions_.size() &&
-           upperBounds_.size() == positions_.size() &&
-           lowerRaisesInexact_.size() == positions_.size() &&
-           upperRaisesInexact_.size() == positions_.size();
+           sourceStorageRevision_ == curve.StorageRevision();
 }
 
 OptimizedCpuCompiledTuningCurve::Lookup
@@ -189,37 +205,34 @@ OptimizedCpuCompiledTuningCurve::LookupFor(float input) const
 
     Lookup result;
     if (count == 1u) {
+        result.clamped = true;
         return result;
     }
-    result.raisesInexact = lowerRaisesInexact_.front() != 0u;
     if (input < lowerBounds_.front()) {
+        result.raisesInexact = lowerClampRaisesInexact_;
+        result.clamped = true;
         return result;
     }
-    result.raisesInexact = result.raisesInexact ||
-            upperRaisesInexact_.back() != 0u;
     if (input > upperBounds_.back()) {
         result.index = count - 1u;
+        result.raisesInexact = upperClampRaisesInexact_;
+        result.clamped = true;
         return result;
     }
 
-    std::size_t current = 0u;
-    for (std::size_t scanned = 0u; scanned <= count; ++scanned) {
-        const std::size_t next = current + 1u < count
-                ? current + 1u
-                : 0u;
-        result.raisesInexact = result.raisesInexact ||
-                lowerRaisesInexact_[current] != 0u ||
-                upperRaisesInexact_[next] != 0u;
-        if (IsWithinBounds(
-                    input,
-                    lowerBounds_[current],
-                    upperBounds_[next])) {
-            result.index = current;
-            return result;
+    std::size_t first = 1u;
+    std::size_t last = count;
+    while (first < last) {
+        const std::size_t middle = first + (last - first) / 2u;
+        if (input <= upperBounds_[middle]) {
+            last = middle;
+        } else {
+            first = middle + 1u;
         }
-        current = next;
     }
-    result.index = current;
+    result.index = first - 1u;
+    result.raisesInexact =
+            orderedLookupRaisesInexact_[result.index] != 0u;
     return result;
 }
 
@@ -231,6 +244,15 @@ void OptimizedCpuCompiledTuningCurve::PreserveStatus(
 }
 
 float OptimizedCpuCompiledTuningCurve::Evaluate(float input) const noexcept {
+    const std::uint32_t magnitude = FloatBits(input) & 0x7fffffffu;
+    const bool orderedFastInput = positionsAreNondecreasing_ &&
+            (magnitude == 0u ||
+             (magnitude >= 0x00800000u &&
+              magnitude < 0x7f800000u));
+    if (source_ != nullptr && !orderedFastInput) {
+        unsigned long keyIndex = 0ul;
+        return source_->GetValue(input, &keyIndex);
+    }
     const std::size_t count = positions_.size();
     if (count == 0u) {
         return 0.0f;
@@ -242,9 +264,7 @@ float OptimizedCpuCompiledTuningCurve::Evaluate(float input) const noexcept {
     const std::size_t nextKeyIndex = keyIndex + 1u < count
             ? keyIndex + 1u
             : 0u;
-    const bool clampedLow = count == 1u || input < lowerBounds_.front();
-    const bool clampedHigh = input > upperBounds_.back();
-    const std::size_t effectiveNext = clampedLow || clampedHigh
+    const std::size_t effectiveNext = lookup.clamped
             ? keyIndex
             : nextKeyIndex;
 
@@ -268,6 +288,26 @@ float OptimizedCpuCompiledTuningCurve::Evaluate(float input) const noexcept {
 
 float OptimizedCpuCompiledTuningCurve::EvaluateConstant(float input) const
         noexcept {
+    const std::uint32_t magnitude = FloatBits(input) & 0x7fffffffu;
+    const bool orderedFastInput = positionsAreNondecreasing_ &&
+            (magnitude == 0u ||
+             (magnitude >= 0x00800000u &&
+              magnitude < 0x7f800000u));
+    if (source_ != nullptr && !orderedFastInput) {
+        unsigned long keyIndex = 0ul;
+        unsigned long nextKeyIndex = 1ul;
+        float blend = 0.0f;
+        float result = 0.0f;
+        source_->GetRealAt(
+                input,
+                result,
+                keyIndex,
+                nextKeyIndex,
+                blend,
+                CFuncKeysReal::Constant,
+                1);
+        return result;
+    }
     if (positions_.empty()) {
         return 0.0f;
     }
@@ -278,9 +318,7 @@ float OptimizedCpuCompiledTuningCurve::EvaluateConstant(float input) const
     const std::size_t nextKeyIndex = keyIndex + 1u < count
             ? keyIndex + 1u
             : 0u;
-    const bool clampedLow = count == 1u || input < lowerBounds_.front();
-    const bool clampedHigh = input > upperBounds_.back();
-    const std::size_t effectiveNext = clampedLow || clampedHigh
+    const std::size_t effectiveNext = lookup.clamped
             ? keyIndex
             : nextKeyIndex;
     if (keyIndex != effectiveNext) {

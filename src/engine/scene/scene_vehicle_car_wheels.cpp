@@ -465,7 +465,7 @@ ApplyFollowAbsorbReplacement(CSceneVehicleCar::SSimulationWheel &wheel,
 
 void CSceneVehicleCar::WheelAbsorbContact(
     CSceneVehicleCar::SSimulationWheel &wheel, CHmsPhysicalContact &contact) {
-  float maxNormalX = CIsin(SceneVehicleMath::QuarterPi);
+  float maxNormalX = CIsinQuarterPi();
   wheel.realTimeState.contactPresent =
       std::fabs(contact.localImpulseNormal.x) < maxNormalX;
   if (!wheel.realTimeState.contactPresent) {

@@ -381,6 +381,17 @@ if(FOREVERVALIDATOR_BUILD_BENCHMARKS)
     forevervalidator_configure_target(
         optimized_cpu_vehicle_forces_differential)
 
+    add_executable(optimized_cpu_vehicle_collision_bounds_plan_differential
+        tools/optimized_cpu_vehicle_collision_bounds_plan_differential.cpp)
+    target_include_directories(
+        optimized_cpu_vehicle_collision_bounds_plan_differential PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(
+        optimized_cpu_vehicle_collision_bounds_plan_differential PRIVATE
+        forevervalidator_core)
+    forevervalidator_configure_target(
+        optimized_cpu_vehicle_collision_bounds_plan_differential)
+
     add_executable(optimized_cpu_static_bounds_overlap_differential
         tools/optimized_cpu_static_bounds_overlap_differential.cpp)
     target_include_directories(
@@ -424,6 +435,8 @@ if(FOREVERVALIDATOR_BUILD_BENCHMARKS)
         COMMAND optimized_cpu_static_triangle_sidecar_differential)
     add_test(NAME optimized_cpu_vehicle_forces
         COMMAND optimized_cpu_vehicle_forces_differential)
+    add_test(NAME optimized_cpu_vehicle_collision_bounds_plan
+        COMMAND optimized_cpu_vehicle_collision_bounds_plan_differential)
     add_test(NAME optimized_cpu_static_bounds_overlap
         COMMAND optimized_cpu_static_bounds_overlap_differential)
     add_test(NAME optimized_cpu_static_bvh

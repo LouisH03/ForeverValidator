@@ -28,6 +28,7 @@ private:
     struct Lookup {
         std::size_t index = 0u;
         bool raisesInexact = false;
+        bool clamped = false;
     };
 
     Lookup LookupFor(float input) const noexcept;
@@ -40,8 +41,12 @@ private:
     std::vector<float> upperBounds_;
     std::vector<std::uint8_t> lowerRaisesInexact_;
     std::vector<std::uint8_t> upperRaisesInexact_;
+    std::vector<std::uint8_t> orderedLookupRaisesInexact_;
     std::uint64_t sourceStorageRevision_ = 0u;
     unsigned interpolation_ = 0u;
+    bool positionsAreNondecreasing_ = false;
+    bool lowerClampRaisesInexact_ = false;
+    bool upperClampRaisesInexact_ = false;
 };
 
 }  // namespace forevervalidator::simulation

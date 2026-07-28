@@ -188,6 +188,12 @@ void CSceneVehicleCar::ClearWheelSurfaceObserver(void) {
   wheelSurfaceObserver = nullptr;
 }
 
+bool CSceneVehicleCar::WheelSurfaceObserverPreservesDynamics(void) const
+    noexcept {
+  return wheelSurfaceObserver == nullptr ||
+         wheelSurfaceObserver->PreservesVehicleDynamics();
+}
+
 void CSceneVehicleCar::SVehicleCarState::Reset(void) {
   VehicleStateReset();
   engineInputMemory = 0.0f;

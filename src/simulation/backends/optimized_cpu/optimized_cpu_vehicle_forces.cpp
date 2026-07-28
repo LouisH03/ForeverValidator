@@ -333,6 +333,11 @@ struct OptimizedCpuVehicleForceAccess {
         return car.ActiveTuningOrNull();
     }
 
+    static CSceneVehicleCarWheelSurfaceObserver *WheelSurfaceObserver(
+            CSceneVehicleCar &car) noexcept {
+        return car.wheelSurfaceObserver;
+    }
+
     static bool HasRequiredModel3Configuration(
             const CSceneVehicleCarTuning &tuning) noexcept {
         return tuning.handlingModel == CSceneVehicleCarHandlingModel_Lateral &&
@@ -794,13 +799,17 @@ struct OptimizedCpuVehicleForceAccess {
     template<bool NativeBinary32>
     static FV_E019_ALWAYS_INLINE void IntegrateVehicle(
             CSceneVehicleCar &car,
-            float dt) {
+            float dt,
+            GmVec3 &linearSpeed,
+            forevervalidator::simulation::
+                    OptimizedCpuVehicleCollisionBoundsPlan
+                            *collisionBoundsPlan) {
         if constexpr (!NativeBinary32) {
             car.IntegrateVehicle(dt);
+            car.HmsItem()->GetLinearSpeed(linearSpeed);
             return;
         }
 
-        GmVec3 linearSpeed;
         car.HmsItem()->GetLinearSpeed(linearSpeed);
         const float vehicleForwardSpeed = linearSpeed.z;
         CSceneVehicleCarTuning *tuning =
@@ -844,7 +853,11 @@ struct OptimizedCpuVehicleForceAccess {
         }
 
         car.UpdateCurrentSteering(tuning, dt);
-        car.RefreshCollisionTree();
+        if (collisionBoundsPlan == nullptr) {
+            car.RefreshCollisionTree();
+        } else {
+            collisionBoundsPlan->RefreshRuntimeCertified();
+        }
     }
 
     template<bool NativeBinary32>
@@ -1827,11 +1840,15 @@ struct OptimizedCpuVehicleForceAccess {
     }
 
     template<bool NativeBinary32>
-    static void ComputeForces(
+    static FV_E019_HOT_NOINLINE void ComputeForces(
             CSceneVehicleCar &car,
             CHmsDyna &dyna,
             float dt,
-            const OptimizedCpuCompiledModel6Tuning *compiledModel6) {
+            const OptimizedCpuCompiledModel6Tuning *compiledModel6,
+            bool reuseIntegratedLinearSpeed,
+            forevervalidator::simulation::
+                    OptimizedCpuVehicleCollisionBoundsPlan
+                            *collisionBoundsPlan) {
         GmVec3 savedForce;
         GmVec3 savedImpulse;
         car.SaveAndClearAccumulatedFeedback(savedForce, savedImpulse);
@@ -1844,7 +1861,9 @@ struct OptimizedCpuVehicleForceAccess {
         }
 
         car.CreateFakeContacts();
-        IntegrateVehicle<NativeBinary32>(car, dt);
+        GmVec3 linearSpeed;
+        IntegrateVehicle<NativeBinary32>(
+                car, dt, linearSpeed, collisionBoundsPlan);
 
         u32 tick = CMwCmdBufferCore::Current()->Timer().GetTickTime();
         int isGroundContact = car.IsGroundContact();
@@ -1855,7 +1874,6 @@ struct OptimizedCpuVehicleForceAccess {
             return;
         }
 
-        GmVec3 linearSpeed;
         GmVec3 angularSpeed;
         GmVec3 currentForce;
         CSceneVehicleMaterial::SBlendableVals materialVals = {
@@ -1867,7 +1885,12 @@ struct OptimizedCpuVehicleForceAccess {
         int modelSlipFlag = 0;
         int hasSideSpeedKillContact = 0;
         int hasAnyContact = 0;
-        car.HmsItem()->GetLinearSpeed(linearSpeed);
+        // Wheel integration itself does not change item speed. Reuse its
+        // authoritative pre-integration read only when the bound observer also
+        // certifies that its wheel-update callback preserves dynamics.
+        if (!reuseIntegratedLinearSpeed) {
+            car.HmsItem()->GetLinearSpeed(linearSpeed);
+        }
 
         float surfaceFeedback = 0.0f;
         if (car.integration.zeroHorizontalSpeed) {
@@ -1993,23 +2016,45 @@ void OptimizedCpuVehicleForceContext::BeginTick(
 
     CSceneVehicleCarTuning *tuning =
             OptimizedCpuVehicleForceAccess::ActiveTuning(car);
+    CPlugTree *collisionTree = item->Solid() != nullptr
+            ? item->Solid()->CollisionTree()
+            : nullptr;
+    CSceneVehicleCarWheelSurfaceObserver *wheelSurfaceObserver =
+            OptimizedCpuVehicleForceAccess::WheelSurfaceObserver(car);
     const bool identityChanged =
-            car_ != &car || item_ != item || tuning_ != tuning;
+            car_ != &car || item_ != item || tuning_ != tuning ||
+            collisionTree_ != collisionTree;
     if (identityChanged) {
         car_ = &car;
         item_ = item;
         tuning_ = tuning;
+        collisionTree_ = collisionTree;
+        wheelSurfaceObserver_ = wheelSurfaceObserver;
+        wheelSurfaceObserverPreservesDynamics_ =
+                car.WheelSurfaceObserverPreservesDynamics();
         canonicalCallback_ = enabledComputeForcesCallback;
         compiledModel6_.reset();
+        collisionBoundsPlan_.Clear();
+        collisionBoundsPlanAttempted_ = false;
         stableEligible_ = false;
     } else if (canonicalCallback_ != enabledComputeForcesCallback) {
         return;
+    } else if (wheelSurfaceObserver_ != wheelSurfaceObserver) {
+        wheelSurfaceObserver_ = wheelSurfaceObserver;
+        wheelSurfaceObserverPreservesDynamics_ =
+                car.WheelSurfaceObserverPreservesDynamics();
     }
 
     if (!stableEligible_) {
         stableEligible_ =
                 OptimizedCpuVehicleForceAccess::HasStableEligibility(
                         car, item, tuning, mathPath);
+    }
+    if (stableEligible_ && !collisionBoundsPlanAttempted_) {
+        collisionBoundsPlanAttempted_ = true;
+        if (collisionTree_ != nullptr) {
+            (void)collisionBoundsPlan_.TryBuild(*collisionTree_);
+        }
     }
     if (stableEligible_ && tuning->handlingModel ==
             CSceneVehicleCarHandlingModel_GearedDrive) {
@@ -2049,8 +2094,13 @@ void OptimizedCpuVehicleForceContext::Reset(void) noexcept {
     car_ = nullptr;
     item_ = nullptr;
     tuning_ = nullptr;
+    collisionTree_ = nullptr;
+    wheelSurfaceObserver_ = nullptr;
     canonicalCallback_ = nullptr;
     compiledModel6_.reset();
+    collisionBoundsPlan_.Clear();
+    collisionBoundsPlanAttempted_ = false;
+    wheelSurfaceObserverPreservesDynamics_ = true;
     stableEligible_ = false;
     tickEligible_ = false;
 }
@@ -2060,6 +2110,8 @@ bool OptimizedCpuVehicleForceContext::WouldUseSpecializationFor(
     return tickEligible_ && car_ != nullptr && item_ != nullptr &&
            tuning_ != nullptr && item == item_ && car_->HmsItem() == item_ &&
            item_->SceneMobilOwner() == car_ &&
+           OptimizedCpuVehicleForceAccess::WheelSurfaceObserver(*car_) ==
+                   wheelSurfaceObserver_ &&
            car_->ArePhysicsUpdatesEnabled() != 0 &&
            OptimizedCpuVehicleForceAccess::ActiveTuning(*car_) ==
                    tuning_ &&
@@ -2094,6 +2146,10 @@ bool OptimizedCpuVehicleForceContext::TryComputeOwnerForces(
             tuning_->handlingModel ==
                     CSceneVehicleCarHandlingModel_GearedDrive
                     ? compiledModel6_.get()
+                    : nullptr,
+            wheelSurfaceObserverPreservesDynamics_,
+            collisionBoundsPlan_.IsFor(collisionTree_)
+                    ? &collisionBoundsPlan_
                     : nullptr);
     return true;
 }

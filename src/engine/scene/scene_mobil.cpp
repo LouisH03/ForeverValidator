@@ -139,6 +139,29 @@ public:
                         : nullptr);
     }
 
+    bool Matches(CHmsItem &item,
+                 bool physicsUpdatesEnabled,
+                 bool absorbContactEnabled) {
+        auto *computeForces = physicsUpdatesEnabled
+                ? static_cast<CHmsItem::CCallbackComputeForces *>(
+                          &callbacks_)
+                : nullptr;
+        auto *afterContacts = physicsUpdatesEnabled
+                ? static_cast<CHmsItem::CCallbackAfterContacts *>(
+                          &callbacks_)
+                : nullptr;
+        auto *absorbContact = absorbContactEnabled
+                ? static_cast<CHmsItem::CCallbackAbsorbContact *>(
+                          &callbacks_)
+                : nullptr;
+        return item.CallbackGet(CHmsItem::ECallback_ComputeForces) ==
+                       computeForces &&
+               item.CallbackGet(CHmsItem::ECallback_AfterContacts) ==
+                       afterContacts &&
+               item.CallbackGet(CHmsItem::ECallback_AbsorbContact) ==
+                       absorbContact;
+    }
+
     void Uninstall(CHmsItem &item) {
         auto *computeForces =
                 static_cast<CHmsItem::CCallbackComputeForces *>(&callbacks_);
@@ -406,6 +429,30 @@ void CSceneMobil::EnablePhysicsUpdates(int enabled) {
     }
     for (CHmsItem *triggerItem : triggerPhysicsItems) {
         if (triggerItem != nullptr) {
+            RefreshPhysicsCallbacks(*triggerItem);
+        }
+    }
+}
+
+void CSceneMobil::EnsurePhysicsCallbacks(
+        int absorbContactEnabledValue,
+        int physicsUpdatesEnabledValue) {
+    absorbContactEnabled = absorbContactEnabledValue != 0;
+    physicsUpdatesEnabled = physicsUpdatesEnabledValue != 0;
+    CHmsItem *item = HmsItem();
+    if (item != nullptr &&
+        !callbackBinding->Matches(
+                *item,
+                physicsUpdatesEnabled,
+                absorbContactEnabled)) {
+        RefreshPhysicsCallbacks(*item);
+    }
+    for (CHmsItem *triggerItem : triggerPhysicsItems) {
+        if (triggerItem != nullptr &&
+            !callbackBinding->Matches(
+                    *triggerItem,
+                    physicsUpdatesEnabled,
+                    absorbContactEnabled)) {
             RefreshPhysicsCallbacks(*triggerItem);
         }
     }

@@ -1,10 +1,11 @@
-#include "simulation/backends/optimized_cpu/optimized_cpu_native_binary32_collision.h"
+#include "simulation/backends/optimized_cpu/optimized_cpu_ellipsoid_mesh_packet.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <typeinfo>
 
@@ -23,7 +24,12 @@
 
 namespace {
 
-constexpr std::size_t PacketWidth = 8u;
+constexpr std::size_t PacketWidth =
+        OptimizedCpuPreparedEllipsoidMeshPacket::Width;
+// Archived TMNF Stadium meshes in the broad replay corpus peak at depth 20.
+// Deeper valid meshes remain exact through the scalar fallback because the
+// certified depth is rejected before any packet collision is emitted.
+constexpr std::size_t PacketTraversalCapacity = 24u;
 
 bool IsFiniteTransform(const GmIso4 &transform) noexcept {
     const float values[] = {
@@ -48,33 +54,23 @@ bool IsFiniteTransform(const GmIso4 &transform) noexcept {
     return true;
 }
 
-struct RawPacketSetup {
-    std::array<GmIso4, PacketWidth> ellipsoidWorld{};
-    std::array<GmVec3, PacketWidth> radii{};
-    std::array<GmVec3, PacketWidth> inverseRadii{};
-    std::array<GmLocalMaterialIndex, PacketWidth> materials{};
-    std::array<CGmCollisionBuffer *, PacketWidth> buffers{};
-    std::uint32_t activeMask = 0u;
-};
-
-bool BuildRawPacketSetup(
+bool BuildPreparedPacket(
         const OptimizedCpuEllipsoidMeshPacketLane *lanes,
         std::size_t laneCount,
         std::uint32_t requestedMask,
-        const LocatedGmSurf &mesh,
-        const GmIso4 &meshInverse,
-        RawPacketSetup *setup) noexcept {
-    if (lanes == nullptr || setup == nullptr || laneCount < 2u ||
-        laneCount > PacketWidth || mesh.surf == nullptr || mesh.iso == nullptr ||
-        typeid(*mesh.surf) != typeid(GmSurfMesh) ||
-        !IsFiniteTransform(meshInverse)) {
+        OptimizedCpuPreparedEllipsoidMeshPacket *prepared) noexcept {
+    if (lanes == nullptr || prepared == nullptr || laneCount < 2u ||
+        laneCount > PacketWidth) {
         return false;
     }
     const std::uint32_t laneMask =
             (1u << static_cast<unsigned int>(laneCount)) - 1u;
     requestedMask &= laneMask;
+    OptimizedCpuPreparedEllipsoidMeshPacket candidate{};
+    candidate.laneCount = laneCount;
+    candidate.preparedMask = requestedMask;
     if (requestedMask == 0u) {
-        setup->activeMask = 0u;
+        *prepared = candidate;
         return true;
     }
 
@@ -97,23 +93,44 @@ bool BuildRawPacketSetup(
             !std::isfinite(radii.z)) {
             return false;
         }
-        setup->ellipsoidWorld[lane] = located->enabled == 0
+        const GmIso4 ellipsoidWorld = located->enabled == 0
                 ? GmIso4{
                       {{1.0f, 0.0f, 0.0f},
                        {0.0f, 1.0f, 0.0f},
                        {0.0f, 0.0f, 1.0f}},
                       {0.0f, 0.0f, 0.0f}}
                 : *located->iso;
-        setup->radii[lane] = radii;
-        setup->inverseRadii[lane] = {
-            1.0f / radii.x,
-            1.0f / radii.y,
-            1.0f / radii.z,
-        };
-        setup->materials[lane] = ellipsoid.material;
-        setup->buffers[lane] = lanes[lane].collisionBuffer;
+        candidate.worldXx.values[lane] =
+                ellipsoidWorld.rotation.basisX.x;
+        candidate.worldXy.values[lane] =
+                ellipsoidWorld.rotation.basisY.x;
+        candidate.worldXz.values[lane] =
+                ellipsoidWorld.rotation.basisZ.x;
+        candidate.worldYx.values[lane] =
+                ellipsoidWorld.rotation.basisX.y;
+        candidate.worldYy.values[lane] =
+                ellipsoidWorld.rotation.basisY.y;
+        candidate.worldYz.values[lane] =
+                ellipsoidWorld.rotation.basisZ.y;
+        candidate.worldZx.values[lane] =
+                ellipsoidWorld.rotation.basisX.z;
+        candidate.worldZy.values[lane] =
+                ellipsoidWorld.rotation.basisY.z;
+        candidate.worldZz.values[lane] =
+                ellipsoidWorld.rotation.basisZ.z;
+        candidate.worldTx.values[lane] = ellipsoidWorld.translation.x;
+        candidate.worldTy.values[lane] = ellipsoidWorld.translation.y;
+        candidate.worldTz.values[lane] = ellipsoidWorld.translation.z;
+        candidate.radiiX.values[lane] = radii.x;
+        candidate.radiiY.values[lane] = radii.y;
+        candidate.radiiZ.values[lane] = radii.z;
+        candidate.inverseRadiiX.values[lane] = 1.0f / radii.x;
+        candidate.inverseRadiiY.values[lane] = 1.0f / radii.y;
+        candidate.inverseRadiiZ.values[lane] = 1.0f / radii.z;
+        candidate.materials[lane] = ellipsoid.material;
+        candidate.buffers[lane] = lanes[lane].collisionBuffer;
     }
-    setup->activeMask = requestedMask;
+    *prepared = candidate;
     return true;
 }
 
@@ -154,16 +171,13 @@ FV_E031_INLINE __m256 Load(const std::array<float, PacketWidth> &values) {
 }
 
 FV_E031_INLINE __m256 MaskForBits(std::uint32_t bits) {
+    const __m256i bitValues = _mm256_setr_epi32(
+            0x01, 0x02, 0x04, 0x08,
+            0x10, 0x20, 0x40, 0x80);
+    const __m256i selected = _mm256_and_si256(
+            _mm256_set1_epi32(static_cast<int>(bits)), bitValues);
     return _mm256_castsi256_ps(
-            _mm256_set_epi32(
-                    (bits & 0x80u) != 0u ? -1 : 0,
-                    (bits & 0x40u) != 0u ? -1 : 0,
-                    (bits & 0x20u) != 0u ? -1 : 0,
-                    (bits & 0x10u) != 0u ? -1 : 0,
-                    (bits & 0x08u) != 0u ? -1 : 0,
-                    (bits & 0x04u) != 0u ? -1 : 0,
-                    (bits & 0x02u) != 0u ? -1 : 0,
-                    (bits & 0x01u) != 0u ? -1 : 0));
+            _mm256_cmpeq_epi32(selected, bitValues));
 }
 
 FV_E031_INLINE std::uint32_t Bits(__m256 mask) {
@@ -301,59 +315,24 @@ FV_E031_INLINE Vec3x8 Normalize(const Vec3x8 &value,
     };
 }
 
-template <typename Extract>
-FV_E031_INLINE __m256 LoadTransformComponent(
-        const std::array<GmIso4, PacketWidth> &transforms,
-        Extract extract) {
-    alignas(32) std::array<float, PacketWidth> values{};
-    for (std::size_t lane = 0u; lane < PacketWidth; ++lane) {
-        values[lane] = extract(transforms[lane]);
-    }
-    return Load(values);
-}
-
 FV_E031_INLINE Iso3x8 LoadIso(
-        const std::array<GmIso4, PacketWidth> &transforms) {
+        const OptimizedCpuPreparedEllipsoidMeshPacket &prepared) {
     return {
         {
-            LoadTransformComponent(transforms, [](const GmIso4 &iso) {
-                return iso.rotation.basisX.x;
-            }),
-            LoadTransformComponent(transforms, [](const GmIso4 &iso) {
-                return iso.rotation.basisY.x;
-            }),
-            LoadTransformComponent(transforms, [](const GmIso4 &iso) {
-                return iso.rotation.basisZ.x;
-            }),
-            LoadTransformComponent(transforms, [](const GmIso4 &iso) {
-                return iso.rotation.basisX.y;
-            }),
-            LoadTransformComponent(transforms, [](const GmIso4 &iso) {
-                return iso.rotation.basisY.y;
-            }),
-            LoadTransformComponent(transforms, [](const GmIso4 &iso) {
-                return iso.rotation.basisZ.y;
-            }),
-            LoadTransformComponent(transforms, [](const GmIso4 &iso) {
-                return iso.rotation.basisX.z;
-            }),
-            LoadTransformComponent(transforms, [](const GmIso4 &iso) {
-                return iso.rotation.basisY.z;
-            }),
-            LoadTransformComponent(transforms, [](const GmIso4 &iso) {
-                return iso.rotation.basisZ.z;
-            }),
+            Load(prepared.worldXx.values),
+            Load(prepared.worldXy.values),
+            Load(prepared.worldXz.values),
+            Load(prepared.worldYx.values),
+            Load(prepared.worldYy.values),
+            Load(prepared.worldYz.values),
+            Load(prepared.worldZx.values),
+            Load(prepared.worldZy.values),
+            Load(prepared.worldZz.values),
         },
         {
-            LoadTransformComponent(transforms, [](const GmIso4 &iso) {
-                return iso.translation.x;
-            }),
-            LoadTransformComponent(transforms, [](const GmIso4 &iso) {
-                return iso.translation.y;
-            }),
-            LoadTransformComponent(transforms, [](const GmIso4 &iso) {
-                return iso.translation.z;
-            }),
+            Load(prepared.worldTx.values),
+            Load(prepared.worldTy.values),
+            Load(prepared.worldTz.values),
         },
     };
 }
@@ -370,17 +349,6 @@ FV_E031_INLINE void Store(const Vec3x8 &value,
     Store(value.x, x);
     Store(value.y, y);
     Store(value.z, z);
-}
-
-FV_E031_INLINE Vec3x8 LoadVectors(
-        const std::array<GmVec3, PacketWidth> &vectors) {
-    alignas(32) std::array<float, PacketWidth> x{}, y{}, z{};
-    for (std::size_t lane = 0u; lane < PacketWidth; ++lane) {
-        x[lane] = vectors[lane].x;
-        y[lane] = vectors[lane].y;
-        z[lane] = vectors[lane].z;
-    }
-    return {Load(x), Load(y), Load(z)};
 }
 
 FV_E031_INLINE Iso3x8 BroadcastIso(const GmIso4 &transform) {
@@ -522,13 +490,154 @@ FV_E031_INLINE __m256 BoundsMask(const Boxx8 &queries,
     return AndNot(Or(Or(rejectZ, rejectY), rejectX), activeMask);
 }
 
+struct PacketGroupQueryBounds {
+    __m128 minimumCenter;
+    __m128 maximumCenter;
+    __m128 maximumHalfExtents;
+};
+
+FV_E031_INLINE __m256i InvalidPacketGroupFloatLanes(
+        __m256 values,
+        bool rejectNegative) {
+    const __m256i bits = _mm256_castps_si256(values);
+    const __m256i magnitude = _mm256_and_si256(
+            bits, _mm256_set1_epi32(0x7fffffffu));
+    const __m256i exponent = _mm256_srli_epi32(magnitude, 23u);
+    const __m256i zero = _mm256_cmpeq_epi32(
+            magnitude, _mm256_setzero_si256());
+    const __m256i belowMinimum = _mm256_cmpgt_epi32(
+            _mm256_set1_epi32(67), exponent);
+    const __m256i aboveMaximum = _mm256_cmpgt_epi32(
+            exponent, _mm256_set1_epi32(187));
+    __m256i invalid = _mm256_andnot_si256(
+            zero, _mm256_or_si256(belowMinimum, aboveMaximum));
+    if (rejectNegative) {
+        invalid = _mm256_or_si256(
+                invalid, _mm256_srai_epi32(bits, 31u));
+    }
+    return invalid;
+}
+
+FV_E031_INLINE float HorizontalMinimum(__m256 values) {
+    values = _mm256_min_ps(
+            values, _mm256_permute2f128_ps(values, values, 0x01));
+    values = _mm256_min_ps(
+            values,
+            _mm256_permute_ps(values, _MM_SHUFFLE(1, 0, 3, 2)));
+    values = _mm256_min_ps(
+            values,
+            _mm256_permute_ps(values, _MM_SHUFFLE(2, 3, 0, 1)));
+    return _mm_cvtss_f32(_mm256_castps256_ps128(values));
+}
+
+FV_E031_INLINE float HorizontalMaximum(__m256 values) {
+    values = _mm256_max_ps(
+            values, _mm256_permute2f128_ps(values, values, 0x01));
+    values = _mm256_max_ps(
+            values,
+            _mm256_permute_ps(values, _MM_SHUFFLE(1, 0, 3, 2)));
+    values = _mm256_max_ps(
+            values,
+            _mm256_permute_ps(values, _MM_SHUFFLE(2, 3, 0, 1)));
+    return _mm_cvtss_f32(_mm256_castps256_ps128(values));
+}
+
+FV_E031_AVX2 bool BuildPacketGroupQueryBounds(
+        const Boxx8 &queries,
+        std::uint32_t activeMask,
+        PacketGroupQueryBounds *result) noexcept {
+    if (result == nullptr || activeMask == 0u) {
+        return false;
+    }
+    const __m256 laneMask = MaskForBits(activeMask);
+    __m256i invalid = InvalidPacketGroupFloatLanes(
+            queries.center.x, false);
+    invalid = _mm256_or_si256(
+            invalid,
+            InvalidPacketGroupFloatLanes(queries.center.y, false));
+    invalid = _mm256_or_si256(
+            invalid,
+            InvalidPacketGroupFloatLanes(queries.center.z, false));
+    invalid = _mm256_or_si256(
+            invalid,
+            InvalidPacketGroupFloatLanes(queries.halfExtents.x, true));
+    invalid = _mm256_or_si256(
+            invalid,
+            InvalidPacketGroupFloatLanes(queries.halfExtents.y, true));
+    invalid = _mm256_or_si256(
+            invalid,
+            InvalidPacketGroupFloatLanes(queries.halfExtents.z, true));
+    invalid = _mm256_and_si256(invalid, _mm256_castps_si256(laneMask));
+    if (_mm256_movemask_ps(_mm256_castsi256_ps(invalid)) != 0) {
+        return false;
+    }
+
+    const __m256 positiveInfinity =
+            _mm256_set1_ps(std::numeric_limits<float>::infinity());
+    const __m256 negativeInfinity =
+            _mm256_set1_ps(-std::numeric_limits<float>::infinity());
+    const __m256 zero = _mm256_setzero_ps();
+    result->minimumCenter = _mm_set_ps(
+            0.0f,
+            HorizontalMinimum(_mm256_blendv_ps(
+                    positiveInfinity, queries.center.z, laneMask)),
+            HorizontalMinimum(_mm256_blendv_ps(
+                    positiveInfinity, queries.center.y, laneMask)),
+            HorizontalMinimum(_mm256_blendv_ps(
+                    positiveInfinity, queries.center.x, laneMask)));
+    result->maximumCenter = _mm_set_ps(
+            0.0f,
+            HorizontalMaximum(_mm256_blendv_ps(
+                    negativeInfinity, queries.center.z, laneMask)),
+            HorizontalMaximum(_mm256_blendv_ps(
+                    negativeInfinity, queries.center.y, laneMask)),
+            HorizontalMaximum(_mm256_blendv_ps(
+                    negativeInfinity, queries.center.x, laneMask)));
+    result->maximumHalfExtents = _mm_set_ps(
+            0.0f,
+            HorizontalMaximum(_mm256_blendv_ps(
+                    zero, queries.halfExtents.z, laneMask)),
+            HorizontalMaximum(_mm256_blendv_ps(
+                    zero, queries.halfExtents.y, laneMask)),
+            HorizontalMaximum(_mm256_blendv_ps(
+                    zero, queries.halfExtents.x, laneMask)));
+    return true;
+}
+
+FV_E031_INLINE bool PacketGroupRejectsAll(
+        const PacketGroupQueryBounds &queries,
+        const OptimizedCpuStaticMeshPacketGroup &group) {
+    const __m128 groupMinimumCenter =
+            _mm_loadu_ps(&group.minimumCenter.x);
+    const __m128 groupMaximumCenter =
+            _mm_loadu_ps(&group.maximumCenter.x);
+    __m128 groupMaximumHalfExtents;
+    std::memcpy(
+            &groupMaximumHalfExtents,
+            &group.maximumHalfExtents.x,
+            sizeof(groupMaximumHalfExtents));
+    groupMaximumHalfExtents = _mm_blend_ps(
+            groupMaximumHalfExtents, _mm_setzero_ps(), 0x8);
+    const __m128 reach = _mm_add_ps(
+            groupMaximumHalfExtents, queries.maximumHalfExtents);
+    const __m128 rejectLeft = _mm_cmp_ps(
+            reach,
+            _mm_sub_ps(groupMinimumCenter, queries.maximumCenter),
+            _CMP_LT_OQ);
+    const __m128 rejectRight = _mm_cmp_ps(
+            reach,
+            _mm_sub_ps(queries.minimumCenter, groupMaximumCenter),
+            _CMP_LT_OQ);
+    return (_mm_movemask_ps(_mm_or_ps(rejectLeft, rejectRight)) & 0x7) != 0;
+}
+
 struct PacketExecution {
-    const RawPacketSetup &setup;
+    const OptimizedCpuPreparedEllipsoidMeshPacket &setup;
     Iso3x8 meshToUnit;
     Iso3x8 meshToEllipsoid;
     Vec3x8 radii;
     Vec3x8 inverseRadii;
-    Iso3x8 meshWorld;
+    const GmIso4 *meshWorldSource = nullptr;
     Boxx8 meshBounds;
     __m256 packetMask;
     Iso3x8 contactToWorld{};
@@ -541,6 +650,7 @@ struct PacketExecution {
             return;
         }
         const Iso3x8 ellipsoidToMesh = Inverse(meshToEllipsoid);
+        const Iso3x8 meshWorld = BroadcastIso(*meshWorldSource);
         contactToWorld = Compose(
                 Compose(DiagonalTransform(radii), ellipsoidToMesh),
                 meshWorld);
@@ -873,88 +983,122 @@ struct PacketExecution {
 };
 
 FV_E031_AVX2 bool RunPacketAvx2(
-        const RawPacketSetup &setup,
-        const LocatedGmSurf &mesh,
+        const OptimizedCpuPreparedEllipsoidMeshPacket &setup,
+        std::uint32_t activeMask,
+        const GmIso4 &meshIso,
         const GmIso4 &meshInverse,
         const OptimizedCpuStaticMeshTriangleSidecar &triangles,
+        const OptimizedCpuStaticMeshTriangleHierarchyView &hierarchy,
         std::uint32_t *hitMask) noexcept {
-    const Iso3x8 ellipsoidWorld = LoadIso(setup.ellipsoidWorld);
-    const Vec3x8 radii = LoadVectors(setup.radii);
-    const Vec3x8 inverseRadii = LoadVectors(setup.inverseRadii);
-    const Iso3x8 ellipsoidToMesh = mesh.enabled == 0
-            ? ellipsoidWorld
-            : Compose(ellipsoidWorld, BroadcastIso(meshInverse));
+    if (hierarchy.packetCells == nullptr ||
+        hierarchy.count == 0u ||
+        hierarchy.maximumTraversalDepth > PacketTraversalCapacity) {
+        return false;
+    }
+    const Iso3x8 ellipsoidWorld = LoadIso(setup);
+    const Vec3x8 radii = {
+        Load(setup.radiiX.values),
+        Load(setup.radiiY.values),
+        Load(setup.radiiZ.values),
+    };
+    const Vec3x8 inverseRadii = {
+        Load(setup.inverseRadiiX.values),
+        Load(setup.inverseRadiiY.values),
+        Load(setup.inverseRadiiZ.values),
+    };
+    const Iso3x8 ellipsoidToMesh =
+            Compose(ellipsoidWorld, BroadcastIso(meshInverse));
     const Boxx8 meshBounds =
             TransformEllipsoidBox(ellipsoidToMesh, radii);
     const Iso3x8 meshToEllipsoid = Inverse(ellipsoidToMesh);
+    PacketGroupQueryBounds packetGroupQueries;
+    constexpr unsigned int MxcsrControlMask = 0xffc0u;
+    constexpr unsigned int DeterministicMxcsrControl = 0x1f80u;
+    const unsigned int mxcsr = _mm_getcsr();
+    // The conservative group arithmetic can add only FE_INEXACT for certified
+    // operands. Run it only when that sticky status is already set and the
+    // default rounding/denormal controls are active; otherwise preserve the
+    // authoritative per-cell path without executing extra floating work.
+    const bool usePacketGroups =
+            hierarchy.packetGroups != nullptr &&
+            hierarchy.packetGroupCount != 0u &&
+            (mxcsr & MxcsrControlMask) == DeterministicMxcsrControl &&
+            (mxcsr & _MM_EXCEPT_INEXACT) != 0u &&
+            BuildPacketGroupQueryBounds(
+                    meshBounds, activeMask, &packetGroupQueries);
+    const std::uint16_t packetGroupOrdinalMask = usePacketGroups
+            ? std::numeric_limits<std::uint16_t>::max()
+            : 0u;
     PacketExecution execution{
         setup,
         ScaleRows(meshToEllipsoid, inverseRadii),
         meshToEllipsoid,
         radii,
         inverseRadii,
-        BroadcastIso(*mesh.iso),
+        &meshIso,
         meshBounds,
-        MaskForBits(setup.activeMask),
+        MaskForBits(activeMask),
         {},
         {},
         false,
         0u,
     };
 
-    OptimizedCpuStaticMeshTriangleHierarchyView hierarchy;
-    if (!triangles.TriangleHierarchyView(&hierarchy)) {
-        return false;
-    }
-
-    struct TraversalFrame {
-        u32 end = 0u;
-        __m256 laneMask{};
+    struct alignas(32) TraversalMask {
+        __m256 value;
     };
-    alignas(32) std::array<TraversalFrame, 64u> traversal{};
-    std::size_t traversalDepth = 0u;
+    // The sidecar certifies each cell's DFS depth. Branch masks are written at
+    // their certified depth before any descendant reads them, eliminating the
+    // runtime subtree-end stack and pop loop.
+    std::array<TraversalMask, PacketTraversalCapacity> traversalMasks;
 
-    for (u32 cellIndex = 0u;
-         cellIndex < hierarchy.count;) {
-        while (traversalDepth != 0u &&
-               traversal[traversalDepth - 1u].end <= cellIndex) {
-            --traversalDepth;
+    // The sidecar's topology certificate guarantees that every subtree skip
+    // remains within this contiguous descriptor range.
+    const OptimizedCpuStaticMeshPacketCell *cell = hierarchy.packetCells;
+    const OptimizedCpuStaticMeshPacketCell *const cellEnd =
+            cell + hierarchy.count;
+    while (cell != cellEnd) {
+        const std::size_t traversalDepth = cell->depth;
+        const std::uint16_t packetGroupOrdinal =
+                cell->packetGroupOrdinal & packetGroupOrdinalMask;
+        if (packetGroupOrdinal != 0u) {
+            const std::size_t groupIndex =
+                    static_cast<std::size_t>(packetGroupOrdinal - 1u);
+            const OptimizedCpuStaticMeshPacketGroup &group =
+                    hierarchy.packetGroups[groupIndex];
+            if (PacketGroupRejectsAll(packetGroupQueries, group)) {
+                cell += group.subtreeEntryCount;
+                continue;
+            }
         }
-        const GmMeshOctreeCell &cell = hierarchy.cells[cellIndex];
         const __m256 parentMask = traversalDepth == 0u
                 ? execution.packetMask
-                : traversal[traversalDepth - 1u].laneMask;
+                : traversalMasks[traversalDepth - 1u].value;
         __m256 laneMask = BoundsMask(
                 execution.meshBounds,
-                cell.Bounds(),
+                cell->bounds,
                 parentMask);
         std::uint32_t laneBits = Bits(laneMask);
         if (laneBits == 0u) {
-            cellIndex += cell.SubtreeEntryCount();
+            cell += cell->subtreeEntryCount;
             continue;
         }
-        if (!cell.ContainsTriangle()) {
-            if (traversalDepth == traversal.size()) {
+        if (!cell->ContainsTriangle()) {
+            if (traversalDepth == traversalMasks.size()) {
                 return false;
             }
-            traversal[traversalDepth++] = {
-                cellIndex + cell.SubtreeEntryCount(),
-                laneMask,
-            };
-            ++cellIndex;
+            traversalMasks[traversalDepth].value = laneMask;
+            ++cell;
             continue;
         }
 
-        const u32 postingIndex = hierarchy.postingIndices[cellIndex];
-        if (postingIndex == std::numeric_limits<u32>::max()) {
-            return false;
-        }
-        ++cellIndex;
-        const OptimizedCpuStaticMeshDirectTrianglePosting &posting =
-                triangles.DirectTriangleAt(postingIndex);
+        const u32 triangleIndex = cell->triangleIndex;
+        ++cell;
         const OptimizedCpuStaticMeshTriangleData &triangle =
-                triangles.TriangleAt(posting.triangleIndex);
-        laneMask = MaskForBits(laneBits);
+                triangles.TriangleAt(triangleIndex);
+        // BoundsMask and every parent mask use canonical all-zero/all-one
+        // lanes, so converting through movemask and rebuilding the vector is
+        // redundant. Preserve the exact mask produced by the bounds test.
         execution.CollideTriangle(triangle, laneMask);
     }
     *hitMask = execution.hitMask;
@@ -970,8 +1114,100 @@ FV_E031_AVX2 bool RunPacketAvx2(
 
 bool OptimizedCpuEllipsoidMeshPacketAvailable(void) noexcept {
 #if FV_E031_HAS_X86_PACKET
-    __builtin_cpu_init();
-    return __builtin_cpu_supports("avx2");
+    static const bool available = []() noexcept {
+        __builtin_cpu_init();
+        return __builtin_cpu_supports("avx2") != 0;
+    }();
+    return available;
+#else
+    return false;
+#endif
+}
+
+bool PrepareOptimizedCpuEllipsoidMeshPacket(
+        const OptimizedCpuEllipsoidMeshPacketLane *lanes,
+        std::size_t laneCount,
+        std::uint32_t preparedMask,
+        OptimizedCpuPreparedEllipsoidMeshPacket *prepared) noexcept {
+    if (!OptimizedCpuEllipsoidMeshPacketAvailable()) {
+        return false;
+    }
+    return BuildPreparedPacket(
+            lanes, laneCount, preparedMask, prepared);
+}
+
+bool GmCollision_PreparedEllipsoidPacket_Mesh_InlineMathOptimizedCpuNativeBinary32WithStaticCache(
+        const OptimizedCpuPreparedEllipsoidMeshPacket &prepared,
+        std::uint32_t activeMask,
+        const LocatedGmSurf &mesh,
+        const GmIso4 &meshInverse,
+        const OptimizedCpuStaticMeshTriangleSidecar &triangles,
+        std::uint32_t *hitMask) noexcept {
+    if (hitMask == nullptr || prepared.laneCount < 2u ||
+        prepared.laneCount > PacketWidth) {
+        return false;
+    }
+    *hitMask = 0u;
+    const std::uint32_t laneMask =
+            (1u << static_cast<unsigned int>(prepared.laneCount)) - 1u;
+    activeMask &= laneMask;
+    if ((activeMask & ~prepared.preparedMask) != 0u ||
+        mesh.surf == nullptr || mesh.iso == nullptr ||
+        typeid(*mesh.surf) != typeid(GmSurfMesh) ||
+        !IsFiniteTransform(meshInverse) ||
+        !triangles.IsFor(static_cast<const GmSurfMesh &>(*mesh.surf))) {
+        return false;
+    }
+    if (activeMask == 0u) {
+        return true;
+    }
+#if FV_E031_HAS_X86_PACKET
+    OptimizedCpuStaticMeshTriangleHierarchyView hierarchy;
+    if (!triangles.TriangleHierarchyView(&hierarchy)) {
+        return false;
+    }
+    return RunPacketAvx2(
+            prepared,
+            activeMask,
+            *mesh.iso,
+            meshInverse,
+            triangles,
+            hierarchy,
+            hitMask);
+#else
+    return false;
+#endif
+}
+
+bool GmCollision_PreparedEllipsoidPacket_Mesh_InlineMathOptimizedCpuNativeBinary32WithCertifiedStaticMesh(
+        const OptimizedCpuPreparedEllipsoidMeshPacket &prepared,
+        std::uint32_t activeMask,
+        const OptimizedCpuCertifiedStaticMeshPacket &mesh,
+        std::uint32_t *hitMask) noexcept {
+    if (hitMask == nullptr || prepared.laneCount < 2u ||
+        prepared.laneCount > PacketWidth) {
+        return false;
+    }
+    *hitMask = 0u;
+    const std::uint32_t laneMask =
+            (1u << static_cast<unsigned int>(prepared.laneCount)) - 1u;
+    activeMask &= laneMask;
+    if ((activeMask & ~prepared.preparedMask) != 0u ||
+        !mesh.IsAvailable()) {
+        return false;
+    }
+    if (activeMask == 0u) {
+        return true;
+    }
+#if FV_E031_HAS_X86_PACKET
+    return RunPacketAvx2(
+            prepared,
+            activeMask,
+            mesh.meshIso,
+            mesh.meshInverse,
+            *mesh.triangles,
+            mesh.hierarchy,
+            hitMask);
 #else
     return false;
 #endif
@@ -993,19 +1229,21 @@ bool GmCollision_EllipsoidPacket_Mesh_InlineMathOptimizedCpuNativeBinary32WithSt
         !triangles.IsFor(static_cast<const GmSurfMesh &>(*mesh.surf))) {
         return false;
     }
-    RawPacketSetup rawSetup;
-    if (!BuildRawPacketSetup(
-                lanes, laneCount, activeMask, mesh, meshInverse, &rawSetup)) {
+    if (mesh.iso == nullptr || !IsFiniteTransform(meshInverse)) {
         return false;
     }
-    if (rawSetup.activeMask == 0u) {
-        return true;
+    OptimizedCpuPreparedEllipsoidMeshPacket prepared;
+    if (!BuildPreparedPacket(
+                lanes, laneCount, activeMask, &prepared)) {
+        return false;
     }
-#if FV_E031_HAS_X86_PACKET
-    return RunPacketAvx2(rawSetup, mesh, meshInverse, triangles, hitMask);
-#else
-    return false;
-#endif
+    return GmCollision_PreparedEllipsoidPacket_Mesh_InlineMathOptimizedCpuNativeBinary32WithStaticCache(
+            prepared,
+            activeMask,
+            mesh,
+            meshInverse,
+            triangles,
+            hitMask);
 }
 
 #undef FV_E031_HAS_X86_PACKET

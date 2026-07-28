@@ -100,6 +100,9 @@ public:
     virtual int GetIsVisible(void) const;
     void EnableAbsorbContactCallback(int enabled);
     void EnablePhysicsUpdates(int enabled);
+    void EnsurePhysicsCallbacks(
+            int absorbContactEnabled,
+            int physicsUpdatesEnabled);
     int IsAbsorbContactEnabled(void) const;
     int ArePhysicsUpdatesEnabled(void) const;
     virtual void AbsorbContact(CHmsPhysicalContact &contact);

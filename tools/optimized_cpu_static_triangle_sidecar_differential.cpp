@@ -441,6 +441,127 @@ bool RunShuffledPostingOrderCase(void) {
                    identity);
 }
 
+bool RunTraversalDepthCases(void) {
+    const GmBoxAligned bounds = {
+        {0.5f, 0.5f, 0.0f},
+        {0.5f, 0.5f, 0.0f},
+    };
+    std::vector<GmMeshOctreeCell> nested = {
+        GmMeshOctreeCell::Branch(bounds),
+        GmMeshOctreeCell::Branch(bounds),
+        GmMeshOctreeCell::Branch(bounds),
+        GmMeshOctreeCell::Triangle(bounds, 0u),
+    };
+    nested[0u].SetSubtreeEntryCount(4u);
+    nested[1u].SetSubtreeEntryCount(3u);
+    nested[2u].SetSubtreeEntryCount(2u);
+
+    std::size_t measuredDepth = 0u;
+    if (!MeasureOptimizedCpuStaticMeshTraversalDepth(
+                nested.data(), nested.size(), &measuredDepth) ||
+        measuredDepth != 3u) {
+        std::fprintf(stderr, "nested traversal depth differs\n");
+        return false;
+    }
+
+    GmSurfMesh nestedMesh;
+    if (!nestedMesh.SetGeometry(
+                {{0.0f, 0.0f, 0.0f},
+                 {1.0f, 0.0f, 0.0f},
+                 {0.0f, 1.0f, 0.0f}},
+                {Triangle(0u, 1u, 2u)},
+                nested,
+                GmSurfMesh::PlaneSource::Archived)) {
+        std::fprintf(stderr, "nested traversal mesh construction failed\n");
+        return false;
+    }
+    OptimizedCpuStaticMeshTriangleSidecar nestedSidecar;
+    OptimizedCpuStaticMeshTriangleHierarchyView hierarchy;
+    if (!nestedSidecar.TryBuild(nestedMesh) ||
+        nestedSidecar.MaximumTraversalDepth() != 3u ||
+        !nestedSidecar.TriangleHierarchyView(&hierarchy) ||
+        hierarchy.depths == nullptr ||
+        hierarchy.packetCells == nullptr ||
+        hierarchy.maximumTraversalDepth != 3u) {
+        std::fprintf(stderr, "nested traversal certificate differs\n");
+        return false;
+    }
+    const std::array<std::uint8_t, 4u> expectedDepths = {0u, 1u, 2u, 3u};
+    for (std::size_t cellIndex = 0u;
+         cellIndex < expectedDepths.size();
+         ++cellIndex) {
+        const GmMeshOctreeCell &source = nested[cellIndex];
+        const OptimizedCpuStaticMeshPacketCell &packet =
+                hierarchy.packetCells[cellIndex];
+        if (hierarchy.depths[cellIndex] != expectedDepths[cellIndex] ||
+            packet.depth != expectedDepths[cellIndex] ||
+            std::memcmp(&packet.bounds,
+                        &source.Bounds(),
+                        sizeof(packet.bounds)) != 0 ||
+            packet.subtreeEntryCount != source.SubtreeEntryCount() ||
+            packet.ContainsTriangle() != source.ContainsTriangle() ||
+            (source.ContainsTriangle() &&
+             packet.triangleIndex != source.TriangleIndex())) {
+            std::fprintf(stderr,
+                         "nested traversal cell %zu descriptor differs\n",
+                         cellIndex);
+            return false;
+        }
+    }
+
+    const auto rejected = [](const char *name,
+                             const std::vector<GmMeshOctreeCell> &cells) {
+        std::size_t output = 0x5a5a5a5au;
+        if (MeasureOptimizedCpuStaticMeshTraversalDepth(
+                    cells.data(), cells.size(), &output) ||
+            output != 0x5a5a5a5au) {
+            std::fprintf(stderr, "%s traversal topology was accepted\n",
+                         name);
+            return false;
+        }
+        return true;
+    };
+
+    std::vector<GmMeshOctreeCell> shortRoot = nested;
+    shortRoot[0u].SetSubtreeEntryCount(3u);
+
+    std::vector<GmMeshOctreeCell> crossing = {
+        GmMeshOctreeCell::Branch(bounds),
+        GmMeshOctreeCell::Branch(bounds),
+        GmMeshOctreeCell::Branch(bounds),
+        GmMeshOctreeCell::Triangle(bounds, 0u),
+        GmMeshOctreeCell::Triangle(bounds, 0u),
+    };
+    crossing[0u].SetSubtreeEntryCount(5u);
+    crossing[1u].SetSubtreeEntryCount(3u);
+    crossing[2u].SetSubtreeEntryCount(3u);
+
+    std::vector<GmMeshOctreeCell> emptyBranch = {
+        GmMeshOctreeCell::Branch(bounds),
+        GmMeshOctreeCell::Branch(bounds),
+    };
+    emptyBranch[0u].SetSubtreeEntryCount(2u);
+
+    std::vector<GmMeshOctreeCell> spanningTriangle = {
+        GmMeshOctreeCell::Branch(bounds),
+        GmMeshOctreeCell::Triangle(bounds, 0u),
+    };
+    spanningTriangle[0u].SetSubtreeEntryCount(2u);
+    spanningTriangle[1u].SetSubtreeEntryCount(2u);
+
+    std::size_t emptyDepth = 0x5a5a5a5au;
+    if (!MeasureOptimizedCpuStaticMeshTraversalDepth(
+                nullptr, 0u, &emptyDepth) ||
+        emptyDepth != 0u ||
+        !rejected("short-root", shortRoot) ||
+        !rejected("crossing-subtree", crossing) ||
+        !rejected("empty-branch", emptyBranch) ||
+        !rejected("spanning-triangle", spanningTriangle)) {
+        return false;
+    }
+    return true;
+}
+
 bool RunAllocationAndInvalidationCases(const GmSurfMesh &unit) {
     OptimizedCpuStaticMeshTriangleSidecar allocationFallback;
     failNextAllocation = true;
@@ -703,6 +824,7 @@ int main(void) {
         !CheckPrecomputedEdges("unit", unit, unitSidecar) ||
         !RunFocusedEdgeCases() ||
         !RunShuffledPostingOrderCase() ||
+        !RunTraversalDepthCases() ||
         !RunAllocationAndInvalidationCases(unit) ||
         !RunFloatingEnvironmentPreservationCase(unit) ||
         !RunMismatchFallback(unit, unitSidecar) ||
@@ -714,7 +836,8 @@ int main(void) {
     std::printf(
             "static_triangle_sidecar_query_cases=2054 "
             "uniform_grid_coverage_cases=4097 "
-            "lifecycle_cases=8 floating_environment_cases=1 "
+            "lifecycle_cases=8 traversal_depth_cases=6 "
+            "floating_environment_cases=1 "
             "result=identical\n");
     std::printf(
             "triangle_payload_bytes=%zu sidecar_object_bytes=%zu "

@@ -1042,6 +1042,24 @@ bool RunStaticContactTaggingCase(CPlugSurface &movingSurface,
     CHmsCollisionManager::SGroup::SAgainstGroup against;
     against.collisionGroupPair = &collisionGroupPair;
     CHmsCollisionManager::SZone zone(17u, nullptr);
+    SHmsSphereBufferContact *movingContact =
+            zone.EnsureTreeSphereContact(&movingTree);
+    SHmsSphereBufferContact *movingContactAgain =
+            zone.EnsureTreeSphereContact(&movingTree);
+    SHmsSphereBufferContact *staticContact =
+            zone.EnsureTreeSphereContact(&staticTree);
+    SHmsSphereBufferContact *nullContact =
+            zone.EnsureTreeSphereContact(nullptr);
+    SHmsSphereBufferContact *nullContactAgain =
+            zone.EnsureTreeSphereContact(nullptr);
+    if (movingContact == nullptr || movingContactAgain != movingContact ||
+        staticContact == nullptr || staticContact == movingContact ||
+        nullContact == nullptr || nullContactAgain != nullContact) {
+        std::fprintf(stderr,
+                     "%s sphere-contact routing cache differs\n",
+                     caseName);
+        return false;
+    }
     zone.SelectReplayStaticCollisionTarget(against);
     zone.BeginReplayStaticCollisionPass(&reference, &movingCorpus);
     zone.TagNewStaticCollisions(

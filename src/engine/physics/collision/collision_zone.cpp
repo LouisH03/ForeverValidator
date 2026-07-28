@@ -164,6 +164,7 @@ void CHmsCollisionManager::SZone::Reset(void) {
     manager = nullptr;
     nextCorpusRegistrationOrder = 0u;
     ownedSphereContacts.clear();
+    sphereContactCache = {};
     sphereBufferContacts.clear();
     InitGroupHeaders();
     AppendDefaultAgainstGroups();
