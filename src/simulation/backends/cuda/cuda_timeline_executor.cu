@@ -306,8 +306,6 @@ __device__ cuda::physics::Status StepAndRefineFinish(
 }
 
 __global__ void RefineFinishTimesKernel(
-        const void *sceneData,
-        const void *configurationData,
         CudaCandidateState *states,
         const DeviceTimelineDescriptor *descriptors,
         const CudaControlTick *ticks,
@@ -320,12 +318,18 @@ __global__ void RefineFinishTimesKernel(
     if (candidate >= candidateCount || !required[candidate]) {
         return;
     }
+    CudaCandidateState &state = states[candidate];
+    const DeviceTimelineDescriptor descriptor = descriptors[candidate];
+    const void *sceneData = descriptor.sceneData;
+    const void *configurationData = descriptor.configurationData;
+    if (!ValidPackedInputs(sceneData, configurationData)) {
+        outputs[candidate].failed = true;
+        return;
+    }
     auto *scene = static_cast<const CudaPackedSceneHeader *>(sceneData);
     auto *configuration =
             static_cast<const CudaPackedStaticConfigurationHeader *>(
                     configurationData);
-    CudaCandidateState &state = states[candidate];
-    const DeviceTimelineDescriptor descriptor = descriptors[candidate];
     for (std::uint32_t index = 0u;
          index < descriptor.tickCount; ++index) {
         const CudaControlTick &tick =
@@ -827,7 +831,6 @@ static CudaTimelineBatchResult ExecuteCudaTimelineBatchImpl(
             }
             cudaEventRecord(refinementStart.Get());
             RefineFinishTimesKernel<<<blocks, Threads>>>(
-                    deviceScene, deviceStaticConfiguration,
                     deviceStates.Get(), deviceDescriptors.Get(),
                     deviceTicks.Get(), deviceFinishRequired.Get(),
                     deviceFinishRefinements.Get(),
