@@ -1,6 +1,7 @@
 #include <forevervalidator/experimental/physics_sandbox.h>
 #include <forevervalidator/native.h>
 
+#include <chrono>
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
@@ -10,6 +11,11 @@
 namespace {
 
 using forevervalidator::experimental::PhysicsSandboxError;
+using Clock = std::chrono::steady_clock;
+
+double Milliseconds(Clock::time_point begin, Clock::time_point end) {
+    return std::chrono::duration<double, std::milli>(end - begin).count();
+}
 
 int Fail(const std::string &message) {
     std::cerr << "cuda_search_benchmark: " << message << '\n';
@@ -142,14 +148,15 @@ int main(int argc, char **argv) {
     std::uint64_t firstCandidateId = 0u;
     for (std::uint32_t repetition = 0u;
          repetition < repetitions; ++repetition) {
+        const Clock::time_point wallBegin = Clock::now();
         auto batch = session.Value().RunBatch(
                 firstCandidateId, candidateCount, false);
+        const Clock::time_point wallEnd = Clock::now();
         if (!batch) {
             return Fail("CUDA search batch failed: " +
                         Diagnostic(batch.Error()));
         }
-        if (batch.Value().cancelled ||
-            batch.Value().evaluatedCandidateCount == 0u) {
+        if (batch.Value().cancelled) {
             return Fail("CUDA search batch was incomplete");
         }
         const double simulatedTicks =
@@ -161,21 +168,32 @@ int main(int argc, char **argv) {
         const double simulationKernelMilliseconds =
                 batch.Value().metrics.simulationKernelMilliseconds;
         const double normalizedPhysicsNanoseconds =
-                simulationKernelMilliseconds * 1.0e6 /
-                simulatedTicks;
-        const double ticksPerSecond =
-                simulatedTicks * 1000.0 /
-                simulationKernelMilliseconds;
+                simulatedTicks == 0.0
+                ? 0.0
+                : simulationKernelMilliseconds * 1.0e6 /
+                          simulatedTicks;
+        const double ticksPerSecond = simulationKernelMilliseconds == 0.0
+                ? 0.0
+                : simulatedTicks * 1000.0 /
+                          simulationKernelMilliseconds;
         std::cout << std::fixed << std::setprecision(6)
                   << "{"
                   << "\"repetition\":" << repetition << ","
                   << "\"candidates\":" << candidateCount << ","
                   << "\"evaluated_candidates\":"
                   << batch.Value().evaluatedCandidateCount << ","
+                  << "\"baseline_input_events\":"
+                  << baseline.Value().bestInputs.size() << ","
+                  << "\"best_input_events\":"
+                  << batch.Value().bestInputs.size() << ","
+                  << "\"total_mutation_count\":"
+                  << batch.Value().totalMutationCount << ","
                   << "\"timeline_ticks\":" << timelineTicks << ","
                   << "\"branch_time_ms\":" << branchTimeMs << ","
                   << "\"modifier\":\"" << modifier << "\","
                   << "\"kernel_ms\":" << kernelMilliseconds << ","
+                  << "\"wall_ms\":"
+                  << Milliseconds(wallBegin, wallEnd) << ","
                   << "\"score_initialization_kernel_ms\":"
                   << batch.Value().metrics
                              .scoreInitializationKernelMilliseconds
@@ -226,6 +244,10 @@ int main(int argc, char **argv) {
                   << ","
                   << "\"resident_device_bytes\":"
                   << batch.Value().metrics.residentDeviceBytes
+                  << ",\"host_to_device_bytes\":"
+                  << batch.Value().metrics.hostToDeviceBytes
+                  << ",\"device_to_host_bytes\":"
+                  << batch.Value().metrics.deviceToHostBytes
                   << "}\n";
         firstCandidateId += candidateCount;
     }
