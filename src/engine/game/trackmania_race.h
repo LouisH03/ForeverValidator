@@ -131,6 +131,7 @@ public:
     void BindVehicle(CSceneVehicleCar *vehicle);
     void BindCheckpointCourse(
             ReplayStaticCorpusCollection *course);
+    void SetCurrentTransformCheckpointFreewheelClearEnabled(bool enabled);
     void SetInitialSpawnLocation(const GmIso4 &spawnIso);
     bool HasRespawnLocation() const;
     const GmIso4 &RespawnLocation() const;
@@ -213,6 +214,7 @@ private:
     std::optional<GmIso4> playerSpawnLocation_;
     std::optional<GmIso4> lastAcceptedSpawnLocation_;
     bool currentSpawnLocationInitialized_ = false;
+    bool currentTransformCheckpointFreewheelClearEnabled_ = false;
     u32 preparedEventTimeMs_ = 0u;
     EChallengePlayMode replayPlayMode_ = EChallengePlayMode::Race;
     u32 replayNbLaps_ = 1u;

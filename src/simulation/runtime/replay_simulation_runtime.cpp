@@ -314,7 +314,10 @@ struct ReplaySimulationRuntime::State {
         : vehicle(race),
           race(race),
           backend(forevervalidator::simulation::ResolveLeafBackend(
-                  requestedBackend)) {}
+                  requestedBackend)) {
+        race.SetCurrentTransformCheckpointFreewheelClearEnabled(
+                backend == forevervalidator::SimulationBackend::Reference);
+    }
 
     ReplayPhysicsWorld world;
     ReplayEnvironment environment;

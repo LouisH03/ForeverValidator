@@ -568,4 +568,17 @@ if(FOREVERVALIDATOR_BUILD_TESTS)
         forevervalidator-replay-control-plan-tests)
     add_test(NAME forevervalidator-replay-control-plan
         COMMAND forevervalidator-replay-control-plan-tests)
+
+    add_executable(forevervalidator-checkpoint-freewheel-tests
+        tests/checkpoint_freewheel_tests.cpp)
+    target_include_directories(
+        forevervalidator-checkpoint-freewheel-tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(
+        forevervalidator-checkpoint-freewheel-tests PRIVATE
+        forevervalidator_core)
+    forevervalidator_configure_target(
+        forevervalidator-checkpoint-freewheel-tests)
+    add_test(NAME forevervalidator-checkpoint-freewheel
+        COMMAND forevervalidator-checkpoint-freewheel-tests)
 endif()
