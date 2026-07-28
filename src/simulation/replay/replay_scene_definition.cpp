@@ -208,6 +208,7 @@ CGameCtnBlockInfoPylon *ReplaySceneZonePylonDefinition::BlockInfo() const {
 
 void ReplaySceneDefinition::Clear() {
     blocks_.clear();
+    skippedAuthoredBlocks_.clear();
     constructionZones_.clear();
     zoneClips_.clear();
     zonePylons_.clear();
@@ -220,6 +221,7 @@ void ReplaySceneDefinition::Clear() {
 bool ReplaySceneDefinition::Reserve(std::size_t blockCount) {
     try {
         blocks_.reserve(blockCount);
+        skippedAuthoredBlocks_.reserve(blockCount);
         return true;
     } catch (const std::bad_alloc &) {
         Clear();
@@ -230,6 +232,19 @@ bool ReplaySceneDefinition::Reserve(std::size_t blockCount) {
 bool ReplaySceneDefinition::Add(ReplaySceneBlockDefinition block) {
     try {
         blocks_.push_back(std::move(block));
+        return true;
+    } catch (const std::bad_alloc &) {
+        return false;
+    }
+}
+
+bool ReplaySceneDefinition::SkipAuthoredBlock(
+        CGameCtnReplayBlockPlacementId id) {
+    if (FindAuthoredBlock(id) != nullptr || IsAuthoredBlockSkipped(id)) {
+        return false;
+    }
+    try {
+        skippedAuthoredBlocks_.push_back(id);
         return true;
     } catch (const std::bad_alloc &) {
         return false;
@@ -315,6 +330,21 @@ const ReplaySceneBlockDefinition *ReplaySceneDefinition::FindAuthoredBlock(
         }
     }
     return nullptr;
+}
+
+bool ReplaySceneDefinition::IsAuthoredBlockSkipped(
+        CGameCtnReplayBlockPlacementId id) const {
+    for (CGameCtnReplayBlockPlacementId skipped :
+         skippedAuthoredBlocks_) {
+        if (skipped == id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::size_t ReplaySceneDefinition::SkippedAuthoredBlockCount() const {
+    return skippedAuthoredBlocks_.size();
 }
 
 const ReplaySceneBlockDefinition *

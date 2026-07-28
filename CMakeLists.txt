@@ -594,4 +594,15 @@ if(FOREVERVALIDATOR_BUILD_TESTS)
         forevervalidator-replay-decoration-size-tests)
     add_test(NAME forevervalidator-replay-decoration-size
         COMMAND forevervalidator-replay-decoration-size-tests)
+
+    add_executable(forevervalidator-replay-scene-unresolved-blocks-tests
+        tests/replay_scene_unresolved_blocks_tests.cpp)
+    target_include_directories(forevervalidator-replay-scene-unresolved-blocks-tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(forevervalidator-replay-scene-unresolved-blocks-tests PRIVATE
+        forevervalidator_core)
+    forevervalidator_configure_target(
+        forevervalidator-replay-scene-unresolved-blocks-tests)
+    add_test(NAME forevervalidator-replay-scene-unresolved-blocks
+        COMMAND forevervalidator-replay-scene-unresolved-blocks-tests)
 endif()
