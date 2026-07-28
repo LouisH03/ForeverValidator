@@ -24,8 +24,6 @@ constexpr std::uint64_t MaximumTotalTicks = 100000000u;
 constexpr std::uint64_t MaximumTotalObservations = 10000000u;
 
 struct DeviceTimelineDescriptor {
-    const void *sceneData = nullptr;
-    const void *configurationData = nullptr;
     std::uint64_t firstTick = 0u;
     std::uint32_t tickCount = 0u;
     std::uint64_t firstObservation = 0u;
@@ -174,6 +172,8 @@ __device__ void RecordObservation(
 }
 
 __global__ void ExecuteTimelineKernel(
+        const void *sceneData,
+        const void *configurationData,
         CudaCandidateState *states,
         const DeviceTimelineDescriptor *descriptors,
         const CudaControlTick *ticks,
@@ -189,10 +189,6 @@ __global__ void ExecuteTimelineKernel(
     }
     DeviceTimelineResult &result = results[candidate];
     CudaCandidateState &state = states[candidate];
-    const DeviceTimelineDescriptor descriptor =
-            descriptors[candidate];
-    const void *sceneData = descriptor.sceneData;
-    const void *configurationData = descriptor.configurationData;
     if (!ValidPackedInputs(sceneData, configurationData)) {
         result.status = CudaTimelineStatus::InvalidArgument;
         return;
@@ -201,6 +197,8 @@ __global__ void ExecuteTimelineKernel(
         result.status = CudaTimelineStatus::SchemaMismatch;
         return;
     }
+    const DeviceTimelineDescriptor descriptor =
+            descriptors[candidate];
     if (descriptor.tickCount == 0u) {
         result.status = CudaTimelineStatus::Success;
         result.failureTick = UINT32_MAX;
@@ -310,13 +308,15 @@ std::string CudaFailure(const char *operation, cudaError_t error) {
 
 }  // namespace
 
-static CudaTimelineBatchResult ExecuteCudaTimelineBatchImpl(
-        const void *sharedDeviceScene,
-        const void *sharedDeviceStaticConfiguration,
+CudaTimelineBatchResult ExecuteCudaTimelineBatch(
+        const void *deviceScene,
+        const void *deviceStaticConfiguration,
         const std::vector<CudaCandidateTimelineInput> &candidates,
         bool cancellationRequested) noexcept {
     CudaTimelineBatchResult result;
-    if (candidates.empty() ||
+    if (deviceScene == nullptr ||
+        deviceStaticConfiguration == nullptr ||
+        candidates.empty() ||
         candidates.size() >
                 std::numeric_limits<std::uint32_t>::max()) {
         result.status = CudaTimelineStatus::InvalidArgument;
@@ -333,19 +333,6 @@ static CudaTimelineBatchResult ExecuteCudaTimelineBatchImpl(
         descriptors.reserve(candidates.size());
         for (const CudaCandidateTimelineInput &candidate :
              candidates) {
-            const void *deviceScene = sharedDeviceScene != nullptr
-                    ? sharedDeviceScene : candidate.deviceScene;
-            const void *deviceStaticConfiguration =
-                    sharedDeviceStaticConfiguration != nullptr
-                    ? sharedDeviceStaticConfiguration
-                    : candidate.deviceStaticConfiguration;
-            if (deviceScene == nullptr ||
-                deviceStaticConfiguration == nullptr) {
-                result.status = CudaTimelineStatus::InvalidArgument;
-                result.diagnostic =
-                        "CUDA replay timeline has missing immutable inputs";
-                return result;
-            }
             if (candidate.ticks.size() >
                         MaximumTotalTicks - tickCount) {
                 result.status =
@@ -370,9 +357,6 @@ static CudaTimelineBatchResult ExecuteCudaTimelineBatchImpl(
                 return result;
             }
             DeviceTimelineDescriptor descriptor;
-            descriptor.sceneData = deviceScene;
-            descriptor.configurationData =
-                    deviceStaticConfiguration;
             descriptor.firstTick = tickCount;
             descriptor.tickCount =
                     static_cast<std::uint32_t>(
@@ -490,6 +474,7 @@ static CudaTimelineBatchResult ExecuteCudaTimelineBatchImpl(
                  Threads - 1u) /
                 Threads;
         ExecuteTimelineKernel<<<blocks, Threads>>>(
+                deviceScene, deviceStaticConfiguration,
                 deviceStates.Get(), deviceDescriptors.Get(),
                 deviceTicks.Get(), deviceObservations.Get(),
                 deviceResultsAllocation.Get(),
@@ -615,30 +600,6 @@ static CudaTimelineBatchResult ExecuteCudaTimelineBatchImpl(
                 "unexpected CUDA timeline execution failure";
         return result;
     }
-}
-
-CudaTimelineBatchResult ExecuteCudaTimelineBatch(
-        const void *deviceScene,
-        const void *deviceStaticConfiguration,
-        const std::vector<CudaCandidateTimelineInput> &candidates,
-        bool cancellationRequested) noexcept {
-    if (deviceScene == nullptr ||
-        deviceStaticConfiguration == nullptr) {
-        CudaTimelineBatchResult result;
-        result.status = CudaTimelineStatus::InvalidArgument;
-        result.diagnostic = "invalid CUDA timeline batch";
-        return result;
-    }
-    return ExecuteCudaTimelineBatchImpl(
-            deviceScene, deviceStaticConfiguration,
-            candidates, cancellationRequested);
-}
-
-CudaTimelineBatchResult ExecuteCudaReplayTimelineBatch(
-        const std::vector<CudaCandidateTimelineInput> &replays,
-        bool cancellationRequested) noexcept {
-    return ExecuteCudaTimelineBatchImpl(
-            nullptr, nullptr, replays, cancellationRequested);
 }
 
 }  // namespace forevervalidator::simulation

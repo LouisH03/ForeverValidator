@@ -929,24 +929,27 @@ struct ReplaySimulationSession::Impl {
         return ReplaySimulationRunResult::Success;
     }
 
-    ReplaySimulationRunResult BuildCudaTimelineInput(
+    ReplaySimulationTimelineResult ExecuteCudaTimeline(
             const std::vector<ReplayControlTick> &controlTicks,
             std::uint32_t validationSeed,
-            std::uint64_t controlCursor,
-            forevervalidator::simulation::
-                    CudaCandidateTimelineInput *input) {
+            std::uint64_t controlCursor) {
+        ReplaySimulationTimelineResult result;
         if (!instance.runtime || !cudaDeviceScene.Ready() ||
-            !cudaDeviceConfiguration.Ready() || input == nullptr) {
+            !cudaDeviceConfiguration.Ready()) {
             cudaInitializationDiagnostic =
                     "CUDA timeline prerequisites are not ready";
-            return ReplaySimulationRunResult::CudaInitializationFailed;
+            result.result =
+                    ReplaySimulationRunResult::CudaInitializationFailed;
+            return result;
         }
         std::optional<ReplaySimulationRuntime::RuntimeClone> runtime =
                 instance.runtime->CaptureRuntimeClone();
         if (!runtime.has_value()) {
             cudaInitializationDiagnostic =
                     "CUDA initial runtime state capture failed";
-            return ReplaySimulationRunResult::CudaInitializationFailed;
+            result.result =
+                    ReplaySimulationRunResult::CudaInitializationFailed;
+            return result;
         }
         ReplaySimulationInstanceClone clone;
         clone.race = instance.race.CaptureRuntimeClone();
@@ -954,74 +957,85 @@ struct ReplaySimulationSession::Impl {
         clone.incrementalRespawnCount =
                 instance.incrementalRespawnCount;
 
-        input->deviceScene = cudaDeviceScene.DeviceData();
-        input->deviceStaticConfiguration =
-                cudaDeviceConfiguration.DeviceData();
+        forevervalidator::simulation::CudaCandidateTimelineInput input;
         const auto conversion = forevervalidator::simulation::
                 EncodeCudaCandidateState(
                         clone, validationSeed, controlCursor, 0u,
                         tmnf::simulation::CaptureGameRandomState(),
-                        &input->initialState);
+                        &input.initialState);
         if (conversion != forevervalidator::simulation::
                                   CudaStateConversionResult::Success) {
             cudaInitializationDiagnostic =
                     "CUDA initial state conversion failed with code " +
                     std::to_string(
                             static_cast<unsigned>(conversion));
-            return ReplaySimulationRunResult::CudaInitializationFailed;
+            result.result =
+                    ReplaySimulationRunResult::CudaInitializationFailed;
+            return result;
         }
         try {
-            input->ticks.reserve(controlTicks.size());
+            input.ticks.reserve(controlTicks.size());
             for (const ReplayControlTick &tick : controlTicks) {
-                input->ticks.push_back(
+                input.ticks.push_back(
                         forevervalidator::simulation::
                                 FlattenCudaControlTick(tick));
             }
         } catch (const std::bad_alloc &) {
             cudaInitializationDiagnostic =
                     "CUDA control timeline allocation failed";
-            return ReplaySimulationRunResult::CudaInitializationFailed;
+            result.result =
+                    ReplaySimulationRunResult::CudaInitializationFailed;
+            return result;
         }
-        return ReplaySimulationRunResult::Success;
-    }
 
-    ReplaySimulationTimelineResult CompleteCudaTimeline(
-            const std::vector<ReplayControlTick> &controlTicks,
-            const forevervalidator::simulation::
-                    CudaCandidateTimelineOutput &output,
-            const forevervalidator::simulation::
-                    CudaTimelineExecutionMetrics &metrics,
-            const std::string &diagnostic) {
-        ReplaySimulationTimelineResult result;
-        cudaTimelineMetrics = metrics;
-        cudaInitializationDiagnostic = diagnostic;
-        if (output.status != forevervalidator::simulation::
-                                     CudaTimelineStatus::Success) {
-            cudaInitializationDiagnostic +=
-                    " candidate_status=" +
-                    std::string(
-                            forevervalidator::simulation::
-                                    CudaTimelineStatusName(
-                                            output.status)) +
-                    " failure_tick=" +
-                    std::to_string(output.failureTick) +
-                    " executed_ticks=" +
-                    std::to_string(output.executedTickCount) +
-                    " failure_detail=" +
-                    std::to_string(output.failureDetail);
-            const std::uint32_t failure = output.failureTick;
-            if (failure < controlTicks.size()) {
-                const auto flattened =
-                        forevervalidator::simulation::
-                                FlattenCudaControlTick(
-                                        controlTicks[failure]);
+        forevervalidator::simulation::CudaTimelineBatchResult executed =
+                forevervalidator::simulation::ExecuteCudaTimelineBatch(
+                        cudaDeviceScene.DeviceData(),
+                        cudaDeviceConfiguration.DeviceData(),
+                        {std::move(input)});
+        cudaTimelineMetrics = executed.metrics;
+        cudaInitializationDiagnostic = executed.diagnostic;
+        if (executed.status != forevervalidator::simulation::
+                                       CudaTimelineStatus::Success ||
+            executed.candidates.size() != 1u ||
+            executed.candidates[0].status !=
+                    forevervalidator::simulation::
+                            CudaTimelineStatus::Success) {
+            if (executed.candidates.size() == 1u) {
                 cudaInitializationDiagnostic +=
-                        " action_flags=" +
-                        std::to_string(flattened.actionFlags) +
-                        " respawns=" +
+                        " candidate_status=" +
+                        std::string(
+                                forevervalidator::simulation::
+                                        CudaTimelineStatusName(
+                                                executed.candidates[0].
+                                                        status)) +
+                        " failure_tick=" +
                         std::to_string(
-                                flattened.
-                                        respawnAtCheckpointCount);
+                                executed.candidates[0].failureTick) +
+                        " executed_ticks=" +
+                        std::to_string(
+                                executed.candidates[0].
+                                        executedTickCount) +
+                        " failure_detail=" +
+                        std::to_string(
+                                executed.candidates[0].
+                                        failureDetail);
+                const std::uint32_t failure =
+                        executed.candidates[0].failureTick;
+                if (failure < controlTicks.size()) {
+                    const auto flattened =
+                            forevervalidator::simulation::
+                                    FlattenCudaControlTick(
+                                            controlTicks[failure]);
+                    cudaInitializationDiagnostic +=
+                            " action_flags=" +
+                            std::to_string(
+                                    flattened.actionFlags) +
+                            " respawns=" +
+                            std::to_string(
+                                    flattened.
+                                            respawnAtCheckpointCount);
+                }
             }
             result.result =
                     ReplaySimulationRunResult::CudaExecutionFailed;
@@ -1031,7 +1045,7 @@ struct ReplaySimulationSession::Impl {
         ReplaySimulationInstanceClone restored;
         const auto decode = forevervalidator::simulation::
                 DecodeCudaCandidateState(
-                        output.finalState, &restored);
+                        executed.candidates[0].finalState, &restored);
         if (decode != forevervalidator::simulation::
                               CudaStateConversionResult::Success ||
             !instance.race.PrepareRuntimeCloneRestore(restored.race) ||
@@ -1049,12 +1063,12 @@ struct ReplaySimulationSession::Impl {
         instance.incrementalRespawnCount =
                 restored.incrementalRespawnCount;
         tmnf::simulation::RestoreGameRandomState(
-                output.finalState.randomState);
+                executed.candidates[0].finalState.randomState);
         try {
             result.observations.reserve(
-                    output.observations.size());
+                    executed.candidates[0].observations.size());
             for (const auto &observation :
-                 output.observations) {
+                 executed.candidates[0].observations) {
                 result.observations.push_back(
                         ObserveCudaTrajectory(observation));
             }
@@ -1065,38 +1079,12 @@ struct ReplaySimulationSession::Impl {
             return result;
         }
         result.executedRespawnCount =
-                output.executedRespawnCount;
+                executed.candidates[0].executedRespawnCount;
         result.finishTimeMs = instance.runtime->FinishTimeMs();
         result.stuntsScore = instance.runtime->StuntsScore();
         result.raceCompleted = result.finishTimeMs.has_value();
         result.result = ReplaySimulationRunResult::Success;
         return result;
-    }
-
-    ReplaySimulationTimelineResult ExecuteCudaTimeline(
-            const std::vector<ReplayControlTick> &controlTicks,
-            std::uint32_t validationSeed,
-            std::uint64_t controlCursor) {
-        ReplaySimulationTimelineResult result;
-        forevervalidator::simulation::CudaCandidateTimelineInput input;
-        result.result = BuildCudaTimelineInput(
-                controlTicks, validationSeed, controlCursor, &input);
-        if (result.result != ReplaySimulationRunResult::Success) {
-            return result;
-        }
-        forevervalidator::simulation::CudaTimelineBatchResult executed =
-                forevervalidator::simulation::ExecuteCudaReplayTimelineBatch(
-                        {std::move(input)});
-        if (executed.candidates.size() != 1u) {
-            cudaTimelineMetrics = executed.metrics;
-            cudaInitializationDiagnostic = executed.diagnostic;
-            result.result =
-                    ReplaySimulationRunResult::CudaExecutionFailed;
-            return result;
-        }
-        return CompleteCudaTimeline(
-                controlTicks, executed.candidates[0],
-                executed.metrics, executed.diagnostic);
     }
 };
 
@@ -1188,63 +1176,6 @@ ReplaySimulationSession::StaticRenderScene() const noexcept {
     return impl->staticRenderScene;
 }
 
-ReplaySimulationRunResult ReplaySimulationSession::PrepareCudaTimeline(
-        const ReplaySimulationDefinition &simulationDefinition,
-        const std::vector<ReplayControlTick> &controlTicks,
-        std::uint32_t validationSeed,
-        forevervalidator::simulation::CudaCandidateTimelineInput *input) {
-    if (impl->backend != forevervalidator::SimulationBackend::Cuda ||
-        controlTicks.empty() || input == nullptr) {
-        return ReplaySimulationRunResult::InvalidControlTimeline;
-    }
-    if (!tmnf::simulation::DeterministicExecutionScope::IsActive()) {
-        return ReplaySimulationRunResult::
-                DeterministicExecutionUnavailable;
-    }
-
-    impl->ResetRuntime();
-    ReplaySimulationRunResult result =
-            impl->PrepareCudaConfiguration(simulationDefinition);
-    if (result != ReplaySimulationRunResult::Success) {
-        return result;
-    }
-    const ReplayMapSceneResult readyResult =
-            impl->mapScene.EnsureReady(impl->instance.race);
-    if (readyResult != ReplayMapSceneResult::Ready) {
-        return MapReplaySceneResult(readyResult);
-    }
-    GmIso4 startLocation;
-    if (!impl->mapScene.FirstStartLineSpawnLocation(startLocation)) {
-        return ReplaySimulationRunResult::MapStartUnavailable;
-    }
-
-    impl->instance.runtime = std::make_unique<ReplaySimulationRuntime>(
-            impl->instance.race, impl->backend);
-    result = impl->instance.runtime->Start(
-            simulationDefinition,
-            impl->mapScene,
-            startLocation,
-            controlTicks.front(),
-            validationSeed);
-    if (result != ReplaySimulationRunResult::Success) {
-        return result;
-    }
-    return impl->BuildCudaTimelineInput(
-            controlTicks, validationSeed, 0u, input);
-}
-
-ReplaySimulationTimelineResult
-ReplaySimulationSession::CompleteCudaTimeline(
-        const std::vector<ReplayControlTick> &controlTicks,
-        const forevervalidator::simulation::
-                CudaCandidateTimelineOutput &output,
-        const forevervalidator::simulation::
-                CudaTimelineExecutionMetrics &metrics,
-        const std::string &diagnostic) {
-    return impl->CompleteCudaTimeline(
-            controlTicks, output, metrics, diagnostic);
-}
-
 ReplaySimulationTimelineResult ReplaySimulationSession::SimulateTimeline(
         const ReplaySimulationDefinition &simulationDefinition,
         const std::vector<ReplayControlTick> &controlTicks,
@@ -1259,28 +1190,6 @@ ReplaySimulationTimelineResult ReplaySimulationSession::SimulateTimeline(
                 ReplaySimulationRunResult::DeterministicExecutionUnavailable;
         return result;
     }
-    if (impl->backend == forevervalidator::SimulationBackend::Cuda) {
-        forevervalidator::simulation::CudaCandidateTimelineInput input;
-        result.result = PrepareCudaTimeline(
-                simulationDefinition, controlTicks, validationSeed, &input);
-        if (result.result != ReplaySimulationRunResult::Success) {
-            return result;
-        }
-        forevervalidator::simulation::CudaTimelineBatchResult executed =
-                forevervalidator::simulation::ExecuteCudaReplayTimelineBatch(
-                        {std::move(input)});
-        if (executed.candidates.size() != 1u) {
-            impl->cudaTimelineMetrics = executed.metrics;
-            impl->cudaInitializationDiagnostic = executed.diagnostic;
-            result.result =
-                    ReplaySimulationRunResult::CudaExecutionFailed;
-            return result;
-        }
-        return CompleteCudaTimeline(
-                controlTicks, executed.candidates[0],
-                executed.metrics, executed.diagnostic);
-    }
-
     const std::size_t observationCount = static_cast<std::size_t>(
             std::count_if(
                     controlTicks.begin(),
@@ -1328,8 +1237,11 @@ ReplaySimulationTimelineResult ReplaySimulationSession::SimulateTimeline(
         return result;
     }
 
-    if (impl->backend ==
-        forevervalidator::SimulationBackend::OptimizedCpu) {
+    if (impl->backend == forevervalidator::SimulationBackend::Cuda) {
+        return impl->ExecuteCudaTimeline(
+                controlTicks, validationSeed, 0u);
+    } else if (impl->backend ==
+               forevervalidator::SimulationBackend::OptimizedCpu) {
         impl->instance.runtime->PrepareOptimizedCpuStaticTransforms();
         impl->instance.runtime->
                 CertifyOptimizedCpuStaticTransformsForAdvance();

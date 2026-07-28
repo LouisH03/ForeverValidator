@@ -54,8 +54,6 @@ enum class CudaTimelineStatus : std::uint32_t {
 };
 
 struct CudaCandidateTimelineInput {
-    const void *deviceScene = nullptr;
-    const void *deviceStaticConfiguration = nullptr;
     CudaCandidateState initialState{};
     std::vector<CudaControlTick> ticks;
 };
@@ -99,10 +97,6 @@ CudaTimelineBatchResult ExecuteCudaTimelineBatch(
         const void *deviceScene,
         const void *deviceStaticConfiguration,
         const std::vector<CudaCandidateTimelineInput> &candidates,
-        bool cancellationRequested = false) noexcept;
-
-CudaTimelineBatchResult ExecuteCudaReplayTimelineBatch(
-        const std::vector<CudaCandidateTimelineInput> &replays,
         bool cancellationRequested = false) noexcept;
 
 const char *CudaTimelineStatusName(CudaTimelineStatus status) noexcept;

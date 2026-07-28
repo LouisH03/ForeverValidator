@@ -146,24 +146,6 @@ int main() {
         }
     }
 
-    std::vector<CudaCandidateTimelineInput> replayBatch{
-            batch[3], batch[7]};
-    for (CudaCandidateTimelineInput &candidate : replayBatch) {
-        candidate.deviceScene = deviceScene.Get();
-        candidate.deviceStaticConfiguration =
-                deviceConfiguration.Get();
-    }
-    const CudaTimelineBatchResult replayExecuted =
-            ExecuteCudaReplayTimelineBatch(replayBatch);
-    if (replayExecuted.status != CudaTimelineStatus::Success ||
-        replayExecuted.candidates.size() != replayBatch.size() ||
-        replayExecuted.candidates[0].finalState.candidateId != 3u ||
-        replayExecuted.candidates[1].finalState.candidateId != 7u) {
-        std::cerr << "per-replay CUDA immutable inputs were not accepted: "
-                  << replayExecuted.diagnostic << '\n';
-        return 1;
-    }
-
     std::vector<CudaCandidateTimelineInput> largeBatch(4097u);
     for (std::size_t index = 0u; index < largeBatch.size(); ++index) {
         largeBatch[index].initialState.candidateId =
@@ -218,19 +200,6 @@ int main() {
     CudaPackedSceneHeader corruptScene = scene;
     corruptScene.magic = 0u;
     DeviceValue<CudaPackedSceneHeader> deviceCorruptScene(corruptScene);
-    replayBatch[1].deviceScene = deviceCorruptScene.Get();
-    const CudaTimelineBatchResult mixedReplayInputs =
-            ExecuteCudaReplayTimelineBatch(replayBatch);
-    if (mixedReplayInputs.status !=
-                CudaTimelineStatus::InvalidArgument ||
-        mixedReplayInputs.candidates.size() != 2u ||
-        mixedReplayInputs.candidates[0].status !=
-                CudaTimelineStatus::Success ||
-        mixedReplayInputs.candidates[1].status !=
-                CudaTimelineStatus::InvalidArgument) {
-        std::cerr << "per-replay CUDA scene routing was not lane-owned\n";
-        return 1;
-    }
     const CudaTimelineBatchResult corrupt =
             ExecuteCudaTimelineBatch(
                     deviceCorruptScene.Get(),
