@@ -90,6 +90,18 @@ public:
             const ReplaySimulationDefinition &simulationDefinition,
             const std::vector<ReplayControlTick> &controlTicks,
             std::uint32_t validationSeed);
+    ReplaySimulationRunResult PrepareCudaTimeline(
+            const ReplaySimulationDefinition &simulationDefinition,
+            const std::vector<ReplayControlTick> &controlTicks,
+            std::uint32_t validationSeed,
+            forevervalidator::simulation::CudaCandidateTimelineInput *input);
+    ReplaySimulationTimelineResult CompleteCudaTimeline(
+            const std::vector<ReplayControlTick> &controlTicks,
+            const forevervalidator::simulation::
+                    CudaCandidateTimelineOutput &output,
+            const forevervalidator::simulation::
+                    CudaTimelineExecutionMetrics &metrics,
+            const std::string &diagnostic);
     ReplaySimulationRunResult StartIncremental(
             const ReplaySimulationDefinition &simulationDefinition,
             const ReplayControlTick &firstTick,

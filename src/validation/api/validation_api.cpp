@@ -7,6 +7,7 @@
 #include <limits>
 #include <memory>
 #include <new>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -19,6 +20,7 @@
 #include "format/pack/replay_vehicle_source_bundle.h"
 #include "format/replay/replay_file.h"
 #include "format/static_solid/default_vehicle_solid_archive.h"
+#include "engine/game/game_random_sequence.h"
 #include "simulation/runtime/replay_deterministic_execution.h"
 #include "simulation/runtime/replay_simulation_definition.h"
 #include "simulation/runtime/replay_simulation_session.h"
@@ -1110,6 +1112,305 @@ Result<ValidationReport> RunReplayValidation(
     }
     return Result<ValidationReport>::Success(
             ToPublicReport(identity, validation.Value(), replayFile, route));
+}
+
+struct PreparedCudaReplayValidation {
+    std::size_t requestIndex = 0u;
+    ReplayFile replayFile;
+    ReplayAssetRoute route;
+    std::unique_ptr<ReplaySimulationSession> simulationSession;
+    ReplayValidationExecutionPreparation execution;
+    ReplayFileValidationResult validation;
+};
+
+ReplayValidationAttempt FinishCudaReplayValidation(
+        PreparedCudaReplayValidation &prepared,
+        ReplaySimulationTimelineResult simulationResult,
+        const ReplayIdentity &identity) {
+    ReplayValidationExecutionOutput execution;
+    const ReplayValidationExecutionResult status =
+            CompleteReplayValidationExecution(
+                    &execution,
+                    *prepared.simulationSession,
+                    prepared.execution,
+                    prepared.replayFile.InputTimeline(),
+                    std::move(simulationResult));
+    if (status == ReplayValidationExecutionResult::Success) {
+        prepared.validation.validation =
+                std::move(execution.validation);
+        prepared.validation.raceOutcome =
+                std::move(execution.raceOutcome);
+    } else if (status ==
+               ReplayValidationExecutionResult::MapStartUnavailable) {
+        prepared.validation.validation.expectedSamples =
+                static_cast<std::uint32_t>(
+                        prepared.execution.plan.expectedSamples);
+        prepared.validation.validation.status =
+                ReplayValidationStatus::WrongSimulation;
+        prepared.validation.validation.outcome =
+                ReplayValidationOutcome::WrongSimulation;
+        prepared.validation.validation.wrongSimulation = true;
+    } else {
+        ValidationError error = ExecutionError(status, identity);
+        if (!prepared.simulationSession->
+                    CudaInitializationDiagnostic().empty()) {
+            error.diagnostic = prepared.simulationSession->
+                    CudaInitializationDiagnostic();
+        }
+        return ReplayValidationAttempt::Failure(std::move(error));
+    }
+    return ReplayValidationAttempt::Success(ToPublicReport(
+            identity,
+            prepared.validation,
+            prepared.replayFile,
+            prepared.route));
+}
+
+Result<ReplayBatchReport> RunCudaReplayValidationBatch(
+        ValidationState &context,
+        const std::vector<ReplayValidationRequest> &requests,
+        const ValidationOptions &options) {
+    const ReplayValidationConfiguration configuration{
+            options.requestedSamples,
+            options.controlTickMs,
+            options.validationPrestartMs,
+            {},
+            100000u,
+    };
+    std::vector<std::optional<ReplayValidationAttempt>> attempts(
+            requests.size());
+    std::vector<std::unique_ptr<PreparedCudaReplayValidation>> prepared;
+    prepared.reserve(requests.size());
+    std::vector<simulation::CudaCandidateTimelineInput> cudaInputs;
+    cudaInputs.reserve(requests.size());
+
+    const std::uint32_t initialRandomState =
+            tmnf::simulation::CaptureGameRandomState();
+    for (std::size_t index = 0u; index < requests.size(); ++index) {
+        tmnf::simulation::RestoreGameRandomState(initialRandomState);
+        const ReplayValidationRequest &request = requests[index];
+        const ReplayIdentity &identity = request.identity;
+        if (!request.replayBytes.IsValid() ||
+            request.replayBytes.size == 0u ||
+            identity.name.empty()) {
+            attempts[index].emplace(
+                    ReplayValidationAttempt::Failure(MakeError(
+                            ValidationErrorCategory::InvalidInput,
+                            ValidationErrorCode::InvalidArgument,
+                            ValidationStage::ContextCreation,
+                            ValidationFailureReason::
+                                    InvalidValidationRequest,
+                            identity,
+                            "invalid replay validation request")));
+            continue;
+        }
+        ReplayFile replayFile;
+        const ReplayFileReadError readError = ReadReplayBytes(
+                reinterpret_cast<const std::uint8_t *>(
+                        request.replayBytes.data),
+                request.replayBytes.size,
+                &replayFile);
+        if (readError != ReplayFileReadError::Success) {
+            attempts[index].emplace(
+                    ReplayValidationAttempt::Failure(
+                            ReplayDecodeError(readError, identity)));
+            continue;
+        }
+
+        ReplayAssetRoute route;
+        const ReplayAssetRouteResult routeResult =
+                BuildReplayAssetRoute(replayFile, &route);
+        if (routeResult != ReplayAssetRouteResult::Success) {
+            attempts[index].emplace(
+                    ReplayValidationAttempt::Failure(
+                            ReplayRouteError(
+                                    routeResult, identity, replayFile)));
+            continue;
+        }
+        if (!IsCudaSupportedRoute(route)) {
+            attempts[index].emplace(
+                    ReplayValidationAttempt::Failure(
+                            CudaScopeError(route, identity)));
+            continue;
+        }
+
+        std::optional<ReplayFileValidationResult> compatibility =
+                ClassifyReplayCompatibility(replayFile, configuration);
+        if (compatibility.has_value()) {
+            attempts[index].emplace(
+                    ReplayValidationAttempt::Success(ToPublicReport(
+                            identity, *compatibility,
+                            replayFile, route)));
+            continue;
+        }
+        std::optional<ReplayFileValidationResult> inputAvailability =
+                ClassifyReplayInputAvailability(
+                        replayFile, configuration);
+        if (inputAvailability.has_value()) {
+            attempts[index].emplace(
+                    ReplayValidationAttempt::Success(ToPublicReport(
+                            identity, *inputAvailability,
+                            replayFile, route)));
+            continue;
+        }
+
+        Result<PreparedAssets> assetsResult =
+                PrepareAssets(context, route, identity);
+        if (!assetsResult) {
+            attempts[index].emplace(
+                    ReplayValidationAttempt::Failure(
+                            std::move(assetsResult).Error()));
+            continue;
+        }
+        const PreparedAssets assets = assetsResult.Value();
+        auto item = std::make_unique<PreparedCudaReplayValidation>();
+        item->requestIndex = index;
+        item->replayFile = std::move(replayFile);
+        item->route = std::move(route);
+        item->simulationSession =
+                std::make_unique<ReplaySimulationSession>(
+                        SimulationBackend::Cuda);
+
+        CGameCtnReplayChallengeMapPreload preload;
+        const ReplayChallengePreloadResult preloadResult =
+                preload.Preload(
+                        item->replayFile.MapInput(),
+                        *assets.mapAssets,
+                        *assets.decorationAssets,
+                        *item->simulationSession);
+        if (preloadResult != ReplayChallengePreloadResult::Success) {
+            ValidationError error =
+                    PreloadError(preloadResult, identity);
+            if (!item->simulationSession->
+                        CudaInitializationDiagnostic().empty()) {
+                error.diagnostic = item->simulationSession->
+                        CudaInitializationDiagnostic();
+            }
+            attempts[index].emplace(
+                    ReplayValidationAttempt::Failure(
+                            std::move(error)));
+            continue;
+        }
+
+        ReplaySimulationDefinitionBuild definition =
+                BuildReplaySimulationDefinition(
+                        *assets.vehicleSources,
+                        preload.WaterDefinition());
+        if (!definition) {
+            attempts[index].emplace(
+                    ReplayValidationAttempt::Failure(
+                            DefinitionError(
+                                    definition.Error(), identity)));
+            continue;
+        }
+        definition.Value().optimizedCpuStadiumSpecializationsEnabled =
+                item->route.vehicleModel ==
+                ::ReplayVehicleModel::StadiumCar;
+        item->simulationSession->ActivateStaticScene();
+
+        ReplayValidationReplay replay(
+                item->replayFile.InputTimeline(),
+                item->replayFile.GhostTrajectory(),
+                item->replayFile.ChallengeMetadata()
+                        .stuntsTimeLimitMs);
+        ReplayValidationPlan plan = replay.BuildStreamPlan(
+                configuration, item->route.validationMode);
+        const ReplayChallengeMetadata &challenge =
+                item->replayFile.ChallengeMetadata();
+        plan.playMode =
+                challenge.playMode.value_or(
+                        EChallengePlayMode::Race);
+        plan.isLapRace = challenge.isLapRace;
+        plan.lapCount =
+                challenge.isLapRace ? challenge.lapCount : 1u;
+        item->validation = BuildReplayFileValidationMetadata(
+                item->replayFile, configuration);
+        const ReplayValidationExecutionResult preparationResult =
+                PrepareReplayValidationExecution(
+                        &item->execution,
+                        plan,
+                        item->replayFile.GhostTrajectory(),
+                        item->replayFile.InputTimeline());
+        if (preparationResult !=
+            ReplayValidationExecutionResult::Success) {
+            attempts[index].emplace(
+                    ReplayValidationAttempt::Failure(
+                            ExecutionError(
+                                    preparationResult, identity)));
+            continue;
+        }
+
+        item->simulationSession->ConfigureReplayRace(
+                plan.playMode, plan.isLapRace, plan.lapCount);
+        simulation::CudaCandidateTimelineInput cudaInput;
+        const ReplaySimulationRunResult simulationPreparation =
+                item->simulationSession->PrepareCudaTimeline(
+                        definition.Value(),
+                        item->execution.controlPlan.ticks,
+                        plan.validationSeed,
+                        &cudaInput);
+        if (simulationPreparation !=
+            ReplaySimulationRunResult::Success) {
+            ReplaySimulationTimelineResult simulationResult;
+            simulationResult.result = simulationPreparation;
+            attempts[index].emplace(FinishCudaReplayValidation(
+                    *item, std::move(simulationResult), identity));
+            continue;
+        }
+        cudaInputs.push_back(std::move(cudaInput));
+        prepared.push_back(std::move(item));
+    }
+
+    if (!cudaInputs.empty()) {
+        simulation::CudaTimelineBatchResult executed =
+                simulation::ExecuteCudaReplayTimelineBatch(cudaInputs);
+        if (executed.candidates.size() != prepared.size()) {
+            for (auto &item : prepared) {
+                ValidationError error = ExecutionError(
+                        ReplayValidationExecutionResult::
+                                CudaExecutionFailed,
+                        requests[item->requestIndex].identity);
+                error.diagnostic = executed.diagnostic;
+                attempts[item->requestIndex].emplace(
+                        ReplayValidationAttempt::Failure(
+                                std::move(error)));
+            }
+        } else {
+            for (std::size_t index = 0u;
+                 index < prepared.size(); ++index) {
+                PreparedCudaReplayValidation &item =
+                        *prepared[index];
+                ReplaySimulationTimelineResult simulationResult =
+                        item.simulationSession->CompleteCudaTimeline(
+                                item.execution.controlPlan.ticks,
+                                executed.candidates[index],
+                                executed.metrics,
+                                executed.diagnostic);
+                attempts[item.requestIndex].emplace(
+                        FinishCudaReplayValidation(
+                                item,
+                                std::move(simulationResult),
+                                requests[item.requestIndex].identity));
+            }
+        }
+    }
+    tmnf::simulation::RestoreGameRandomState(initialRandomState);
+
+    ReplayBatchReport report;
+    report.attempts.reserve(requests.size());
+    for (auto &attempt : attempts) {
+        if (!attempt.has_value()) {
+            return Result<ReplayBatchReport>::Failure(MakeError(
+                    ValidationErrorCategory::Internal,
+                    ValidationErrorCode::UnexpectedFailure,
+                    ValidationStage::ValidationEvaluation,
+                    ValidationFailureReason::UnexpectedFailure,
+                    {},
+                    "CUDA replay batch left a result unassigned"));
+        }
+        report.attempts.push_back(std::move(*attempt));
+    }
+    return Result<ReplayBatchReport>::Success(std::move(report));
 }
 
 }  // namespace
@@ -3416,6 +3717,37 @@ Result<ReplayBatchReport> ValidateReplayBatch(
                     ValidationFailureReason::InvalidValidationRequest,
                     {},
                     "invalid replay batch request"));
+        }
+
+        if (options.backend == SimulationBackend::Cuda) {
+            tmnf::simulation::DeterministicExecutionScope
+                    deterministicScope;
+            if (!deterministicScope.Established()) {
+                return Result<ReplayBatchReport>::Failure(MakeError(
+                        ValidationErrorCategory::Simulation,
+                        ValidationErrorCode::
+                                DeterministicExecutionUnavailable,
+                        ValidationStage::SimulationStartup,
+                        ValidationFailureReason::
+                                DeterministicExecutionUnavailable,
+                        {},
+                        "deterministic execution mode unavailable"));
+            }
+            Result<ReplayBatchReport> result =
+                    RunCudaReplayValidationBatch(
+                            context.impl_->state, requests, options);
+            if (!deterministicScope.Restore()) {
+                return Result<ReplayBatchReport>::Failure(MakeError(
+                        ValidationErrorCategory::Simulation,
+                        ValidationErrorCode::
+                                DeterministicExecutionUnavailable,
+                        ValidationStage::SimulationStep,
+                        ValidationFailureReason::
+                                DeterministicStateRestoreFailed,
+                        {},
+                        "deterministic execution state could not be restored"));
+            }
+            return result;
         }
 
         ValidationOptions leafOptions = options;

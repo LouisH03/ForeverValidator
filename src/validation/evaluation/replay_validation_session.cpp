@@ -130,6 +130,17 @@ ReplayFileValidationResult BuildReplayFileMetadata(
 
 }  // namespace
 
+ReplayFileValidationResult BuildReplayFileValidationMetadata(
+        const ReplayFile &replayFile,
+        const ReplayValidationConfiguration &configuration) {
+    ReplayValidationReplay replay(
+            replayFile.InputTimeline(),
+            replayFile.GhostTrajectory(),
+            replayFile.ChallengeMetadata().stuntsTimeLimitMs);
+    return BuildReplayFileMetadata(
+            replayFile, replay, configuration);
+}
+
 std::optional<ReplayFileValidationResult> ClassifyReplayCompatibility(
         const ReplayFile &replayFile,
         const ReplayValidationConfiguration &configuration) {

@@ -128,6 +128,11 @@ to the authoritative reference backend. Multi-replay runs default to the
 ordered batched backend.
 `--batch-size N` controls how many replay files are loaded and submitted
 together, and defaults to 10.
+When `--backend cuda` is selected for a multi-replay run, each batch is
+decoded, routed, constructed, and control-planned on the CPU, then its
+eligible Stadium timelines execute together in one CUDA launch. Reporting
+and replay-specific outcome handling remain on the CPU. `--batch-size`
+therefore also bounds retained host and device memory for CUDA batches.
 `--requested-samples N` limits trajectory comparison to `N` evenly selected
 ghost samples while preserving complete timeline simulation and final outcome
 evaluation. This is useful for finish/outcome corpus sweeps; omit it for the
