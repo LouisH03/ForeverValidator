@@ -256,7 +256,7 @@ ReplayControlPlanBuildResult BuildTimelinePlan(
                (*events)[eventCursor].timeMs <= inputSampleTime) {
             const ReplayInputEvent &event = (*events)[eventCursor];
             if (event.action == ReplayInputActionKind::Respawn &&
-                event.value.IsActive()) {
+                state.raceRunning && event.value.IsActive()) {
                 ++respawnEventCount;
             }
             if (event.action == ReplayInputActionKind::FinishLine &&

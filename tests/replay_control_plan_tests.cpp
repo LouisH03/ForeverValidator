@@ -20,6 +20,7 @@ bool TestRaceValidationAppendsUnobservedTick() {
     const ReplayInputActionValue press = ReplayInputActionValue::Switch(
             ReplayInputSwitchState::Pressed);
     std::vector<ReplayInputEvent> events = {
+            {10u, ReplayInputActionKind::Respawn, press},
             {20u, ReplayInputActionKind::Accelerate, press},
             {20u, ReplayInputActionKind::RaceRunning, press},
             {20u, ReplayInputActionKind::FinishLine, press},
