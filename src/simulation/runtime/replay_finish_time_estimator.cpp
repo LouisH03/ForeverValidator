@@ -16,14 +16,12 @@ RefineReplayFinishTime(const ReplayFinishSubstep &substep,
     if (!probe || !std::isfinite(substep.substepStartSeconds) ||
         substep.substepStartSeconds < 0.0 ||
         !std::isfinite(substep.substepDurationSeconds) ||
-        !(substep.substepDurationSeconds > 0.0f) ||
-        substep.tickTimeMs < substep.tickPeriodMs) {
+        !(substep.substepDurationSeconds > 0.0f)) {
         return std::nullopt;
     }
 
     const std::uint64_t tickStartNs =
-            static_cast<std::uint64_t>(
-                    substep.tickTimeMs - substep.tickPeriodMs) *
+            static_cast<std::uint64_t>(substep.tickTimeMs) *
             NanosecondsPerMillisecond;
     double lower = static_cast<double>(tickStartNs) +
                    substep.substepStartSeconds * NanosecondsPerSecond;

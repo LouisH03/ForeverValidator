@@ -16,11 +16,11 @@ publishing the result. The JSON fields are:
 
 ```json
 {
-  "race_time_ms": 19181,
-  "race_time_ns": 19181995196,
+  "race_time_ms": 19191,
+  "race_time_ns": 19191995196,
   "race_time_bracket_ns": {
-    "lower_exclusive": 19181995195,
-    "upper_inclusive": 19181995196
+    "lower_exclusive": 19191995195,
+    "upper_inclusive": 19191995196
   }
 }
 ```
@@ -41,6 +41,11 @@ versions of the same collision substep. Each probe performs collision
 detection, collision response, and the real checkpoint/finish callback path.
 It does not interpolate vehicle position or consult a recorded replay outcome.
 
+The timestamp `T` on a physics tick is the start of the interval simulated by
+that tick. Its substeps therefore cover `[T, T + period]`, and a finish first
+registered by the game on tick `T` has a precise result in
+`(T, T + period]`. The refinement origin is `T`, not `T - period`.
+
 The probe duration is selected by binary search on the integer-nanosecond
 timeline. A failed probe moves the exclusive lower bound; a successful probe
 moves the inclusive upper bound. Search ends once the bounds are adjacent.
@@ -57,6 +62,11 @@ Reference and OptimizedCpu share the host refinement implementation and call
 their respective collision kernels for each probe. CUDA timeline execution
 uses the same bracket convention and reruns only candidates that actually
 finished, avoiding snapshot traffic for non-finishing candidates.
+
+This interval convention affects only the precise timestamp. The legacy
+prepared-tick finish time remains the input to validation classification.
+Winner ordering is otherwise unchanged; candidates tied at the legacy tick
+continue to use their precise brackets in the same order.
 
 ## Determinism
 
@@ -91,13 +101,20 @@ Backend differential replay `1858.Replay.Gbx` produced the same bracket on
 Reference, OptimizedCpu, and CUDA:
 
 ```text
-(2862623472 ns, 2862623473 ns]
+(2872623472 ns, 2872623473 ns]
 ```
 
 CUDA's per-tick CPU/device differential passed all 287 ticks of that replay.
-A separate replay with one respawn produced `(7667909287 ns,
-7667909288 ns]` on all three backends and retained a respawn count of one.
+A separate replay with one respawn produced `(7677909287 ns,
+7677909288 ns]` on all three backends and retained a respawn count of one.
 Five repeated runs on each CPU backend reproduced the same bounds.
+
+The tick-origin regression was also checked with the C02 replay whose recorded
+and legacy prepared-tick finish is `29,580 ms`. Before the correction, both
+OptimizedCpu and CUDA reported the misplaced bracket
+`(29,579,583,154 ns, 29,579,583,155 ns]`. With tick `T` used as the interval
+origin, both report `(29,589,583,154 ns, 29,589,583,155 ns]`, or approximately
+`29,589.583 ms`, while the legacy `29,580 ms` finish tick is unchanged.
 
 ## Runtime cost
 

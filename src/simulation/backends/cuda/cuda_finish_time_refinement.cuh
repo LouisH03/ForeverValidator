@@ -6,6 +6,7 @@
 #include <forevervalidator/finish_time.h>
 
 #include "simulation/backends/cuda/cuda_exact_math.cuh"
+#include "simulation/backends/cuda/cuda_finish_time_origin.cuh"
 #include "simulation/backends/cuda/cuda_physics_step.cuh"
 
 namespace forevervalidator::simulation::cuda::finish {
@@ -114,9 +115,7 @@ __device__ inline physics::Status StepAndRefine(
         float remaining = dt;
         double elapsed = 0.0;
         const std::uint64_t tickStartNs =
-                static_cast<std::uint64_t>(
-                        tick.timeMs - tick.periodMs) *
-                1000000u;
+                TickStartNanoseconds(tick.timeMs);
         for (std::uint32_t index = 0u; index < substeps; ++index) {
             const float substepDt =
                     index + 1u < substeps
