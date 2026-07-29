@@ -134,6 +134,70 @@ bool StateAndInsertionRangeParity() {
             SameEvents(legacy, optimized);
 }
 
+bool WindowAndExistingEligibilityParity() {
+    std::vector<CudaSearchInputEvent> events;
+    for (std::int32_t index = 0; index < 200; ++index) {
+        const std::uint32_t action =
+                index % 6 == 0 ? 4u
+                : index % 6 == 1 ? 1u
+                : index % 6 == 2 ? 2u
+                : index % 6 == 3 ? 3u
+                                 : 5u;
+        events.push_back(
+                {index * 10, action,
+                 index % 13 == 0 ? 0u
+                 : action == 4u ? 2u : 1u,
+                 index});
+    }
+    std::vector<std::uint32_t> legacy(events.size());
+    std::vector<std::uint32_t> optimized(events.size());
+    for (const auto &window :
+         {std::pair<std::int64_t, std::int64_t>{0, 1990},
+          {0, 0}, {105, 495}, {1990, 2500}}) {
+        const std::uint32_t begin =
+                modifier_ops::LowerBoundTime(
+                        events.data(),
+                        static_cast<std::uint32_t>(events.size()),
+                        window.first);
+        const std::uint32_t end =
+                modifier_ops::UpperBoundTime(
+                        events.data(),
+                        static_cast<std::uint32_t>(events.size()),
+                        window.second);
+        std::uint32_t linearWindowCount = 0u;
+        std::uint32_t legacyCount = 0u;
+        for (std::uint32_t index = 0u;
+             index < events.size(); ++index) {
+            const CudaSearchInputEvent &event = events[index];
+            if (event.timeMs < window.first ||
+                event.timeMs > window.second) {
+                continue;
+            }
+            ++linearWindowCount;
+            if ((event.action == 4u &&
+                 event.valueKind == 2u) ||
+                event.action == 1u || event.action == 2u ||
+                event.action == 3u) {
+                legacy[legacyCount++] = index;
+            }
+        }
+        const std::uint32_t optimizedCount =
+                modifier_ops::CollectExistingEventEligible(
+                        events.data(),
+                        static_cast<std::uint32_t>(events.size()),
+                        optimized.data(), window.first,
+                        window.second, 2u | 4u, true);
+        if (end - begin != linearWindowCount ||
+            optimizedCount != legacyCount ||
+            !std::equal(
+                    legacy.begin(), legacy.begin() + legacyCount,
+                    optimized.begin())) {
+            return false;
+        }
+    }
+    return true;
+}
+
 std::vector<std::uint32_t> LegacyEligible(
         const std::vector<CudaSearchInputEvent> &events,
         std::int64_t minimumTimeMs,
@@ -249,6 +313,10 @@ bool DeletionParity() {
 int main() {
     if (!StateAndInsertionRangeParity()) {
         std::cerr << "state/insertion range parity failed\n";
+        return 1;
+    }
+    if (!WindowAndExistingEligibilityParity()) {
+        std::cerr << "window/existing-event parity failed\n";
         return 1;
     }
     if (!DeletionParity()) {

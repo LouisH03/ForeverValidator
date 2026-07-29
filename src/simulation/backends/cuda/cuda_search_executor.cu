@@ -231,14 +231,6 @@ __device__ bool IsSteerAction(std::uint32_t action) {
     return action == 4u;
 }
 
-__device__ bool IsAccelerateAction(std::uint32_t action) {
-    return action == 1u || action == 2u;
-}
-
-__device__ bool IsBrakeAction(std::uint32_t action) {
-    return action == 3u;
-}
-
 __device__ std::int32_t SaturateAnalog(std::int64_t value) {
     if (value < -65536) {
         return -65536;
@@ -628,31 +620,11 @@ __device__ std::uint32_t CollectEligible(
         std::uint32_t *eligible,
         const CudaSearchModifierConfiguration &modifier,
         bool sortedByTime) {
-    const std::uint32_t begin = sortedByTime
-            ? modifier_ops::LowerBoundTime(
-                      events, count, modifier.window.minimumTimeMs)
-            : 0u;
-    const std::uint32_t end = sortedByTime
-            ? modifier_ops::UpperBoundTime(
-                      events, count, modifier.window.maximumTimeMs)
-            : count;
-    std::uint32_t result = 0u;
-    for (std::uint32_t index = begin; index < end; ++index) {
-        const CudaSearchInputEvent &event = events[index];
-        if (!sortedByTime &&
-            (event.timeMs < modifier.window.minimumTimeMs ||
-             event.timeMs > modifier.window.maximumTimeMs)) {
-            continue;
-        }
-        if ((IsSteerAction(event.action) && IsAnalog(event)) ||
-            ((modifier.optionFlags & 2u) != 0u &&
-             IsAccelerateAction(event.action)) ||
-            ((modifier.optionFlags & 4u) != 0u &&
-             IsBrakeAction(event.action))) {
-            eligible[result++] = index;
-        }
-    }
-    return result;
+    return modifier_ops::CollectExistingEventEligible(
+            events, count, eligible,
+            modifier.window.minimumTimeMs,
+            modifier.window.maximumTimeMs,
+            modifier.optionFlags, sortedByTime);
 }
 
 __device__ bool ApplyModifier(

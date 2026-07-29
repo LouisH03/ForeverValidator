@@ -175,6 +175,39 @@ FOREVERVALIDATOR_CUDA_HD inline bool ActionInGroup(
 }
 
 FOREVERVALIDATOR_CUDA_HD inline std::uint32_t
+CollectExistingEventEligible(
+        const CudaSearchInputEvent *events,
+        std::uint32_t count,
+        std::uint32_t *eligible,
+        std::int64_t minimumTimeMs,
+        std::int64_t maximumTimeMs,
+        std::uint32_t optionFlags,
+        bool sortedByTime) {
+    const std::uint32_t begin = sortedByTime
+            ? LowerBoundTime(events, count, minimumTimeMs)
+            : 0u;
+    const std::uint32_t end = sortedByTime
+            ? UpperBoundTime(events, count, maximumTimeMs)
+            : count;
+    std::uint32_t result = 0u;
+    for (std::uint32_t index = begin; index < end; ++index) {
+        const CudaSearchInputEvent &event = events[index];
+        if ((!sortedByTime &&
+             (event.timeMs < minimumTimeMs ||
+              event.timeMs > maximumTimeMs)) ||
+            !((event.action == 4u && event.valueKind == 2u) ||
+              ((optionFlags & 2u) != 0u &&
+               (event.action == 1u || event.action == 2u)) ||
+              ((optionFlags & 4u) != 0u &&
+               event.action == 3u))) {
+            continue;
+        }
+        eligible[result++] = index;
+    }
+    return result;
+}
+
+FOREVERVALIDATOR_CUDA_HD inline std::uint32_t
 CollectDeletionEligible(
         const CudaSearchInputEvent *events,
         std::uint32_t count,
