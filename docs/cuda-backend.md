@@ -117,6 +117,9 @@ build/cuda/cuda_replay_parity PACKS REPLAY both
 Winner-selection complexity, differential coverage, and current search
 microbenchmarks are documented in
 [CUDA winner reduction](cuda-winner-reduction.md).
+The precise finish-time search pipeline, profiled stage boundary, exact
+representative results, and main comparison are documented in
+[CUDA staged search](cuda-staged-search.md).
 
 `cuda_backend_benchmark` reports immutable packing/upload, allocation,
 timeline transfer, kernel, synchronization, device memory, throughput, and a
