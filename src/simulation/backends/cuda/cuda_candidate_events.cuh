@@ -110,6 +110,42 @@ FOREVERVALIDATOR_CANDIDATE_HD inline std::uint32_t LoadErasedSource(
             : storage.erasedSourceIndices[offset];
 }
 
+FOREVERVALIDATOR_CANDIDATE_HD inline void StoreErasedSource(
+        const CoalescedEditStorage &storage,
+        std::uint32_t candidate,
+        std::uint32_t ordinal,
+        std::uint32_t sourceIndex) {
+    const std::uint64_t offset =
+            EditOffset(storage, candidate, ordinal);
+    if (storage.packedErasedSourceIndices != nullptr) {
+        storage.packedErasedSourceIndices[offset] =
+                static_cast<std::uint16_t>(sourceIndex);
+    } else {
+        storage.erasedSourceIndices[offset] = sourceIndex;
+    }
+}
+
+FOREVERVALIDATOR_CANDIDATE_HD inline void SortErasedSources(
+        const CoalescedEditStorage &storage,
+        std::uint32_t candidate) {
+    const std::uint32_t count = storage.erasedCounts[candidate];
+    for (std::uint32_t index = 1u; index < count; ++index) {
+        const std::uint32_t value =
+                LoadErasedSource(storage, candidate, index);
+        std::uint32_t insertion = index;
+        while (insertion != 0u &&
+               LoadErasedSource(
+                       storage, candidate, insertion - 1u) > value) {
+            StoreErasedSource(
+                    storage, candidate, insertion,
+                    LoadErasedSource(
+                            storage, candidate, insertion - 1u));
+            --insertion;
+        }
+        StoreErasedSource(storage, candidate, insertion, value);
+    }
+}
+
 class EditWriter {
 public:
     FOREVERVALIDATOR_CANDIDATE_HD EditWriter(
@@ -163,14 +199,8 @@ public:
         }
         const std::uint32_t ordinal =
                 storage_.erasedCounts[candidate_]++;
-        const std::uint64_t offset =
-                EditOffset(storage_, candidate_, ordinal);
-        if (storage_.packedErasedSourceIndices != nullptr) {
-            storage_.packedErasedSourceIndices[offset] =
-                    static_cast<std::uint16_t>(sourceIndex);
-        } else {
-            storage_.erasedSourceIndices[offset] = sourceIndex;
-        }
+        StoreErasedSource(
+                storage_, candidate_, ordinal, sourceIndex);
         return true;
     }
 
@@ -194,17 +224,6 @@ struct CandidateView {
                 ? 0u : edits.erasedCounts[candidate];
     }
 
-    FOREVERVALIDATOR_CANDIDATE_HD bool SourceEdited(
-            std::uint32_t sourceIndex) const {
-        for (std::uint32_t ordinal = 0u;
-             ordinal < ErasedCount(); ++ordinal) {
-            if (LoadErasedSource(edits, candidate, ordinal) ==
-                sourceIndex) {
-                return true;
-            }
-        }
-        return false;
-    }
 };
 
 class CandidateCursor {
@@ -227,9 +246,21 @@ public:
                 return true;
             }
         }
-        while (baselineIndex_ < view_.baseline.count &&
-               view_.SourceEdited(baselineIndex_)) {
+        while (baselineIndex_ < view_.baseline.count) {
+            while (erasedOrdinal_ < view_.ErasedCount() &&
+                   LoadErasedSource(
+                           view_.edits, view_.candidate,
+                           erasedOrdinal_) < baselineIndex_) {
+                ++erasedOrdinal_;
+            }
+            if (erasedOrdinal_ >= view_.ErasedCount() ||
+                LoadErasedSource(
+                        view_.edits, view_.candidate,
+                        erasedOrdinal_) != baselineIndex_) {
+                break;
+            }
             ++baselineIndex_;
+            ++erasedOrdinal_;
         }
         if (baselineIndex_ >= view_.baseline.count) {
             return false;
@@ -244,6 +275,7 @@ private:
     std::uint32_t outputIndex_ = 0u;
     std::uint32_t baselineIndex_ = 0u;
     std::uint32_t editOrdinal_ = 0u;
+    std::uint32_t erasedOrdinal_ = 0u;
 };
 
 FOREVERVALIDATOR_CANDIDATE_HD inline std::int32_t SaturateValue(

@@ -1619,6 +1619,8 @@ __global__ void GenerateSearchCandidatesKernel(
                 mutationCounts[slot] = 0u;
                 return;
             }
+            cuda::candidate_events::SortErasedSources(
+                    candidateEdits, slot);
             eventCount = baselineInputCount -
                     candidateEdits.erasedCounts[slot];
             cuda::candidate_events::CandidateCursor cursor({
