@@ -256,6 +256,15 @@ if(FOREVERVALIDATOR_BUILD_BENCHMARKS)
         forevervalidator_configure_target(
             cuda_search_benchmark)
 
+        add_executable(cuda_modifier_event_ops_benchmark
+            tools/cuda_modifier_event_ops_benchmark.cpp)
+        target_include_directories(
+            cuda_modifier_event_ops_benchmark PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/include"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src")
+        forevervalidator_configure_target(
+            cuda_modifier_event_ops_benchmark)
+
         add_executable(cuda_replay_parity
             tools/cuda_replay_parity.cpp)
         target_include_directories(
