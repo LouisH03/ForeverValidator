@@ -99,6 +99,52 @@ FOREVERVALIDATOR_CANDIDATE_HD inline Edit LoadEdit(
              storage.values[offset]}};
 }
 
+FOREVERVALIDATOR_CANDIDATE_HD inline void StoreEdit(
+        const CoalescedEditStorage &storage,
+        std::uint32_t candidate,
+        std::uint32_t ordinal,
+        const Edit &edit) {
+    const std::uint64_t offset =
+            EditOffset(storage, candidate, ordinal);
+    if (storage.packedOutputActions != nullptr) {
+        storage.packedOutputActions[offset] =
+                edit.outputIndex |
+                (edit.event.action << 16u);
+        storage.packedValueKinds[offset] =
+                static_cast<std::uint8_t>(
+                        edit.event.valueKind);
+    } else {
+        storage.outputIndices[offset] = edit.outputIndex;
+        storage.actions[offset] = edit.event.action;
+        storage.valueKinds[offset] = edit.event.valueKind;
+    }
+    storage.times[offset] = edit.event.timeMs;
+    storage.values[offset] = edit.event.value;
+}
+
+FOREVERVALIDATOR_CANDIDATE_HD inline void SortOutputEdits(
+        const CoalescedEditStorage &storage,
+        std::uint32_t candidate) {
+    const std::uint32_t count = storage.counts[candidate];
+    for (std::uint32_t index = 1u; index < count; ++index) {
+        const Edit value = LoadEdit(storage, candidate, index);
+        std::uint32_t insertion = index;
+        while (insertion != 0u &&
+               LoadEdit(
+                       storage, candidate,
+                       insertion - 1u).outputIndex >
+                       value.outputIndex) {
+            StoreEdit(
+                    storage, candidate, insertion,
+                    LoadEdit(
+                            storage, candidate,
+                            insertion - 1u));
+            --insertion;
+        }
+        StoreEdit(storage, candidate, insertion, value);
+    }
+}
+
 FOREVERVALIDATOR_CANDIDATE_HD inline std::uint32_t LoadErasedSource(
         const CoalescedEditStorage &storage,
         std::uint32_t candidate,
@@ -159,22 +205,7 @@ public:
             return false;
         }
         const std::uint32_t ordinal = storage_.counts[candidate_]++;
-        const std::uint64_t offset =
-                EditOffset(storage_, candidate_, ordinal);
-        if (storage_.packedOutputActions != nullptr) {
-            storage_.packedOutputActions[offset] =
-                    edit.outputIndex |
-                    (edit.event.action << 16u);
-            storage_.packedValueKinds[offset] =
-                    static_cast<std::uint8_t>(
-                            edit.event.valueKind);
-        } else {
-            storage_.outputIndices[offset] = edit.outputIndex;
-            storage_.actions[offset] = edit.event.action;
-            storage_.valueKinds[offset] = edit.event.valueKind;
-        }
-        storage_.times[offset] = edit.event.timeMs;
-        storage_.values[offset] = edit.event.value;
+        StoreEdit(storage_, candidate_, ordinal, edit);
         return true;
     }
 

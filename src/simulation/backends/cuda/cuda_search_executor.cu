@@ -1429,6 +1429,7 @@ __global__ void GenerateSearchCandidatesKernel(
         bool compactRandomSteeringPipeline,
         bool compactEditPipeline,
         bool directDeletionPipeline,
+        bool directExistingEventPipeline,
         std::uint32_t eventCapacity,
         const std::uint32_t *compactInputIndices,
         std::uint32_t compactInputCount,
@@ -1488,7 +1489,9 @@ __global__ void GenerateSearchCandidatesKernel(
             events[index] = baselineInputs[index];
         }
     }
-    if (compactEditPipeline && directDeletionPipeline) {
+    if (compactEditPipeline &&
+        (directDeletionPipeline ||
+         directExistingEventPipeline)) {
         candidateEdits.counts[slot] = 0u;
         candidateEdits.erasedCounts[slot] = 0u;
     }
@@ -1555,6 +1558,78 @@ __global__ void GenerateSearchCandidatesKernel(
                     ++mutationCount;
                 }
             }
+            eventCounts[slot] = baselineInputCount;
+            mutationCounts[slot] = mutationCount;
+            activeCandidates[slot] = mutationCount != 0u;
+            return;
+        }
+        if (directExistingEventPipeline) {
+            const CudaSearchModifierConfiguration modifier =
+                    modifiers[0];
+            random.Seed(
+                    modifier.window.seed, candidateId, 0u);
+            const std::uint32_t eligibleCount =
+                    CollectEligible(
+                            baselineInputs, baselineInputCount,
+                            eligible, modifier, true);
+            if (eligibleCount == 0u) {
+                eventCounts[slot] = baselineInputCount;
+                mutationCounts[slot] = 0u;
+                activeCandidates[slot] = false;
+                return;
+            }
+            ShuffleIndices(eligible, eligibleCount, random);
+            const std::uint32_t requested = random.UniformU32(
+                    modifier.minimumCount, modifier.maximumCount);
+            const std::uint32_t count =
+                    requested < eligibleCount
+                    ? requested : eligibleCount;
+            cuda::candidate_events::EditWriter writer(
+                    candidateEdits, slot);
+            std::uint32_t mutationCount = 0u;
+            for (std::uint32_t index = 0u;
+                 index < count; ++index) {
+                const std::uint32_t source = eligible[index];
+                CudaSearchInputEvent event =
+                        baselineInputs[source];
+                static_cast<void>(random.UniformS64(0, 0));
+                if (IsSteerAction(event.action)) {
+                    if ((modifier.optionFlags & 1u) != 0u) {
+                        event.value = random.UniformS32(
+                                modifier.secondaryAnalogMinimum,
+                                modifier.secondaryAnalogMaximum);
+                    } else {
+                        const std::int32_t delta =
+                                random.UniformS32(
+                                        modifier.analogMinimum,
+                                        modifier.analogMaximum);
+                        event.value = SaturateAnalog(
+                                static_cast<std::int64_t>(
+                                        event.value) +
+                                delta);
+                    }
+                } else if (IsSwitch(event)) {
+                    event.value = event.value != 0 ? 0 : 1;
+                }
+                if (SameEvent(
+                            event, baselineInputs[source])) {
+                    continue;
+                }
+                if (!writer.Insert(source, event) ||
+                    !writer.Erase(source)) {
+                    statuses[slot] =
+                            DeviceCandidateStatus::CapacityExceeded;
+                    activeCandidates[slot] = false;
+                    eventCounts[slot] = baselineInputCount;
+                    mutationCounts[slot] = 0u;
+                    return;
+                }
+                ++mutationCount;
+            }
+            cuda::candidate_events::SortOutputEdits(
+                    candidateEdits, slot);
+            cuda::candidate_events::SortErasedSources(
+                    candidateEdits, slot);
             eventCounts[slot] = baselineInputCount;
             mutationCounts[slot] = mutationCount;
             activeCandidates[slot] = mutationCount != 0u;
@@ -2435,6 +2510,7 @@ struct CudaSearchExecutor::Impl {
     bool compactRandomSteeringPipeline = false;
     bool compactEditPipeline = false;
     bool directDeletionPipeline = false;
+    bool directExistingEventPipeline = false;
     bool materializesCandidateEvents = true;
     bool packedEditStorage = false;
     bool editStorageAliasesTemporary = false;
@@ -3081,6 +3157,7 @@ struct CudaSearchExecutor::Impl {
                 compactRandomSteeringPipeline,
                 compactEditPipeline,
                 directDeletionPipeline,
+                directExistingEventPipeline,
                 static_cast<std::uint32_t>(
                         configuration.maximumEventCount),
                 compactInputIndices.Get(),
@@ -3759,11 +3836,20 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
                 preparedConfiguration.modifiers.size() == 1u &&
                 preparedConfiguration.modifiers[0].kind ==
                         CudaSearchModifierKind::InputDeletion;
+        impl->directExistingEventPipeline =
+                impl->compactEditPipeline &&
+                impl->baselineInputsCanonical &&
+                preparedConfiguration.modifiers.size() == 1u &&
+                preparedConfiguration.modifiers[0].kind ==
+                        CudaSearchModifierKind::ExistingEvent &&
+                preparedConfiguration.modifiers[0].
+                                timeParameterMs == 0;
         impl->materializesCandidateEvents =
                 preparedConfiguration.
                         useLegacyMutationPipelineForTesting ||
                 (impl->compactEditPipeline &&
-                 !impl->directDeletionPipeline);
+                 !impl->directDeletionPipeline &&
+                 !impl->directExistingEventPipeline);
         impl->editCapacity = impl->compactEditPipeline
                 ? CompactOutputEditCapacity(
                           preparedConfiguration)

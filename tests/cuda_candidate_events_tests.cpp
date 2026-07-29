@@ -252,6 +252,44 @@ bool PackedEdits() {
             Same(result[1], baseline[0]);
 }
 
+bool SortedDirectEdits() {
+    constexpr std::uint32_t candidates = 2u;
+    constexpr std::uint32_t capacity = 3u;
+    std::uint32_t counts[candidates]{};
+    std::uint32_t erasedCounts[candidates]{};
+    std::uint32_t outputIndices[candidates * capacity]{};
+    std::int32_t times[candidates * capacity]{};
+    std::uint32_t actions[candidates * capacity]{};
+    std::uint32_t valueKinds[candidates * capacity]{};
+    std::int32_t values[candidates * capacity]{};
+    std::uint32_t erasedSources[candidates * capacity]{};
+    candidate_events::CoalescedEditStorage storage{
+            counts, erasedCounts, outputIndices, times,
+            actions, valueKinds, values, erasedSources,
+            nullptr, nullptr, nullptr,
+            candidates, capacity, capacity};
+    const CudaSearchInputEvent baseline[]{
+            {10, 4u, 2u, 10},
+            {20, 1u, 1u, 1},
+            {30, 4u, 2u, 30}};
+    candidate_events::EditWriter writer(storage, 1u);
+    if (!writer.Insert(2u, {30, 4u, 2u, 31}) ||
+        !writer.Erase(2u) ||
+        !writer.Insert(0u, {10, 4u, 2u, 11}) ||
+        !writer.Erase(0u)) {
+        return false;
+    }
+    candidate_events::SortOutputEdits(storage, 1u);
+    candidate_events::SortErasedSources(storage, 1u);
+    CudaSearchInputEvent result[3]{};
+    return candidate_events::Materialize(
+                   {{baseline, 3u, 0}, storage, 1u, 3u},
+                   result, 3u) &&
+            Same(result[0], {10, 4u, 2u, 11}) &&
+            Same(result[1], baseline[1]) &&
+            Same(result[2], {30, 4u, 2u, 31});
+}
+
 bool EqualTimeStableLastWrite() {
     std::vector<CudaSearchInputEvent> events{
             {20, UINT32_MAX, 2u, 1},
@@ -277,6 +315,7 @@ int main() {
         !CompactEdits() ||
         !ReorderedReplacement() ||
         !PackedEdits() ||
+        !SortedDirectEdits() ||
         !EqualTimeStableLastWrite()) {
         return 1;
     }

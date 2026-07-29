@@ -185,6 +185,7 @@ bool IsEvaluator(const std::string &value) {
 bool IsModifier(const std::string &value) {
     return value == "random-steering" ||
            value == "existing-event" ||
+           value == "existing-event-static" ||
            value == "smooth-steering" ||
            value == "input-insertion" ||
            value == "dense-insertion" ||
@@ -284,7 +285,8 @@ int main(int argc, char **argv) {
         return Fail(
                 "usage: PACKS REPLAY CANDIDATES TIMELINE_TICKS "
                 "REPETITIONS [BRANCH_TIME_MS] "
-                "[random-steering|existing-event|smooth-steering|"
+                "[random-steering|existing-event|existing-event-static|"
+                "smooth-steering|"
                 "input-insertion|dense-insertion|input-deletion|mixed|"
                 "cancelled] "
                 "[optimized|legacy|differential|"
@@ -441,12 +443,15 @@ int main(int argc, char **argv) {
                 PhysicsSandboxCudaRandomSteeringModifier{
                         modifierWindow});
     }
-    if (modifier == "existing-event" || modifier == "mixed") {
+    if (modifier == "existing-event" ||
+        modifier == "existing-event-static" ||
+        modifier == "mixed") {
         PhysicsSandboxCudaExistingEventModifier existing;
         existing.window = modifierWindow;
         existing.minimumCount = 1u;
         existing.maximumCount = 16u;
-        existing.maximumTimeShiftMs = 100;
+        existing.maximumTimeShiftMs =
+                modifier == "existing-event-static" ? 0 : 100;
         existing.steeringDeltaMinimum = -4096;
         existing.steeringDeltaMaximum = 4096;
         existing.toggleAccelerate = true;
