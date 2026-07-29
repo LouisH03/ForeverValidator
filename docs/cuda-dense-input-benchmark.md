@@ -50,8 +50,8 @@ The final matrix was recorded on an NVIDIA GeForce RTX 5060 8 GiB with driver
 610.43.03, CUDA 13.3.73, GCC 16.1.1, Release IPO, and native `sm_120` code.
 Each build calibrated a real resident batch independently by doubling from
 1,024 candidates until reservation failed. The preserved build selected
-32,768 candidates for the early 100-tick scenario and 16,384 for the late and
-500-tick scenarios. The compact build selected 32,768 for all three. Each
+16,384 candidates for all three scenarios. The compact build selected 32,768
+for all three. Each
 timed workload used five repetitions with the first treated as warmup.
 
 Synthetic 100/s inputs start at replay time zero, not at the mutable boundary,
@@ -135,7 +135,7 @@ window lookup, 39.9x steering lookup, 1.37x insertion replacement, and 9.32x
 
 The merged build passed all 28 configured tests. Recorded and mutated replay
 parity passed across Reference, OptimizedCpu, and CUDA for 1,255 ticks, with
-32-candidate batch checks. For all 19 workloads, `validation.jsonl` retains a
+32-candidate batch checks. For all 20 workloads, `validation.jsonl` retains a
 1,024-candidate exact before/after check and a 1,024-candidate
 optimized-versus-legacy differential. Mutation counts, winner IDs and scores,
 physics-state fingerprints, and normalized winner-input fingerprints match.
