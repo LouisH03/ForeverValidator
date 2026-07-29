@@ -484,6 +484,17 @@ if(FOREVERVALIDATOR_BUILD_TESTS)
     add_test(NAME forevervalidator-cuda-state-layout
              COMMAND forevervalidator-cuda-state-layout-tests)
 
+    add_executable(forevervalidator-cuda-candidate-events-tests
+        tests/cuda_candidate_events_tests.cpp)
+    target_include_directories(
+        forevervalidator-cuda-candidate-events-tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    forevervalidator_configure_target(
+        forevervalidator-cuda-candidate-events-tests)
+    add_test(NAME forevervalidator-cuda-candidate-events
+             COMMAND forevervalidator-cuda-candidate-events-tests)
+
     add_executable(forevervalidator-cuda-static-configuration-tests
         tests/cuda_static_configuration_tests.cpp)
     target_include_directories(
