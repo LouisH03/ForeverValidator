@@ -16,6 +16,7 @@ class Workload:
     branch_offset_ms: int
     modifier_offset_ticks: int = 0
     evaluator: str = "velocity"
+    timeline_multiplier: int = 1
 
 
 WORKLOADS = (
@@ -37,6 +38,49 @@ WORKLOADS = (
         100,
         0,
         evaluator="finish-time",
+    ),
+    Workload(
+        "existing-event-100eps-long-eval",
+        "existing-event",
+        100,
+        0,
+        timeline_multiplier=5,
+    ),
+    Workload(
+        "smooth-steering-100eps-long-eval",
+        "smooth-steering",
+        100,
+        0,
+        timeline_multiplier=5,
+    ),
+    Workload(
+        "held-insertion-100eps-long-eval",
+        "dense-insertion",
+        100,
+        0,
+        timeline_multiplier=5,
+    ),
+    Workload(
+        "input-deletion-100eps-long-eval",
+        "input-deletion",
+        100,
+        0,
+        timeline_multiplier=5,
+    ),
+    Workload(
+        "mixed-100eps-long-eval",
+        "mixed",
+        100,
+        0,
+        timeline_multiplier=5,
+    ),
+    Workload(
+        "mixed-finish-100eps-long-eval",
+        "mixed",
+        100,
+        0,
+        evaluator="finish-time",
+        timeline_multiplier=5,
     ),
 )
 
@@ -88,7 +132,7 @@ def command_for(args, benchmark, workload, candidates, pipeline, repetitions):
         str(args.packs),
         str(args.replay),
         str(candidates),
-        str(args.timeline_ticks),
+        str(args.timeline_ticks * workload.timeline_multiplier),
         str(repetitions),
         str(args.branch_time_ms + workload.branch_offset_ms),
         workload.modifier,
@@ -165,8 +209,19 @@ def summarize(label, workload, rows):
     return summary
 
 
-def calibrate(args, benchmark):
-    workload = next(item for item in WORKLOADS if item.name == "mixed-100eps-late")
+def scenario_key(workload):
+    return (workload.branch_offset_ms, workload.timeline_multiplier)
+
+
+def calibrate(args, benchmark, scenario):
+    branch_offset_ms, timeline_multiplier = scenario
+    workload = Workload(
+        "calibration",
+        "mixed",
+        100,
+        branch_offset_ms,
+        timeline_multiplier=timeline_multiplier,
+    )
     selected = None
     for candidates in args.calibration_candidates:
         try:
@@ -200,30 +255,67 @@ def ensure_exact(before, after):
 
 
 def markdown_table(comparisons):
+    speedups = []
+    for before, after in comparisons:
+        old_rate = before["median_attempts_per_second"]
+        new_rate = after["median_attempts_per_second"]
+        speedup = 0.0 if old_rate == 0.0 else new_rate / old_rate
+        speedups.append((speedup, before["workload"]))
+    median_speedup = statistics.median(item[0] for item in speedups)
+    worst_speedup, worst_workload = min(speedups)
+    best_speedup, best_workload = max(speedups)
     lines = [
-        "| Workload | Before attempts/s | After attempts/s | Speedup | "
-        "Before mutation ms | After mutation ms | Candidate input change | "
-        "Scratch change |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        f"Typical (median) throughput speedup: **{median_speedup:.2f}x**.  ",
+        f"Worst case: **{worst_speedup:.2f}x** "
+        f"({worst_workload}).  ",
+        f"Best case: **{best_speedup:.2f}x** ({best_workload}).",
+        "",
+        "| Workload | Before batch | After batch | Before attempts/s | "
+        "After attempts/s | Speedup | Mutation ms B/A | "
+        "Simulation ms B/A | Winner replay ms B/A |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for before, after in comparisons:
         old_rate = before["median_attempts_per_second"]
         new_rate = after["median_attempts_per_second"]
         speedup = 0.0 if old_rate == 0.0 else new_rate / old_rate
-        old_inputs = before["candidate_input_device_bytes"]
-        new_inputs = after["candidate_input_device_bytes"]
-        old_scratch = before["mutation_scratch_device_bytes"]
-        new_scratch = after["mutation_scratch_device_bytes"]
-        input_change = 0.0 if old_inputs == 0 else new_inputs / old_inputs - 1.0
-        scratch_change = (
-            0.0 if old_scratch == 0 else new_scratch / old_scratch - 1.0
-        )
         lines.append(
-            f"| {before['workload']} | {old_rate:,.1f} | "
-            f"{new_rate:,.1f} | {speedup:.2f}x | "
-            f"{before['median_mutation_kernel_ms']:.3f} | "
+            f"| {before['workload']} | "
+            f"{before['calibrated_batch_size']:,} | "
+            f"{after['calibrated_batch_size']:,} | "
+            f"{old_rate:,.1f} | {new_rate:,.1f} | {speedup:.2f}x | "
+            f"{before['median_mutation_kernel_ms']:.3f} / "
             f"{after['median_mutation_kernel_ms']:.3f} | "
-            f"{input_change:+.1%} | {scratch_change:+.1%} |"
+            f"{before['median_simulation_kernel_ms']:.3f} / "
+            f"{after['median_simulation_kernel_ms']:.3f} | "
+            f"{before['median_winner_kernel_ms']:.3f} / "
+            f"{after['median_winner_kernel_ms']:.3f} |"
+        )
+    lines.extend(
+        [
+            "",
+            "| Workload | Resident MiB B/A | Candidate events MiB B/A | "
+            "Scratch MiB B/A | Registers/thread B/A | "
+            "Local bytes/thread B/A | Occupancy B/A |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    mib = 1024 * 1024
+    for before, after in comparisons:
+        lines.append(
+            f"| {before['workload']} | "
+            f"{before['resident_device_bytes'] / mib:.2f} / "
+            f"{after['resident_device_bytes'] / mib:.2f} | "
+            f"{before['candidate_input_device_bytes'] / mib:.2f} / "
+            f"{after['candidate_input_device_bytes'] / mib:.2f} | "
+            f"{before['mutation_scratch_device_bytes'] / mib:.2f} / "
+            f"{after['mutation_scratch_device_bytes'] / mib:.2f} | "
+            f"{before['simulation_registers_per_thread']} / "
+            f"{after['simulation_registers_per_thread']} | "
+            f"{before['simulation_local_bytes_per_thread']} / "
+            f"{after['simulation_local_bytes_per_thread']} | "
+            f"{before['simulation_theoretical_occupancy']:.3f} / "
+            f"{after['simulation_theoretical_occupancy']:.3f} |"
         )
     return "\n".join(lines) + "\n"
 
@@ -253,25 +345,52 @@ def main():
 
     if args.repetitions < 1:
         parser.error("--repetitions must be positive")
+    if args.timeline_ticks < 1:
+        parser.error("--timeline-ticks must be positive")
     if args.candidates is not None and args.candidates < 1:
         parser.error("--candidates must be positive")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    candidates = args.candidates or calibrate(args, args.after_benchmark)
     raw_path = args.output_dir / "raw.jsonl"
     summary_path = args.output_dir / "summary.jsonl"
     table_path = args.output_dir / "before-after.md"
+    calibration_path = args.output_dir / "calibration.json"
+    builds = []
+    if args.before_benchmark:
+        builds.append(("before", args.before_benchmark))
+    builds.append(("after", args.after_benchmark))
+    scenarios = sorted({scenario_key(workload) for workload in WORKLOADS})
+    calibrated = {}
+    for label, benchmark in builds:
+        for scenario in scenarios:
+            calibrated[(label, scenario)] = (
+                args.candidates
+                if args.candidates is not None
+                else calibrate(args, benchmark, scenario)
+            )
+    calibration_document = {
+        label: {
+            f"branch_offset_ms={scenario[0]},"
+            f"timeline_ticks={args.timeline_ticks * scenario[1]}":
+                    calibrated[(label, scenario)]
+            for scenario in scenarios
+        }
+        for label, _ in builds
+    }
+    calibration_path.write_text(
+        json.dumps(calibration_document, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
     summaries = []
     comparisons = []
     with raw_path.open("w", encoding="utf-8") as raw:
         for workload in WORKLOADS:
-            builds = []
-            if args.before_benchmark:
-                builds.append(("before", args.before_benchmark))
-            builds.append(("after", args.after_benchmark))
             workload_summaries = []
             for label, benchmark in builds:
+                candidates = calibrated[
+                    (label, scenario_key(workload))
+                ]
                 rows = run_workload(
                     args,
                     benchmark,
@@ -295,7 +414,35 @@ def main():
                 summaries.append(result)
                 workload_summaries.append(result)
             if len(workload_summaries) == 2:
-                ensure_exact(*workload_summaries)
+                before_candidates = calibrated[
+                    ("before", scenario_key(workload))
+                ]
+                after_candidates = calibrated[
+                    ("after", scenario_key(workload))
+                ]
+                if before_candidates == after_candidates:
+                    ensure_exact(*workload_summaries)
+                else:
+                    parity_candidates = min(
+                        before_candidates, after_candidates
+                    )
+                    parity = []
+                    for label, benchmark in builds:
+                        parity.append(
+                            summarize(
+                                label,
+                                workload,
+                                run_workload(
+                                    args,
+                                    benchmark,
+                                    workload,
+                                    parity_candidates,
+                                    "optimized",
+                                    repetitions=1,
+                                ),
+                            )
+                        )
+                    ensure_exact(*parity)
                 comparisons.append(tuple(workload_summaries))
 
             if args.differential:
@@ -303,7 +450,9 @@ def main():
                     args,
                     args.after_benchmark,
                     workload,
-                    candidates,
+                    calibrated[
+                        ("after", scenario_key(workload))
+                    ],
                     "differential",
                     repetitions=1,
                 )
@@ -321,7 +470,8 @@ def main():
     print(
         json.dumps(
             {
-                "calibrated_batch_size": candidates,
+                "calibration": str(calibration_path),
+                "calibrated_batch_sizes": calibration_document,
                 "raw": str(raw_path),
                 "summary": str(summary_path),
                 "before_after": str(table_path) if comparisons else None,

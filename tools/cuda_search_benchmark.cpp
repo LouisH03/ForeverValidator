@@ -404,7 +404,7 @@ int main(int argc, char **argv) {
         auto replaced = sandbox.Value().ReplaceInputs(
                 BuildSyntheticInputs(
                         std::move(currentInputs).Value(),
-                        firstTickTimeMs,
+                        loaded.Value().timeMs,
                         evaluationEndTimeMs,
                         inputRate));
         if (!replaced) {
@@ -711,6 +711,8 @@ int main(int argc, char **argv) {
                   << "\"modifier_from_time_ms\":"
                   << modifierFromTimeMs << ","
                   << "\"input_events_per_second\":" << inputRate << ","
+                  << "\"synthetic_input_start_ms\":"
+                  << loaded.Value().timeMs << ","
                   << "\"normalized_input_events\":"
                   << normalizedInputCount << ","
                   << "\"modifier\":\"" << modifier << "\","
