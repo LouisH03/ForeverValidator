@@ -603,6 +603,19 @@ if(FOREVERVALIDATOR_BUILD_TESTS)
         add_test(NAME forevervalidator-cuda-race
                  COMMAND forevervalidator-cuda-race-tests)
 
+        add_executable(forevervalidator-cuda-finish-time-origin-tests
+            tests/cuda_finish_time_origin_tests.cu)
+        target_include_directories(
+            forevervalidator-cuda-finish-time-origin-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src")
+        target_link_libraries(
+            forevervalidator-cuda-finish-time-origin-tests PRIVATE
+            CUDA::cudart)
+        forevervalidator_configure_target(
+            forevervalidator-cuda-finish-time-origin-tests)
+        add_test(NAME forevervalidator-cuda-finish-time-origin
+                 COMMAND forevervalidator-cuda-finish-time-origin-tests)
+
         add_executable(forevervalidator-cuda-search-winner-reduction-tests
             tests/cuda_search_winner_reduction_tests.cu)
         target_include_directories(

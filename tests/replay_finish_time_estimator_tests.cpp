@@ -10,6 +10,8 @@
 
 namespace {
 
+constexpr std::uint64_t NanosecondsPerMillisecond = 1000000u;
+
 bool Contains(const forevervalidator::FinishTimeEstimate &estimate,
               std::uint64_t transitionNs) {
     return estimate.IsValid() &&
@@ -17,10 +19,25 @@ bool Contains(const forevervalidator::FinishTimeEstimate &estimate,
            transitionNs <= estimate.upperBoundNs;
 }
 
+bool IsInsideRegisteredTick(
+        const forevervalidator::FinishTimeEstimate &estimate,
+        std::uint32_t tickTimeMs,
+        std::uint32_t tickPeriodMs) {
+    const std::uint64_t tickStartNs =
+            static_cast<std::uint64_t>(tickTimeMs) *
+            NanosecondsPerMillisecond;
+    const std::uint64_t tickEndNs =
+            static_cast<std::uint64_t>(
+                    tickTimeMs + tickPeriodMs) *
+            NanosecondsPerMillisecond;
+    return tickStartNs < estimate.estimatedNs &&
+           estimate.estimatedNs <= tickEndNs;
+}
+
 bool TestInteriorTransition() {
     const ReplayFinishSubstep substep{1010u, 10u, 0.003, 0.002f};
-    constexpr std::uint64_t transitionNs = 1004234567u;
-    const double substepStartNs = 1003000000.0;
+    constexpr std::uint64_t transitionNs = 1014234567u;
+    const double substepStartNs = 1013000000.0;
     const auto estimate = RefineReplayFinishTime(
             substep,
             [&](float dt) {
@@ -30,13 +47,16 @@ bool TestInteriorTransition() {
                 return absoluteNs >=
                        static_cast<double>(transitionNs);
             });
-    return estimate.has_value() && Contains(*estimate, transitionNs);
+    return estimate.has_value() && Contains(*estimate, transitionNs) &&
+           IsInsideRegisteredTick(
+                   *estimate, substep.tickTimeMs,
+                   substep.tickPeriodMs);
 }
 
 bool TestExactSubstepFinish() {
     const ReplayFinishSubstep substep{20u, 10u, 0.0, 0.01f};
     const double exactEnd =
-            10000000.0 +
+            20000000.0 +
             static_cast<double>(substep.substepDurationSeconds) *
                     1000000000.0;
     const auto estimate = RefineReplayFinishTime(
@@ -48,7 +68,25 @@ bool TestExactSubstepFinish() {
            estimate->lowerBoundNs <
                    static_cast<std::uint64_t>(std::ceil(exactEnd)) &&
            static_cast<std::uint64_t>(std::ceil(exactEnd)) <=
-                   estimate->upperBoundNs;
+                   estimate->upperBoundNs &&
+           IsInsideRegisteredTick(
+                   *estimate, substep.tickTimeMs,
+                   substep.tickPeriodMs);
+}
+
+bool TestRegisteredTickStartsSimulatedInterval() {
+    const ReplayFinishSubstep substep{
+            29580u, 10u, 0.0, 0.01f};
+    const auto estimate = RefineReplayFinishTime(
+            substep,
+            [](float dt) {
+                return dt >= 0.005f;
+            });
+    return estimate.has_value() &&
+           estimate->IsValid() &&
+           IsInsideRegisteredTick(
+                   *estimate, substep.tickTimeMs,
+                   substep.tickPeriodMs);
 }
 
 bool TestNonFinish() {
@@ -109,6 +147,10 @@ int main() {
     }
     if (!TestExactSubstepFinish()) {
         std::cerr << "exact-substep transition bracket failed\n";
+        return 1;
+    }
+    if (!TestRegisteredTickStartsSimulatedInterval()) {
+        std::cerr << "registered tick did not start finish interval\n";
         return 1;
     }
     if (!TestNonFinish()) {
