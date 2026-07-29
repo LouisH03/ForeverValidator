@@ -51,7 +51,8 @@ FOREVERVALIDATOR_CUDA_HD inline std::int32_t ChannelStateAt(
         std::uint32_t action,
         std::uint32_t valueKind,
         std::int64_t timeMs,
-        bool sortedByTime) {
+        bool sortedByTime,
+        std::int32_t initialState = 0) {
     if (sortedByTime) {
         std::uint32_t index = UpperBoundTime(events, count, timeMs);
         while (index != 0u) {
@@ -61,10 +62,10 @@ FOREVERVALIDATOR_CUDA_HD inline std::int32_t ChannelStateAt(
                 return event.value;
             }
         }
-        return 0;
+        return initialState;
     }
 
-    std::int32_t state = 0;
+    std::int32_t state = initialState;
     std::int64_t bestTime = INT64_MIN;
     for (std::uint32_t index = 0u; index < count; ++index) {
         const CudaSearchInputEvent &event = events[index];
@@ -90,8 +91,9 @@ ChannelStateAtWithAppendedRun(
         std::uint32_t count,
         std::uint32_t action,
         std::uint32_t valueKind,
-        std::int64_t timeMs) {
-    std::int32_t state = 0;
+        std::int64_t timeMs,
+        std::int32_t initialState = 0) {
+    std::int32_t state = initialState;
     std::int64_t bestTime = INT64_MIN;
     std::uint32_t index =
             UpperBoundTime(events, canonicalCount, timeMs);
@@ -140,8 +142,9 @@ RemoveActionRangeAndReadState(
         std::uint32_t action,
         std::uint32_t valueKind,
         std::int64_t start,
-        std::int64_t end) {
-    std::int32_t state = 0;
+        std::int64_t end,
+        std::int32_t initialState = 0) {
+    std::int32_t state = initialState;
     std::int64_t bestTime = INT64_MIN;
     std::uint32_t destination = 0u;
     for (std::uint32_t index = 0u; index < *count; ++index) {

@@ -20,6 +20,7 @@
 #include "simulation/backends/cuda/cuda_physics_step.cuh"
 #include "simulation/backends/cuda/cuda_static_configuration.h"
 #include "simulation/backends/cuda/cuda_scene_layout.h"
+#include "simulation/backends/cuda/cuda_search_branch_state.cuh"
 #include "simulation/backends/cuda/cuda_search_winner_selection.cuh"
 #include "simulation/backends/cuda/cuda_stunts.cuh"
 #include "simulation/backends/cuda/cuda_vehicle_transitions.cuh"
@@ -39,8 +40,12 @@ enum class DeviceCandidateStatus : std::uint32_t {
 };
 
 using cuda_search_detail::BetterSample;
+using cuda_search_detail::ControlsFromState;
+using cuda_search_detail::DeviceControlState;
 using cuda_search_detail::DeviceSample;
 using cuda_search_detail::InvalidCandidateSlot;
+using cuda_search_detail::ApplyControlEvent;
+using cuda_search_detail::StuntsFromState;
 using cuda_search_detail::StrictlyBetter;
 namespace modifier_ops = cuda_search_modifier_detail;
 
@@ -220,10 +225,6 @@ __device__ bool IsAnalog(const CudaSearchInputEvent &event) {
 
 __device__ bool IsSwitch(const CudaSearchInputEvent &event) {
     return event.valueKind == 1u;
-}
-
-__device__ bool IsActiveSwitch(const CudaSearchInputEvent &event) {
-    return IsSwitch(event) && event.value != 0;
 }
 
 __device__ bool IsSteerAction(std::uint32_t action) {
@@ -573,9 +574,11 @@ __device__ std::int32_t SteeringStateAt(
         const CudaSearchInputEvent *events,
         std::uint32_t count,
         std::int64_t timeMs,
+        std::int32_t initialState,
         bool sortedByTime = false) {
     return modifier_ops::ChannelStateAt(
-            events, count, 4u, 2u, timeMs, sortedByTime);
+            events, count, 4u, 2u, timeMs,
+            sortedByTime, initialState);
 }
 
 __device__ bool SwitchStateAt(
@@ -583,10 +586,12 @@ __device__ bool SwitchStateAt(
         std::uint32_t count,
         std::uint32_t action,
         std::int64_t timeMs,
+        bool initialState,
         bool sortedByTime = false) {
     return modifier_ops::ChannelStateAt(
                    events, count, action, 1u,
-                   timeMs, sortedByTime) != 0;
+                   timeMs, sortedByTime,
+                   initialState ? 1 : 0) != 0;
 }
 
 __device__ bool PushEvent(CudaSearchInputEvent *events,
@@ -657,6 +662,7 @@ __device__ bool ApplyModifier(
         DeviceMt19937 &random,
         std::uint32_t tickDurationMs,
         std::int64_t mutableFromTimeMs,
+        const DeviceControlState &initialControls,
         const CudaSearchInputEvent *globalBaseline,
         std::uint32_t globalBaselineCount,
         CudaSearchInputEvent *events,
@@ -847,9 +853,11 @@ __device__ bool ApplyModifier(
                                           events,
                                           deformationBaselineCount,
                                           *eventCount,
-                                          4u, 2u, time)
+                                          4u, 2u, time,
+                                          initialControls.steerValue)
                         : SteeringStateAt(
-                                  events, *eventCount, time);
+                                  events, *eventCount, time,
+                                  initialControls.steerValue);
                 const std::int32_t value = SaturateAnalog(
                         static_cast<std::int64_t>(steeringState) +
                         delta);
@@ -901,7 +909,8 @@ __device__ bool ApplyModifier(
                 const std::int32_t previous =
                         modifier_ops::RemoveActionRangeAndReadState(
                                 events, eventCount, 4u, 2u,
-                                start, end);
+                                start, end,
+                                initialControls.steerValue);
                 const std::int32_t value =
                         (modifier.optionFlags & 1u) != 0u
                         ? SaturateAnalog(
@@ -926,6 +935,7 @@ __device__ bool ApplyModifier(
                                             passBaseline,
                                             passBaselineCount,
                                             end,
+                                            initialControls.steerValue,
                                             passBaselineCanonical)))) {
                     return false;
                 }
@@ -954,7 +964,12 @@ __device__ bool ApplyModifier(
                                         RemoveActionRangeAndReadState(
                                                 events, eventCount,
                                                 action, 1u,
-                                                start, end) != 0;
+                                                start, end,
+                                                action == 1u
+                                                        ? initialControls.
+                                                                  accelerate
+                                                        : initialControls.
+                                                                  brake) != 0;
                         if (!PushEvent(
                                     events, eventCount, eventCapacity,
                                     SwitchEvent(
@@ -970,6 +985,11 @@ __device__ bool ApplyModifier(
                                                     passBaseline,
                                                     passBaselineCount,
                                                     action, end,
+                                                    action == 1u
+                                                            ? initialControls.
+                                                                      accelerate
+                                                            : initialControls.
+                                                                      brake,
                                                     passBaselineCanonical)))) {
                             return false;
                         }
@@ -1049,130 +1069,6 @@ __device__ bool ApplyModifier(
     }
     }
     return true;
-}
-
-struct DeviceControlState {
-    bool accelerate = false;
-    bool brake = false;
-    bool steerRight = false;
-    bool steerLeft = false;
-    std::int32_t steerLeftTime = 0;
-    std::int32_t steerRightTime = 0;
-    std::int32_t steerTime = 0;
-    std::int32_t steerValue = 0;
-    std::int32_t accelerateTime = 0;
-    std::int32_t brakeTime = 0;
-    std::int32_t gasTime = 0;
-    std::int32_t gasValue = 0;
-    std::int64_t stuntLastChangeTime[6]{};
-};
-
-__device__ int StuntActionIndex(std::uint32_t action) {
-    switch (action) {
-    case 5u: return 0;
-    case 6u: return 1;
-    case 4u: return 2;
-    case 1u: return 3;
-    case 3u: return 4;
-    case 2u: return 5;
-    default: return -1;
-    }
-}
-
-__device__ void ApplyControlEvent(DeviceControlState &state,
-                                  const CudaSearchInputEvent &event) {
-    const int stuntIndex = StuntActionIndex(event.action);
-    if (stuntIndex >= 0) {
-        state.stuntLastChangeTime[stuntIndex] = event.timeMs;
-    }
-    switch (event.action) {
-    case 1u:
-        state.accelerate = IsActiveSwitch(event);
-        state.accelerateTime = event.timeMs;
-        break;
-    case 2u:
-        state.gasValue = event.value;
-        state.gasTime = event.timeMs;
-        break;
-    case 3u:
-        state.brake = IsActiveSwitch(event);
-        state.brakeTime = event.timeMs;
-        break;
-    case 4u:
-        state.steerValue = event.value;
-        state.steerTime = event.timeMs;
-        break;
-    case 5u:
-        state.steerLeft = IsActiveSwitch(event);
-        state.steerLeftTime = event.timeMs;
-        break;
-    case 6u:
-        state.steerRight = IsActiveSwitch(event);
-        state.steerRightTime = event.timeMs;
-        break;
-    default:
-        break;
-    }
-}
-
-__device__ ReplayVehicleControlState ControlsFromState(
-        const DeviceControlState &state) {
-    float steering = 0.0f;
-    const std::int32_t digitalSteerTime =
-            state.steerLeftTime > state.steerRightTime
-            ? state.steerLeftTime : state.steerRightTime;
-    const bool analogWins =
-            state.steerTime > digitalSteerTime ||
-            (state.steerTime == digitalSteerTime &&
-             !state.steerLeft && !state.steerRight &&
-             abs(state.steerValue) > 655);
-    if (analogWins) {
-        steering = static_cast<float>(state.steerValue) / 65536.0f;
-    } else if (state.steerLeft) {
-        steering = -1.0f;
-    } else if (state.steerRight) {
-        steering = 1.0f;
-    }
-    float gateA = 0.0f;
-    float gateB = 0.0f;
-    const std::int32_t digitalGateTime =
-            state.accelerateTime > state.brakeTime
-            ? state.accelerateTime : state.brakeTime;
-    const bool gasWins =
-            state.gasTime > digitalGateTime ||
-            (state.gasTime == digitalGateTime &&
-             !state.accelerate && !state.brake);
-    if (gasWins) {
-        if (state.gasValue <= -19661) {
-            gateA = 1.0f;
-        } else if (state.gasValue >= 19661) {
-            gateB = 1.0f;
-        }
-    } else {
-        gateA = state.accelerate ? 1.0f : 0.0f;
-        gateB = state.brake ? 1.0f : 0.0f;
-    }
-    return {gateA, gateB, steering};
-}
-
-__device__ ReplayStuntInputState StuntsFromState(
-        const DeviceControlState &state,
-        std::uint32_t prestartDurationMs) {
-    ReplayStuntInputState result;
-    auto *lastChangeTimeMs =
-            reinterpret_cast<std::uint32_t *>(
-                    &result.lastChangeTimeMs);
-    for (std::uint32_t index = 0u; index < 6u; ++index) {
-        const std::int64_t translated =
-                static_cast<std::int64_t>(prestartDurationMs) +
-                state.stuntLastChangeTime[index];
-        lastChangeTimeMs[index] = translated <= 0
-                ? 0u
-                : translated >= UINT32_MAX
-                ? UINT32_MAX
-                : static_cast<std::uint32_t>(translated);
-    }
-    return result;
 }
 
 __device__ void ApplyControlPrefix(CudaCandidatePhysicsState &state,
@@ -1379,8 +1275,8 @@ __global__ void GenerateSearchCandidatesKernel(
         const CudaSearchModifierConfiguration *modifiers,
         std::uint32_t modifierCount,
         const double *smoothWeights,
+        const DeviceControlState *mutableBoundaryControls,
         std::uint32_t tickDurationMs,
-        std::int64_t branchTimeMs,
         std::uint64_t firstCandidateId,
         std::uint32_t candidateCount,
         bool baseline,
@@ -1517,7 +1413,8 @@ __global__ void GenerateSearchCandidatesKernel(
             if (!ApplyModifier(
                         modifiers[pass], pass, candidateId,
                         random,
-                        tickDurationMs, branchTimeMs + tickDurationMs,
+                        tickDurationMs, 0,
+                        *mutableBoundaryControls,
                         baselineInputs, baselineInputCount,
                         events, &eventCount, eventCapacity,
                         temporary, passBaseline, eligible,
@@ -1539,7 +1436,7 @@ __global__ void GenerateSearchCandidatesKernel(
             eventCount = NormalizeEvents(
                     events, eventCount, temporary,
                     passBaseline, baselineInputCount,
-                    branchTimeMs + tickDurationMs,
+                    0,
                     legacyMutationPipeline, eventCapacity);
             if (eventCount == UINT32_MAX) {
                 statuses[slot] =
@@ -1583,12 +1480,14 @@ __global__ __launch_bounds__(
         const void *sceneData,
         const void *configurationData,
         const CudaCandidateState *branchState,
+        const DeviceControlState *mutableBoundaryControls,
         const CudaControlTick *baselineTicks,
         std::uint32_t timelineTickCount,
         const CudaSearchEvaluatorConfiguration *evaluator,
         std::uint32_t tickDurationMs,
         std::uint32_t prestartDurationMs,
         std::int64_t branchTimeMs,
+        std::int64_t mutableFromTimeMs,
         std::int64_t evaluationStartTimeMs,
         std::uint32_t evaluationTickCount,
         std::uint64_t firstCandidateId,
@@ -1658,20 +1557,8 @@ __global__ __launch_bounds__(
             slot,
             scratchStride,
             shapeCapacity};
-    DeviceControlState controlState;
+    DeviceControlState controlState = *mutableBoundaryControls;
     std::uint32_t eventCursor = 0u;
-    while (eventCursor < eventCount) {
-        const CudaSearchInputEvent event = CandidateInputAt(
-                baselineInputs, events, candidateInputValues,
-                compactInputOffsets,
-                compactRandomSteeringPipeline, eventCursor,
-                slot, candidateCount);
-        if (event.timeMs > branchTimeMs) {
-            break;
-        }
-        ApplyControlEvent(controlState, event);
-        ++eventCursor;
-    }
     bool evaluatorReported = false;
     const bool maximize = MaximizeEvaluator(configuredEvaluator);
     DeviceSample localBest;
@@ -1689,16 +1576,19 @@ __global__ __launch_bounds__(
                 branchTimeMs +
                 static_cast<std::int64_t>(tickIndex + 1u) *
                         tickDurationMs;
+        const std::int64_t suffixTime =
+                publicTime - mutableFromTimeMs;
         while (eventCursor < eventCount) {
             const CudaSearchInputEvent event = CandidateInputAt(
                     baselineInputs, events, candidateInputValues,
                     compactInputOffsets,
                     compactRandomSteeringPipeline, eventCursor,
                     slot, candidateCount);
-            if (event.timeMs > publicTime) {
+            if (event.timeMs > suffixTime) {
                 break;
             }
-            ApplyControlEvent(controlState, event);
+            ApplyControlEvent(
+                    controlState, event, mutableFromTimeMs);
             ++eventCursor;
         }
         CudaControlTick tick = baselineTicks[tickIndex];
@@ -1792,11 +1682,13 @@ __global__ void RefineSearchFinishTimesKernel(
         const void *sceneData,
         const void *configurationData,
         const CudaCandidateState *branchState,
+        const DeviceControlState *mutableBoundaryControls,
         const CudaControlTick *baselineTicks,
         std::uint32_t timelineTickCount,
         std::uint32_t tickDurationMs,
         std::uint32_t prestartDurationMs,
         std::int64_t branchTimeMs,
+        std::int64_t mutableFromTimeMs,
         std::uint32_t eventCapacity,
         DeviceSample *candidateBestSamples,
         cuda::finish::Refinement *finishRefinements,
@@ -1861,20 +1753,8 @@ __global__ void RefineSearchFinishTimesKernel(
             slot,
             scratchStride,
             shapeCapacity};
-    DeviceControlState controlState;
+    DeviceControlState controlState = *mutableBoundaryControls;
     std::uint32_t eventCursor = 0u;
-    while (eventCursor < eventCount) {
-        const CudaSearchInputEvent event = CandidateInputAt(
-                baselineInputs, events, candidateInputValues,
-                compactInputOffsets,
-                compactRandomSteeringPipeline, eventCursor,
-                slot, candidateCount);
-        if (event.timeMs > branchTimeMs) {
-            break;
-        }
-        ApplyControlEvent(controlState, event);
-        ++eventCursor;
-    }
     for (std::uint32_t tickIndex = 0u;
          tickIndex < timelineTickCount; ++tickIndex) {
         if ((tickIndex & 63u) == 0u &&
@@ -1887,16 +1767,19 @@ __global__ void RefineSearchFinishTimesKernel(
                 branchTimeMs +
                 static_cast<std::int64_t>(tickIndex + 1u) *
                         tickDurationMs;
+        const std::int64_t suffixTime =
+                publicTime - mutableFromTimeMs;
         while (eventCursor < eventCount) {
             const CudaSearchInputEvent event = CandidateInputAt(
                     baselineInputs, events, candidateInputValues,
                     compactInputOffsets,
                     compactRandomSteeringPipeline, eventCursor,
                     slot, candidateCount);
-            if (event.timeMs > publicTime) {
+            if (event.timeMs > suffixTime) {
                 break;
             }
-            ApplyControlEvent(controlState, event);
+            ApplyControlEvent(
+                    controlState, event, mutableFromTimeMs);
             ++eventCursor;
         }
         CudaControlTick tick = baselineTicks[tickIndex];
@@ -1979,12 +1862,14 @@ __global__ void CaptureSearchWinnerStateKernel(
         const void *sceneData,
         const void *configurationData,
         const CudaCandidateState *branchState,
+        const DeviceControlState *mutableBoundaryControls,
         const CudaControlTick *baselineTicks,
         const DeviceSample *reducedBest,
         const cuda::finish::Refinement *finishRefinements,
         std::uint32_t tickDurationMs,
         std::uint32_t prestartDurationMs,
         std::int64_t branchTimeMs,
+        std::int64_t mutableFromTimeMs,
         std::int64_t evaluationStartTimeMs,
         std::uint32_t eventCapacity,
         const CudaSearchInputEvent *baselineInputs,
@@ -2050,36 +1935,27 @@ __global__ void CaptureSearchWinnerStateKernel(
     CudaCandidateState state = *branchState;
     state.candidateId =
             static_cast<std::uint32_t>(winner.candidateId);
-    DeviceControlState controlState;
+    DeviceControlState controlState = *mutableBoundaryControls;
     std::uint32_t eventCursor = 0u;
-    while (eventCursor < eventCount) {
-        const CudaSearchInputEvent event = CandidateInputAt(
-                baselineInputs, events, candidateInputValues,
-                compactInputOffsets,
-                compactRandomSteeringPipeline, eventCursor,
-                slot, candidateCount);
-        if (event.timeMs > branchTimeMs) {
-            break;
-        }
-        ApplyControlEvent(controlState, event);
-        ++eventCursor;
-    }
     for (std::uint32_t tickIndex = 0u;
          tickIndex <= targetTick; ++tickIndex) {
         const std::int64_t publicTime =
                 branchTimeMs +
                 static_cast<std::int64_t>(tickIndex + 1u) *
                         tickDurationMs;
+        const std::int64_t suffixTime =
+                publicTime - mutableFromTimeMs;
         while (eventCursor < eventCount) {
             const CudaSearchInputEvent event = CandidateInputAt(
                     baselineInputs, events, candidateInputValues,
                     compactInputOffsets,
                     compactRandomSteeringPipeline, eventCursor,
                     slot, candidateCount);
-            if (event.timeMs > publicTime) {
+            if (event.timeMs > suffixTime) {
                 break;
             }
-            ApplyControlEvent(controlState, event);
+            ApplyControlEvent(
+                    controlState, event, mutableFromTimeMs);
             ++eventCursor;
         }
         CudaControlTick tick = baselineTicks[tickIndex];
@@ -2258,6 +2134,8 @@ struct CudaSearchExecutor::Impl {
     };
 
     CudaSearchExecutorConfiguration configuration;
+    std::vector<CudaSearchInputEvent> immutableInputPrefix;
+    std::int64_t mutableFromTimeMs = 0;
     std::uint32_t timelineTickCount = 0u;
     std::uint32_t evaluationTickCount = 0u;
     std::uint32_t collisionShapeCount = 0u;
@@ -2276,6 +2154,8 @@ struct CudaSearchExecutor::Impl {
     SimulationKernelMetrics throughputKernelMetrics;
 
     DeviceAllocation<CudaCandidateState> branchState;
+    DeviceAllocation<DeviceControlState> branchControls;
+    DeviceAllocation<DeviceControlState> mutableBoundaryControls;
     DeviceAllocation<CudaControlTick> baselineTicks;
     DeviceAllocation<CudaSearchInputEvent> baselineInputs;
     DeviceAllocation<CudaSearchModifierConfiguration> modifiers;
@@ -2319,6 +2199,8 @@ struct CudaSearchExecutor::Impl {
         residentBytes = 0u;
 #define ADD_BYTES(member) residentBytes += member.Bytes()
         ADD_BYTES(branchState);
+        ADD_BYTES(branchControls);
+        ADD_BYTES(mutableBoundaryControls);
         ADD_BYTES(baselineTicks);
         ADD_BYTES(baselineInputs);
         ADD_BYTES(modifiers);
@@ -2735,8 +2617,8 @@ struct CudaSearchExecutor::Impl {
                 static_cast<std::uint32_t>(
                         configuration.modifiers.size()),
                 smoothWeights.Get(),
+                mutableBoundaryControls.Get(),
                 configuration.tickDurationMs,
-                configuration.branchTimeMs,
                 firstCandidateId,
                 candidateCount,
                 baseline,
@@ -2790,12 +2672,14 @@ struct CudaSearchExecutor::Impl {
                         configuration.deviceScene,
                         configuration.deviceStaticConfiguration,
                         branchState.Get(),
+                        mutableBoundaryControls.Get(),
                         baselineTicks.Get(),
                         timelineTickCount,
                         evaluator.Get(),
                         configuration.tickDurationMs,
                         configuration.prestartDurationMs,
                         configuration.branchTimeMs,
+                        mutableFromTimeMs,
                         configuration.evaluationStartTimeMs,
                         evaluationTickCount,
                         firstCandidateId,
@@ -2856,11 +2740,13 @@ struct CudaSearchExecutor::Impl {
                         configuration.deviceScene,
                         configuration.deviceStaticConfiguration,
                         branchState.Get(),
+                        mutableBoundaryControls.Get(),
                         baselineTicks.Get(),
                         timelineTickCount,
                         configuration.tickDurationMs,
                         configuration.prestartDurationMs,
                         configuration.branchTimeMs,
+                        mutableFromTimeMs,
                         static_cast<std::uint32_t>(
                                 configuration.maximumEventCount),
                         candidateBestSamples.Get(),
@@ -2915,6 +2801,7 @@ struct CudaSearchExecutor::Impl {
                 configuration.deviceScene,
                 configuration.deviceStaticConfiguration,
                 branchState.Get(),
+                mutableBoundaryControls.Get(),
                 baselineTicks.Get(),
                 reducedBest.Get(),
                 configuration.evaluator.kind ==
@@ -2924,6 +2811,7 @@ struct CudaSearchExecutor::Impl {
                 configuration.tickDurationMs,
                 configuration.prestartDurationMs,
                 configuration.branchTimeMs,
+                mutableFromTimeMs,
                 configuration.evaluationStartTimeMs,
                 static_cast<std::uint32_t>(
                         configuration.maximumEventCount),
@@ -3104,12 +2992,16 @@ struct CudaSearchExecutor::Impl {
             result.best.timeMs = bestSample.timeMs;
             result.best.detail0 = bestSample.detail0;
             result.best.detail1 = bestSample.detail1;
-            result.best.inputs.resize(hostSummary.globalEventCount);
+            result.best.inputs = immutableInputPrefix;
+            const std::size_t suffixOffset =
+                    result.best.inputs.size();
+            result.best.inputs.resize(
+                    suffixOffset + hostSummary.globalEventCount);
             if (hostSummary.globalEventCount != 0u) {
                 error = cudaMemcpy(
-                        result.best.inputs.data(),
+                        result.best.inputs.data() + suffixOffset,
                         globalBestInputs.Get(),
-                        result.best.inputs.size() *
+                        hostSummary.globalEventCount *
                                 sizeof(CudaSearchInputEvent),
                         cudaMemcpyDeviceToHost);
                 if (error != cudaSuccess) {
@@ -3119,10 +3011,17 @@ struct CudaSearchExecutor::Impl {
                                     "copying CUDA winning inputs", error);
                     return result;
                 }
+                for (std::size_t index = suffixOffset;
+                     index < result.best.inputs.size(); ++index) {
+                    result.best.inputs[index] =
+                            cuda_search_detail::AbsoluteSuffixEvent(
+                                    result.best.inputs[index],
+                                    mutableFromTimeMs);
+                }
             }
             result.deviceToHostBytes += sizeof(bestSample) +
                     sizeof(result.best.state) +
-                    result.best.inputs.size() *
+                    hostSummary.globalEventCount *
                             sizeof(CudaSearchInputEvent);
         }
         if (baseline && result.status == CudaSearchStatus::Success) {
@@ -3159,6 +3058,9 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
             configuration.maximumEventCount > UINT32_MAX ||
             configuration.baselineTicks.empty() ||
             configuration.modifiers.empty() ||
+            configuration.branchTimeMs < 0 ||
+            configuration.branchTimeMs >
+                    INT32_MAX - configuration.tickDurationMs ||
             configuration.evaluationStartTimeMs <
                     configuration.branchTimeMs +
                             configuration.tickDurationMs ||
@@ -3203,34 +3105,71 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
             }
             return {};
         }
+        const std::int64_t mutableFromTimeMs =
+                configuration.branchTimeMs +
+                configuration.tickDurationMs;
+        cuda_search_detail::SearchInputPartition inputPartition;
+        if (!cuda_search_detail::PartitionSearchInputs(
+                    configuration.baselineInputs,
+                    configuration.branchTimeMs,
+                    mutableFromTimeMs,
+                    &inputPartition)) {
+            if (diagnostic != nullptr) {
+                *diagnostic =
+                        "CUDA search inputs cannot be partitioned at the mutable boundary";
+            }
+            return {};
+        }
+        CudaSearchExecutorConfiguration preparedConfiguration =
+                configuration;
+        preparedConfiguration.baselineInputs =
+                inputPartition.mutableSuffix;
+        preparedConfiguration.maximumEventCount -=
+                inputPartition.immutablePrefix.size();
+        for (CudaSearchModifierConfiguration &modifier :
+             preparedConfiguration.modifiers) {
+            if (modifier.window.maximumTimeMs < mutableFromTimeMs) {
+                if (diagnostic != nullptr) {
+                    *diagnostic =
+                            "CUDA modifier window does not intersect the mutable suffix";
+                }
+                return {};
+            }
+            modifier.window.minimumTimeMs =
+                    std::max(
+                            modifier.window.minimumTimeMs,
+                            mutableFromTimeMs) -
+                    mutableFromTimeMs;
+            modifier.window.maximumTimeMs -= mutableFromTimeMs;
+        }
         const std::uint64_t candidateEvents =
                 static_cast<std::uint64_t>(
-                        configuration.maximumBatchSize) *
-                configuration.maximumEventCount;
+                        preparedConfiguration.maximumBatchSize) *
+                preparedConfiguration.maximumEventCount;
         const std::uint64_t winnerSampleCount =
                 1u + static_cast<std::uint64_t>(
-                             configuration.maximumBatchSize);
+                             preparedConfiguration.maximumBatchSize);
         const std::uint64_t collisionCount =
                 static_cast<std::uint64_t>(
-                        configuration.maximumBatchSize) *
+                        preparedConfiguration.maximumBatchSize) *
                 cuda::collision::CollisionCapacity;
         const std::uint64_t shapeCollisionCount =
                 static_cast<std::uint64_t>(
-                        configuration.maximumBatchSize) *
+                        preparedConfiguration.maximumBatchSize) *
                 cuda::collision::ShapeCollisionCapacity;
         const std::uint64_t shapeQueryCount =
                 static_cast<std::uint64_t>(
-                        configuration.maximumBatchSize) *
+                        preparedConfiguration.maximumBatchSize) *
                 packedConfiguration.collisionShapes.count;
         const std::uint64_t surfaceHitCount =
                 static_cast<std::uint64_t>(
-                        configuration.maximumBatchSize) *
+                        preparedConfiguration.maximumBatchSize) *
                 cuda::collision::SurfaceHitCapacity;
         const std::uint64_t meshRangeCount =
                 surfaceHitCount;
         const std::uint64_t meshCellCount =
                 static_cast<std::uint64_t>(
-                        configuration.maximumBatchSize) *
+                        preparedConfiguration.maximumBatchSize) *
                 cuda::collision::MeshCellHitCapacity;
         if (candidateEvents >
                     std::numeric_limits<std::size_t>::max() ||
@@ -3255,48 +3194,49 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
         }
 
         auto impl = std::make_unique<Impl>();
-        impl->configuration = configuration;
+        impl->configuration = preparedConfiguration;
+        impl->immutableInputPrefix =
+                std::move(inputPartition.immutablePrefix);
+        impl->mutableFromTimeMs = mutableFromTimeMs;
         impl->timelineTickCount = static_cast<std::uint32_t>(
-                configuration.baselineTicks.size());
+                preparedConfiguration.baselineTicks.size());
         impl->evaluationTickCount =
                 static_cast<std::uint32_t>(evaluationTicks);
         impl->collisionShapeCount =
                 packedConfiguration.collisionShapes.count;
         impl->baselineInputsCanonical = CanonicalBaselineInputs(
-                configuration.baselineInputs,
-                configuration.branchTimeMs +
-                        configuration.tickDurationMs);
+                preparedConfiguration.baselineInputs,
+                0);
         impl->compactRandomSteeringPipeline =
-                !configuration.useLegacyMutationPipelineForTesting &&
+                !preparedConfiguration.useLegacyMutationPipelineForTesting &&
                 impl->baselineInputsCanonical &&
                 std::all_of(
-                        configuration.modifiers.begin(),
-                        configuration.modifiers.end(),
+                        preparedConfiguration.modifiers.begin(),
+                        preparedConfiguration.modifiers.end(),
                         [&](const CudaSearchModifierConfiguration &modifier) {
                             return modifier.kind ==
                                            CudaSearchModifierKind::
                                                    RandomSteering &&
                                     modifier.window.minimumTimeMs >=
-                                            configuration.branchTimeMs +
-                                            configuration.tickDurationMs;
+                                            0;
                         });
         std::vector<std::uint32_t> compactInputIndices;
         std::vector<std::uint32_t> compactInputOffsets;
         if (impl->compactRandomSteeringPipeline) {
             compactInputIndices.reserve(
-                    configuration.baselineInputs.size());
+                    preparedConfiguration.baselineInputs.size());
             compactInputOffsets.assign(
-                    configuration.baselineInputs.size(), UINT32_MAX);
+                    preparedConfiguration.baselineInputs.size(), UINT32_MAX);
             for (std::size_t inputIndex = 0u;
-                 inputIndex < configuration.baselineInputs.size();
+                 inputIndex < preparedConfiguration.baselineInputs.size();
                  ++inputIndex) {
                 const CudaSearchInputEvent &input =
-                        configuration.baselineInputs[inputIndex];
+                        preparedConfiguration.baselineInputs[inputIndex];
                 const bool selected =
                         input.action == 4u && input.valueKind == 2u &&
                         std::any_of(
-                                configuration.modifiers.begin(),
-                                configuration.modifiers.end(),
+                                preparedConfiguration.modifiers.begin(),
+                                preparedConfiguration.modifiers.end(),
                                 [&](const CudaSearchModifierConfiguration
                                             &modifier) {
                                     return input.timeMs >=
@@ -3319,17 +3259,14 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
         impl->compactInputCount =
                 static_cast<std::uint32_t>(
                         compactInputIndices.size());
-        const std::int64_t mutableFromTimeMs =
-                configuration.branchTimeMs +
-                configuration.tickDurationMs;
         impl->needsTemporaryEvents =
                 !impl->compactRandomSteeringPipeline;
         impl->needsPassBaselineEvents =
-                configuration.useLegacyMutationPipelineForTesting ||
+                preparedConfiguration.useLegacyMutationPipelineForTesting ||
                 !impl->baselineInputsCanonical ||
                 std::any_of(
-                        configuration.modifiers.begin(),
-                        configuration.modifiers.end(),
+                        preparedConfiguration.modifiers.begin(),
+                        preparedConfiguration.modifiers.end(),
                         [&](const CudaSearchModifierConfiguration &modifier) {
                             const bool heldInsertion =
                                     modifier.kind ==
@@ -3343,13 +3280,13 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
                                       modifier.brake.maximumHoldMs > 0));
                             return heldInsertion ||
                                     modifier.window.minimumTimeMs <
-                                            mutableFromTimeMs;
+                                            0;
                         });
         impl->needsEligibleIndices =
-                configuration.useLegacyMutationPipelineForTesting ||
+                preparedConfiguration.useLegacyMutationPipelineForTesting ||
                 std::any_of(
-                        configuration.modifiers.begin(),
-                        configuration.modifiers.end(),
+                        preparedConfiguration.modifiers.begin(),
+                        preparedConfiguration.modifiers.end(),
                         [](const CudaSearchModifierConfiguration &modifier) {
                             return modifier.kind ==
                                             CudaSearchModifierKind::
@@ -3359,7 +3296,7 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
                                                     InputDeletion;
                         });
         const std::size_t candidates =
-                configuration.maximumBatchSize;
+                preparedConfiguration.maximumBatchSize;
         const std::size_t eventSlots =
                 static_cast<std::size_t>(candidateEvents);
         const std::size_t winnerSampleSlots =
@@ -3381,19 +3318,21 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
                 ? candidates * impl->compactInputCount
                 : 0u;
         if (!impl->branchState.Allocate(1u) ||
+            !impl->branchControls.Allocate(1u) ||
+            !impl->mutableBoundaryControls.Allocate(1u) ||
             !impl->baselineTicks.Allocate(
-                    configuration.baselineTicks.size()) ||
+                    preparedConfiguration.baselineTicks.size()) ||
             !impl->baselineInputs.Allocate(
-                    configuration.baselineInputs.size()) ||
+                    preparedConfiguration.baselineInputs.size()) ||
             !impl->modifiers.Allocate(
-                    configuration.modifiers.size()) ||
+                    preparedConfiguration.modifiers.size()) ||
             !impl->smoothWeights.Allocate(
-                    configuration.smoothWeights.size()) ||
+                    preparedConfiguration.smoothWeights.size()) ||
             !impl->evaluator.Allocate(1u) ||
             !impl->capturedWinnerState.Allocate(1u) ||
             !impl->candidateBestSamples.Allocate(winnerSampleSlots) ||
             !impl->finishRefinements.Allocate(
-                    configuration.evaluator.kind ==
+                    preparedConfiguration.evaluator.kind ==
                                     CudaSearchEvaluatorKind::FinishTime
                             ? candidates
                             : 0u) ||
@@ -3433,7 +3372,7 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
             !impl->globalBestSample.Allocate(1u) ||
             !impl->globalBestState.Allocate(1u) ||
             !impl->globalBestInputs.Allocate(
-                    configuration.maximumEventCount) ||
+                    preparedConfiguration.maximumEventCount) ||
             !impl->globalBestEventCount.Allocate(1u) ||
             !impl->globalBestMutationCount.Allocate(1u) ||
             !impl->summary.Allocate(1u)) {
@@ -3449,7 +3388,7 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
                 impl->reducedBest.Get(),
                 winnerSampleSlots,
                 BetterSample{
-                        configuration.evaluator.kind ==
+                        preparedConfiguration.evaluator.kind ==
                                 CudaSearchEvaluatorKind::Velocity},
                 DeviceSample{});
         if (error != cudaSuccess ||
@@ -3483,8 +3422,8 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
         } while (false)
         error = cudaMemcpy(
                 impl->branchState.Get(),
-                &configuration.branchState,
-                sizeof(configuration.branchState),
+                &preparedConfiguration.branchState,
+                sizeof(preparedConfiguration.branchState),
                 cudaMemcpyHostToDevice);
         if (error != cudaSuccess) {
             if (diagnostic != nullptr) {
@@ -3493,18 +3432,40 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
             }
             return {};
         }
-        impl->initialUploadBytes += sizeof(configuration.branchState);
+        impl->initialUploadBytes += sizeof(preparedConfiguration.branchState);
+        error = cudaMemcpy(
+                impl->branchControls.Get(),
+                &inputPartition.branchControls,
+                sizeof(inputPartition.branchControls),
+                cudaMemcpyHostToDevice);
+        if (error == cudaSuccess) {
+            error = cudaMemcpy(
+                    impl->mutableBoundaryControls.Get(),
+                    &inputPartition.mutableBoundaryControls,
+                    sizeof(inputPartition.mutableBoundaryControls),
+                    cudaMemcpyHostToDevice);
+        }
+        if (error != cudaSuccess) {
+            if (diagnostic != nullptr) {
+                *diagnostic =
+                        CudaFailure("uploading CUDA branch controls", error);
+            }
+            return {};
+        }
+        impl->initialUploadBytes +=
+                sizeof(inputPartition.branchControls) +
+                sizeof(inputPartition.mutableBoundaryControls);
         UPLOAD(impl->baselineTicks,
-               configuration.baselineTicks,
+               preparedConfiguration.baselineTicks,
                "uploading CUDA baseline ticks");
         UPLOAD(impl->baselineInputs,
-               configuration.baselineInputs,
+               preparedConfiguration.baselineInputs,
                "uploading CUDA baseline inputs");
         UPLOAD(impl->modifiers,
-               configuration.modifiers,
+               preparedConfiguration.modifiers,
                "uploading CUDA modifier configuration");
         UPLOAD(impl->smoothWeights,
-               configuration.smoothWeights,
+               preparedConfiguration.smoothWeights,
                "uploading CUDA smooth weights");
         UPLOAD(impl->compactInputIndices,
                compactInputIndices,
@@ -3515,8 +3476,8 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
 #undef UPLOAD
         error = cudaMemcpy(
                 impl->evaluator.Get(),
-                &configuration.evaluator,
-                sizeof(configuration.evaluator),
+                &preparedConfiguration.evaluator,
+                sizeof(preparedConfiguration.evaluator),
                 cudaMemcpyHostToDevice);
         if (error != cudaSuccess) {
             if (diagnostic != nullptr) {
@@ -3526,7 +3487,7 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
             }
             return {};
         }
-        impl->initialUploadBytes += sizeof(configuration.evaluator);
+        impl->initialUploadBytes += sizeof(preparedConfiguration.evaluator);
         error = cudaMemset(
                 impl->globalBestSample.Get(), 0,
                 impl->globalBestSample.Bytes());
