@@ -1,6 +1,7 @@
 #include <forevervalidator/experimental/physics_sandbox.h>
 #include <forevervalidator/native.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <cstdint>
@@ -181,21 +182,116 @@ bool IsEvaluator(const std::string &value) {
            value == "volume-entry" || value == "finish-time";
 }
 
+bool IsModifier(const std::string &value) {
+    return value == "random-steering" ||
+           value == "existing-event" ||
+           value == "smooth-steering" ||
+           value == "input-insertion" ||
+           value == "dense-insertion" ||
+           value == "input-deletion" ||
+           value == "mixed" ||
+           value == "cancelled";
+}
+
+std::vector<
+        forevervalidator::experimental::PhysicsSandboxInputEvent>
+BuildSyntheticInputs(
+        std::vector<
+                forevervalidator::experimental::PhysicsSandboxInputEvent>
+                inputs,
+        std::int64_t firstTimeMs,
+        std::int64_t lastTimeMs,
+        std::uint32_t eventsPerSecond) {
+    using namespace forevervalidator::experimental;
+    if (eventsPerSecond == 0u) {
+        return inputs;
+    }
+    const std::int64_t intervalMs = std::max<std::int64_t>(
+            1, 1000 / static_cast<std::int64_t>(eventsPerSecond));
+    std::uint32_t generatedIndex = 0u;
+    for (std::int64_t timeMs = firstTimeMs;
+         timeMs <= lastTimeMs;
+         timeMs += intervalMs, ++generatedIndex) {
+        PhysicsSandboxInputEvent event;
+        event.timeMs = static_cast<std::int32_t>(timeMs);
+        switch (generatedIndex % 3u) {
+        case 0u:
+            event.action = PhysicsSandboxInputAction::Steer;
+            event.value.kind = PhysicsSandboxInputValueKind::Analog;
+            event.value.analog =
+                    static_cast<forevervalidator::AnalogInputState>(
+                            -24000 +
+                            static_cast<std::int32_t>(
+                                    generatedIndex % 17u) *
+                                    3000);
+            break;
+        case 1u:
+            event.action = PhysicsSandboxInputAction::Accelerate;
+            event.value.kind = PhysicsSandboxInputValueKind::Switch;
+            event.value.switchState =
+                    (generatedIndex / 3u) % 2u == 0u
+                    ? PhysicsSandboxSwitchState::Pressed
+                    : PhysicsSandboxSwitchState::Released;
+            break;
+        default:
+            event.action = PhysicsSandboxInputAction::Brake;
+            event.value.kind = PhysicsSandboxInputValueKind::Switch;
+            event.value.switchState =
+                    (generatedIndex / 3u) % 2u == 0u
+                    ? PhysicsSandboxSwitchState::Released
+                    : PhysicsSandboxSwitchState::Pressed;
+            break;
+        }
+        inputs.push_back(event);
+    }
+    std::stable_sort(
+            inputs.begin(), inputs.end(),
+            [](const PhysicsSandboxInputEvent &left,
+               const PhysicsSandboxInputEvent &right) {
+                return left.timeMs < right.timeMs;
+            });
+    std::vector<PhysicsSandboxInputEvent> normalized;
+    normalized.reserve(inputs.size());
+    std::size_t groupBegin = 0u;
+    for (const PhysicsSandboxInputEvent &event : inputs) {
+        if (normalized.empty() ||
+            normalized.back().timeMs != event.timeMs) {
+            groupBegin = normalized.size();
+        }
+        const auto duplicate = std::find_if(
+                normalized.begin() +
+                        static_cast<std::ptrdiff_t>(groupBegin),
+                normalized.end(),
+                [&](const PhysicsSandboxInputEvent &candidate) {
+                    return candidate.action == event.action;
+                });
+        if (duplicate == normalized.end()) {
+            normalized.push_back(event);
+        } else {
+            *duplicate = event;
+        }
+    }
+    return normalized;
+}
+
 }  // namespace
 
 int main(int argc, char **argv) {
     using namespace forevervalidator;
     using namespace forevervalidator::experimental;
 
-    if (argc < 6 || argc > 10) {
+    if (argc < 6) {
         return Fail(
                 "usage: PACKS REPLAY CANDIDATES TIMELINE_TICKS "
                 "REPETITIONS [BRANCH_TIME_MS] "
                 "[random-steering|existing-event|smooth-steering|"
-                "input-insertion|dense-insertion|input-deletion|cancelled] "
+                "input-insertion|dense-insertion|input-deletion|mixed|"
+                "cancelled] "
                 "[optimized|legacy|differential|"
                 "velocity|point|pose|volume-entry|finish-time] "
-                "[velocity|point|pose|volume-entry|finish-time]");
+                "[velocity|point|pose|volume-entry|finish-time] "
+                "[--input-rate EVENTS_PER_SECOND] "
+                "[--boundary-offset-ticks TICKS]");
     }
     const std::uint32_t candidateCount =
             static_cast<std::uint32_t>(std::stoul(argv[3]));
@@ -219,20 +315,31 @@ int main(int argc, char **argv) {
             return Fail("unknown mutation pipeline or evaluator");
         }
     }
-    if (argc == 10) {
+    if (argc >= 10) {
         if (!IsPipeline(argv[8]) || !IsEvaluator(argv[9])) {
             return Fail("explicit pipeline/evaluator pair is invalid");
         }
         pipeline = argv[8];
         evaluatorName = argv[9];
     }
-    if (modifier != "random-steering" &&
-        modifier != "existing-event" &&
-        modifier != "smooth-steering" &&
-        modifier != "input-insertion" &&
-        modifier != "dense-insertion" &&
-        modifier != "input-deletion" &&
-        modifier != "cancelled") {
+    std::uint32_t inputRate = 0u;
+    std::uint32_t boundaryOffsetTicks = 0u;
+    for (int argument = 10; argument < argc; ++argument) {
+        const std::string option = argv[argument];
+        if (argument + 1 >= argc) {
+            return Fail("benchmark option is missing a value");
+        }
+        if (option == "--input-rate") {
+            inputRate = static_cast<std::uint32_t>(
+                    std::stoul(argv[++argument]));
+        } else if (option == "--boundary-offset-ticks") {
+            boundaryOffsetTicks = static_cast<std::uint32_t>(
+                    std::stoul(argv[++argument]));
+        } else {
+            return Fail("unknown benchmark option: " + option);
+        }
+    }
+    if (!IsModifier(modifier)) {
         return Fail("unknown modifier");
     }
     if (candidateCount == 0u || timelineTicks == 0u ||
@@ -274,6 +381,39 @@ int main(int argc, char **argv) {
     if (advanceTicks > std::numeric_limits<std::uint32_t>::max()) {
         return Fail("branch time is too large");
     }
+    const std::int64_t firstTickTimeMs =
+            static_cast<std::int64_t>(branchTimeMs + tickDurationMs);
+    const std::int64_t evaluationEndTimeMs =
+            firstTickTimeMs +
+            static_cast<std::int64_t>(timelineTicks - 1u) *
+                    tickDurationMs;
+    if (boundaryOffsetTicks >= timelineTicks) {
+        return Fail("mutation boundary is outside the evaluation window");
+    }
+    const std::int64_t modifierFromTimeMs =
+            firstTickTimeMs +
+            static_cast<std::int64_t>(boundaryOffsetTicks) *
+                    tickDurationMs;
+    std::size_t normalizedInputCount = 0u;
+    if (inputRate != 0u) {
+        auto currentInputs = sandbox.Value().ReadInputs();
+        if (!currentInputs) {
+            return Fail("could not read replay inputs: " +
+                        Diagnostic(currentInputs.Error()));
+        }
+        auto replaced = sandbox.Value().ReplaceInputs(
+                BuildSyntheticInputs(
+                        std::move(currentInputs).Value(),
+                        firstTickTimeMs,
+                        evaluationEndTimeMs,
+                        inputRate));
+        if (!replaced) {
+            return Fail("could not install synthetic dense inputs: " +
+                        Diagnostic(replaced.Error()));
+        }
+        normalizedInputCount = replaced.Value();
+    }
+
     PhysicsSandboxStateView branchState = loaded.Value();
     if (advanceTicks != 0u) {
         auto advanced = sandbox.Value().AdvanceTicks(
@@ -285,30 +425,25 @@ int main(int argc, char **argv) {
         branchState = advanced.Value();
     }
 
-    const std::int64_t firstTickTimeMs =
-            static_cast<std::int64_t>(branchTimeMs + tickDurationMs);
-    const std::int64_t evaluationEndTimeMs =
-            firstTickTimeMs +
-            static_cast<std::int64_t>(timelineTicks - 1u) *
-                    tickDurationMs;
     PhysicsSandboxCudaSearchConfiguration configuration;
     configuration.maximumBatchSize =
             pipeline == "differential" ? 1u : candidateCount;
     configuration.earliestMutationTimeMs = firstTickTimeMs;
     configuration.evaluationStartTimeMs = firstTickTimeMs;
     configuration.evaluationEndTimeMs = evaluationEndTimeMs;
-    if (modifier == "random-steering" || modifier == "cancelled") {
+    const PhysicsSandboxCudaModifierWindow modifierWindow{
+            modifierFromTimeMs,
+            evaluationEndTimeMs,
+            0x6d2b79f5u};
+    if (modifier == "random-steering" || modifier == "cancelled" ||
+        modifier == "mixed") {
         configuration.modifiers.push_back(
                 PhysicsSandboxCudaRandomSteeringModifier{
-                        {firstTickTimeMs,
-                         evaluationEndTimeMs,
-                         0x6d2b79f5u}});
-    } else if (modifier == "existing-event") {
+                        modifierWindow});
+    }
+    if (modifier == "existing-event" || modifier == "mixed") {
         PhysicsSandboxCudaExistingEventModifier existing;
-        existing.window = {
-                firstTickTimeMs,
-                evaluationEndTimeMs,
-                0x6d2b79f5u};
+        existing.window = modifierWindow;
         existing.minimumCount = 1u;
         existing.maximumCount = 16u;
         existing.maximumTimeShiftMs = 100;
@@ -317,26 +452,24 @@ int main(int argc, char **argv) {
         existing.toggleAccelerate = true;
         existing.toggleBrake = true;
         configuration.modifiers.push_back(existing);
-    } else if (modifier == "smooth-steering") {
+    }
+    if (modifier == "smooth-steering" || modifier == "mixed") {
         PhysicsSandboxCudaSmoothSteeringModifier smooth;
-        smooth.window = {
-                firstTickTimeMs,
-                evaluationEndTimeMs,
-                0x6d2b79f5u};
+        smooth.window = modifierWindow;
         smooth.deformationCount = 8u;
         smooth.radiusMs = 100;
         smooth.amplitudeMinimum = -8192;
         smooth.amplitudeMaximum = 8192;
         configuration.modifiers.push_back(smooth);
-    } else if (modifier == "input-insertion" ||
-               modifier == "dense-insertion") {
+    }
+    if (modifier == "input-insertion" ||
+        modifier == "dense-insertion" ||
+        modifier == "mixed") {
         PhysicsSandboxCudaInputInsertionModifier insertion;
-        insertion.window = {
-                firstTickTimeMs,
-                evaluationEndTimeMs,
-                0x6d2b79f5u};
+        insertion.window = modifierWindow;
         insertion.steering.enabled = true;
-        const bool dense = modifier == "dense-insertion";
+        const bool dense =
+                modifier == "dense-insertion" || modifier == "mixed";
         insertion.steering.minimumCount = dense ? 16u : 1u;
         insertion.steering.maximumCount = dense ? 16u : 1u;
         insertion.steering.maximumHoldMs = dense ? 100 : 0;
@@ -349,12 +482,10 @@ int main(int argc, char **argv) {
         insertion.steeringOffsetMinimum = dense ? -4096 : 1;
         insertion.steeringOffsetMaximum = dense ? 4096 : 1;
         configuration.modifiers.push_back(insertion);
-    } else {
+    }
+    if (modifier == "input-deletion" || modifier == "mixed") {
         PhysicsSandboxCudaInputDeletionModifier deletion;
-        deletion.window = {
-                firstTickTimeMs,
-                evaluationEndTimeMs,
-                0x6d2b79f5u};
+        deletion.window = modifierWindow;
         deletion.steering.enabled = true;
         deletion.steering.maximumCount = 16u;
         deletion.accelerate.enabled = true;
@@ -403,6 +534,7 @@ int main(int argc, char **argv) {
         return Fail("could not create CUDA search session: " +
                     Diagnostic(session.Error()));
     }
+    std::uint32_t reservedBatchCapacity = configuration.maximumBatchSize;
     std::optional<PhysicsSandboxCudaSearchSession> legacySession;
     if (pipeline == "differential") {
         configuration.useLegacyMutationPipelineForTesting = true;
@@ -413,6 +545,19 @@ int main(int argc, char **argv) {
                         Diagnostic(created.Error()));
         }
         legacySession.emplace(std::move(created).Value());
+        const std::uint32_t intermediateCapacity =
+                std::max(1u, candidateCount / 2u);
+        auto optimizedIntermediate =
+                session.Value().ReserveBatchCapacity(intermediateCapacity);
+        auto legacyIntermediate =
+                legacySession->ReserveBatchCapacity(intermediateCapacity);
+        if (!optimizedIntermediate || !legacyIntermediate ||
+            optimizedIntermediate.Value() != intermediateCapacity ||
+            legacyIntermediate.Value() != intermediateCapacity) {
+            return Fail(
+                    "optimized and legacy intermediate capacity growth "
+                    "differs");
+        }
         auto optimizedCapacity =
                 session.Value().ReserveBatchCapacity(candidateCount);
         auto legacyCapacity =
@@ -423,6 +568,7 @@ int main(int argc, char **argv) {
             return Fail(
                     "optimized and legacy CUDA capacity growth differs");
         }
+        reservedBatchCapacity = optimizedCapacity.Value();
     }
     auto baseline = session.Value().EvaluateBaseline();
     if (!baseline) {
@@ -550,6 +696,8 @@ int main(int argc, char **argv) {
                   << "\"candidates\":" << candidateCount << ","
                   << "\"evaluated_candidates\":"
                   << batch.Value().evaluatedCandidateCount << ","
+                  << "\"calibrated_batch_size\":"
+                  << reservedBatchCapacity << ","
                   << "\"baseline_input_events\":"
                   << baseline.Value().bestInputs.size() << ","
                   << "\"best_input_events\":"
@@ -558,6 +706,13 @@ int main(int argc, char **argv) {
                   << batch.Value().totalMutationCount << ","
                   << "\"timeline_ticks\":" << timelineTicks << ","
                   << "\"branch_time_ms\":" << branchTimeMs << ","
+                  << "\"mutable_from_time_ms\":"
+                  << firstTickTimeMs << ","
+                  << "\"modifier_from_time_ms\":"
+                  << modifierFromTimeMs << ","
+                  << "\"input_events_per_second\":" << inputRate << ","
+                  << "\"normalized_input_events\":"
+                  << normalizedInputCount << ","
                   << "\"modifier\":\"" << modifier << "\","
                   << "\"mutation_pipeline\":\"" << pipeline
                   << "\","
@@ -607,6 +762,13 @@ int main(int argc, char **argv) {
                   << batch.Value().metrics.kernelMilliseconds << ","
                   << "\"wall_ms\":"
                   << Milliseconds(wallBegin, wallEnd) << ","
+                  << "\"attempts_per_second\":"
+                  << (Milliseconds(wallBegin, wallEnd) == 0.0
+                              ? 0.0
+                              : batch.Value().evaluatedCandidateCount *
+                                      1000.0 /
+                                      Milliseconds(wallBegin, wallEnd))
+                  << ","
                   << "\"score_initialization_kernel_ms\":"
                   << batch.Value().metrics
                              .scoreInitializationKernelMilliseconds
