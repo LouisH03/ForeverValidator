@@ -604,6 +604,18 @@ if(FOREVERVALIDATOR_BUILD_TESTS)
         add_test(NAME forevervalidator-cuda-search-winner-reduction
                  COMMAND
                  forevervalidator-cuda-search-winner-reduction-tests)
+
+        add_executable(forevervalidator-cuda-modifier-event-ops-tests
+            tests/cuda_modifier_event_ops_tests.cpp)
+        target_include_directories(
+            forevervalidator-cuda-modifier-event-ops-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/include"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src")
+        forevervalidator_configure_target(
+            forevervalidator-cuda-modifier-event-ops-tests)
+        add_test(NAME forevervalidator-cuda-modifier-event-ops
+                 COMMAND
+                 forevervalidator-cuda-modifier-event-ops-tests)
     endif()
 
     add_executable(forevervalidator-render-scene-tests

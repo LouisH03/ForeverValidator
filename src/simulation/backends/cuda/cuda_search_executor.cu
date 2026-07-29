@@ -16,6 +16,7 @@
 #include "simulation/backends/cuda/cuda_candidate_events.cuh"
 #include "simulation/backends/cuda/cuda_exact_math.cuh"
 #include "simulation/backends/cuda/cuda_finish_time_refinement.cuh"
+#include "simulation/backends/cuda/cuda_modifier_event_ops.cuh"
 #include "simulation/backends/cuda/cuda_physics_step.cuh"
 #include "simulation/backends/cuda/cuda_static_configuration.h"
 #include "simulation/backends/cuda/cuda_scene_layout.h"
@@ -41,6 +42,7 @@ using cuda_search_detail::BetterSample;
 using cuda_search_detail::DeviceSample;
 using cuda_search_detail::InvalidCandidateSlot;
 using cuda_search_detail::StrictlyBetter;
+namespace modifier_ops = cuda_search_modifier_detail;
 
 struct DeviceBatchSummary {
     CudaSearchStatus status = CudaSearchStatus::Success;
@@ -570,38 +572,21 @@ __device__ std::uint32_t EffectiveChangeCount(
 __device__ std::int32_t SteeringStateAt(
         const CudaSearchInputEvent *events,
         std::uint32_t count,
-        std::int64_t timeMs) {
-    std::int32_t state = 0;
-    std::int64_t bestTime = INT64_MIN;
-    for (std::uint32_t index = 0u; index < count; ++index) {
-        const CudaSearchInputEvent &event = events[index];
-        if (event.action != 4u || !IsAnalog(event) ||
-            event.timeMs > timeMs || event.timeMs < bestTime) {
-            continue;
-        }
-        state = event.value;
-        bestTime = event.timeMs;
-    }
-    return state;
+        std::int64_t timeMs,
+        bool sortedByTime = false) {
+    return modifier_ops::ChannelStateAt(
+            events, count, 4u, 2u, timeMs, sortedByTime);
 }
 
 __device__ bool SwitchStateAt(
         const CudaSearchInputEvent *events,
         std::uint32_t count,
         std::uint32_t action,
-        std::int64_t timeMs) {
-    bool state = false;
-    std::int64_t bestTime = INT64_MIN;
-    for (std::uint32_t index = 0u; index < count; ++index) {
-        const CudaSearchInputEvent &event = events[index];
-        if (event.action != action || !IsSwitch(event) ||
-            event.timeMs > timeMs || event.timeMs < bestTime) {
-            continue;
-        }
-        state = event.value != 0;
-        bestTime = event.timeMs;
-    }
-    return state;
+        std::int64_t timeMs,
+        bool sortedByTime = false) {
+    return modifier_ops::ChannelStateAt(
+                   events, count, action, 1u,
+                   timeMs, sortedByTime) != 0;
 }
 
 __device__ bool PushEvent(CudaSearchInputEvent *events,
@@ -632,34 +617,26 @@ __device__ CudaSearchInputEvent SwitchEvent(
             value ? 1 : 0};
 }
 
-__device__ void RemoveChannelEvents(
-        CudaSearchInputEvent *events,
-        std::uint32_t *count,
-        std::uint32_t action,
-        std::int64_t start,
-        std::int64_t end) {
-    std::uint32_t destination = 0u;
-    for (std::uint32_t index = 0u; index < *count; ++index) {
-        const CudaSearchInputEvent &event = events[index];
-        if (event.action == action &&
-            event.timeMs >= start && event.timeMs <= end) {
-            continue;
-        }
-        events[destination++] = event;
-    }
-    *count = destination;
-}
-
 __device__ std::uint32_t CollectEligible(
         const CudaSearchInputEvent *events,
         std::uint32_t count,
         std::uint32_t *eligible,
-        const CudaSearchModifierConfiguration &modifier) {
+        const CudaSearchModifierConfiguration &modifier,
+        bool sortedByTime) {
+    const std::uint32_t begin = sortedByTime
+            ? modifier_ops::LowerBoundTime(
+                      events, count, modifier.window.minimumTimeMs)
+            : 0u;
+    const std::uint32_t end = sortedByTime
+            ? modifier_ops::UpperBoundTime(
+                      events, count, modifier.window.maximumTimeMs)
+            : count;
     std::uint32_t result = 0u;
-    for (std::uint32_t index = 0u; index < count; ++index) {
+    for (std::uint32_t index = begin; index < end; ++index) {
         const CudaSearchInputEvent &event = events[index];
-        if (event.timeMs < modifier.window.minimumTimeMs ||
-            event.timeMs > modifier.window.maximumTimeMs) {
+        if (!sortedByTime &&
+            (event.timeMs < modifier.window.minimumTimeMs ||
+             event.timeMs > modifier.window.maximumTimeMs)) {
             continue;
         }
         if ((IsSteerAction(event.action) && IsAnalog(event)) ||
@@ -692,6 +669,7 @@ __device__ bool ApplyModifier(
         bool legacyMutationPipeline,
         bool *normalized) {
     const std::uint32_t passBaselineCount = *eventCount;
+    const bool passBaselineCanonical = *normalized;
     const bool insertionRestoresHeldState =
             modifier.kind == CudaSearchModifierKind::InputInsertion &&
             ((modifier.steering.enabled != 0u &&
@@ -717,11 +695,22 @@ __device__ bool ApplyModifier(
     random.Seed(modifier.window.seed, candidateId, passIndex);
 
     switch (modifier.kind) {
-    case CudaSearchModifierKind::RandomSteering:
-        for (std::uint32_t index = 0u; index < *eventCount; ++index) {
+    case CudaSearchModifierKind::RandomSteering: {
+        const std::uint32_t begin = *normalized
+                ? modifier_ops::LowerBoundTime(
+                          events, *eventCount,
+                          modifier.window.minimumTimeMs)
+                : 0u;
+        const std::uint32_t end = *normalized
+                ? modifier_ops::UpperBoundTime(
+                          events, *eventCount,
+                          modifier.window.maximumTimeMs)
+                : *eventCount;
+        for (std::uint32_t index = begin; index < end; ++index) {
             CudaSearchInputEvent &event = events[index];
-            if (event.timeMs < modifier.window.minimumTimeMs ||
-                event.timeMs > modifier.window.maximumTimeMs ||
+            if ((!*normalized &&
+                 (event.timeMs < modifier.window.minimumTimeMs ||
+                  event.timeMs > modifier.window.maximumTimeMs)) ||
                 event.action != 4u || !IsAnalog(event)) {
                 continue;
             }
@@ -747,9 +736,10 @@ __device__ bool ApplyModifier(
         }
         *normalized = true;
         break;
+    }
     case CudaSearchModifierKind::ExistingEvent: {
         const std::uint32_t eligibleCount = CollectEligible(
-                events, *eventCount, eligible, modifier);
+                events, *eventCount, eligible, modifier, *normalized);
         if (eligibleCount == 0u) {
             break;
         }
@@ -812,6 +802,10 @@ __device__ bool ApplyModifier(
     case CudaSearchModifierKind::SmoothSteering:
         for (std::uint32_t deformation = 0u;
              deformation < modifier.minimumCount; ++deformation) {
+            const std::uint32_t deformationBaselineCount =
+                    *eventCount;
+            const bool deformationBaselineCanonical =
+                    *normalized;
             const std::int64_t minimumTick =
                     modifier.window.minimumTimeMs / tickDurationMs;
             const std::int64_t maximumTick =
@@ -846,10 +840,18 @@ __device__ bool ApplyModifier(
                 const std::int64_t delta = static_cast<std::int64_t>(
                         llround(static_cast<double>(amplitude) *
                                 smoothWeights[weightIndex]));
+                const std::int32_t steeringState =
+                        deformationBaselineCanonical
+                        ? modifier_ops::
+                                  ChannelStateAtWithAppendedRun(
+                                          events,
+                                          deformationBaselineCount,
+                                          *eventCount,
+                                          4u, 2u, time)
+                        : SteeringStateAt(
+                                  events, *eventCount, time);
                 const std::int32_t value = SaturateAnalog(
-                        static_cast<std::int64_t>(
-                                SteeringStateAt(
-                                        events, *eventCount, time)) +
+                        static_cast<std::int64_t>(steeringState) +
                         delta);
                 if (!PushEvent(
                             events, eventCount, eventCapacity,
@@ -897,7 +899,9 @@ __device__ bool ApplyModifier(
                     end = modifier.window.maximumTimeMs;
                 }
                 const std::int32_t previous =
-                        SteeringStateAt(events, *eventCount, start);
+                        modifier_ops::RemoveActionRangeAndReadState(
+                                events, eventCount, 4u, 2u,
+                                start, end);
                 const std::int32_t value =
                         (modifier.optionFlags & 1u) != 0u
                         ? SaturateAnalog(
@@ -908,7 +912,6 @@ __device__ bool ApplyModifier(
                         : random.UniformS32(
                                   modifier.analogMinimum,
                                   modifier.analogMaximum);
-                RemoveChannelEvents(events, eventCount, 4u, start, end);
                 if (!PushEvent(
                             events, eventCount, eventCapacity,
                             AnalogEvent(start, 4u, value))) {
@@ -922,7 +925,8 @@ __device__ bool ApplyModifier(
                                     SteeringStateAt(
                                             passBaseline,
                                             passBaselineCount,
-                                            end)))) {
+                                            end,
+                                            passBaselineCanonical)))) {
                     return false;
                 }
             }
@@ -945,10 +949,12 @@ __device__ bool ApplyModifier(
                         if (end > modifier.window.maximumTimeMs) {
                             end = modifier.window.maximumTimeMs;
                         }
-                        const bool previous = SwitchStateAt(
-                                events, *eventCount, action, start);
-                        RemoveChannelEvents(
-                                events, eventCount, action, start, end);
+                        const bool previous =
+                                modifier_ops::
+                                        RemoveActionRangeAndReadState(
+                                                events, eventCount,
+                                                action, 1u,
+                                                start, end) != 0;
                         if (!PushEvent(
                                     events, eventCount, eventCapacity,
                                     SwitchEvent(
@@ -963,7 +969,8 @@ __device__ bool ApplyModifier(
                                             SwitchStateAt(
                                                     passBaseline,
                                                     passBaselineCount,
-                                                    action, end)))) {
+                                                    action, end,
+                                                    passBaselineCanonical)))) {
                             return false;
                         }
                     }
@@ -994,38 +1001,31 @@ __device__ bool ApplyModifier(
                     const std::uint32_t requested =
                             random.UniformU32(
                                     0u, channel.maximumCount);
+                    if (requested == 0u) {
+                        return;
+                    }
+                    const std::uint32_t initialEligibleCount =
+                            modifier_ops::CollectDeletionEligible(
+                                    events, *eventCount, eligible,
+                                    modifier.window.minimumTimeMs,
+                                    modifier.window.maximumTimeMs,
+                                    kind, *normalized);
+                    std::uint32_t eligibleCount =
+                            initialEligibleCount;
                     for (std::uint32_t removal = 0u;
                          removal < requested; ++removal) {
-                        std::uint32_t eligibleCount = 0u;
-                        for (std::uint32_t index = 0u;
-                             index < *eventCount; ++index) {
-                            const CudaSearchInputEvent &event =
-                                    events[index];
-                            const bool matches =
-                                    kind == 0u
-                                    ? IsSteerAction(event.action)
-                                    : kind == 1u
-                                    ? IsAccelerateAction(event.action)
-                                    : IsBrakeAction(event.action);
-                            if (event.timeMs >=
-                                            modifier.window.minimumTimeMs &&
-                                event.timeMs <=
-                                            modifier.window.maximumTimeMs &&
-                                matches) {
-                                eligible[eligibleCount++] = index;
-                            }
-                        }
                         if (eligibleCount == 0u) {
                             break;
                         }
-                        const std::uint32_t selected =
-                                eligible[random.UniformU32(
-                                        0u, eligibleCount - 1u)];
-                        for (std::uint32_t index = selected + 1u;
-                             index < *eventCount; ++index) {
-                            events[index - 1u] = events[index];
-                        }
-                        --*eventCount;
+                        modifier_ops::SelectDeletionRank(
+                                eligible, &eligibleCount,
+                                random.UniformU32(
+                                        0u, eligibleCount - 1u));
+                    }
+                    if (eligibleCount != initialEligibleCount) {
+                        modifier_ops::CompactSelectedDeletionTail(
+                                events, eventCount, eligible,
+                                eligibleCount, initialEligibleCount);
                     }
                 };
         deleteChannel(modifier.steering, 0u);
