@@ -21,7 +21,7 @@ build/cuda-dense/cuda_search_benchmark PACKS REPLAY \
 The matrix runner can execute a preserved base binary and the integration
 binary, reject any exact-result difference, run the optimized-versus-legacy
 differential for every workload, and emit raw JSONL, summarized JSONL, and a
-Markdown before/after table:
+Markdown before/after table plus retained parity evidence:
 
 ```sh
 tools/run_cuda_dense_input_matrix.py PACKS REPLAY \
@@ -30,8 +30,9 @@ tools/run_cuda_dense_input_matrix.py PACKS REPLAY \
   --output-dir docs/cuda-dense-input-results
 ```
 
-Without `--candidates`, the runner calibrates the batch size on the dense
-late-boundary mixed workload. The first repetition is treated as warmup.
+Without `--candidates`, the runner calibrates each build independently for
+each branch/evaluation-length scenario on the dense mixed workload. The first
+repetition is treated as warmup.
 `mutation_buffer_working_set_gbps` is only the touched-buffer-size/time proxy;
 it is not a hardware-counter claim. Use Nsight Compute for achieved DRAM
 throughput when the profiler is installed.
@@ -46,10 +47,18 @@ ctest --test-dir build/cuda-dense --output-on-failure
 ## Integrated results
 
 The final matrix was recorded on an NVIDIA GeForce RTX 5060 8 GiB with driver
-610.43.03, CUDA 13.3.73, GCC 16.1.1, Release IPO, native `sm_120` code, 4,096
-candidates, 100 ticks, and five repetitions. The first repetition was warmup.
-The behavior baseline is commit `696d835`; its benchmark executable also
-contains the benchmark-only commit `e7d4318`.
+610.43.03, CUDA 13.3.73, GCC 16.1.1, Release IPO, and native `sm_120` code.
+Each build calibrated a real resident batch independently by doubling from
+1,024 candidates until reservation failed. The preserved build selected
+32,768 candidates for the early 100-tick scenario and 16,384 for the late and
+500-tick scenarios. The compact build selected 32,768 for all three. Each
+timed workload used five repetitions with the first treated as warmup.
+
+Synthetic 100/s inputs start at replay time zero, not at the mutable boundary,
+so branch-state reconstruction includes the dense immutable prefix. The matrix
+uses 5,000 and 10,000 ms branch times plus 100 and 500 evaluation ticks. The
+behavior baseline is commit `696d835`; its benchmark executable additionally
+contains benchmark-only commits `e7d4318`, `d98dcb2`, and `17656c7`.
 
 Raw samples, summaries, and the complete per-workload table are retained in
 `docs/cuda-dense-input-results/`. The exact command was:
@@ -59,38 +68,35 @@ python tools/run_cuda_dense_input_matrix.py PACKS REPLAY \
   --before-benchmark BEFORE/cuda_search_benchmark \
   --after-benchmark build/cuda-dense/cuda_search_benchmark \
   --output-dir docs/cuda-dense-input-results \
-  --candidates 4096 --repetitions 5
+  --repetitions 5
 ```
 
-The runner also executed an optimized-versus-legacy differential for every
-workload. All 13 workloads matched the preserved implementation exactly,
-including mutation counts, winner IDs and scores, replay-state fingerprints,
-and normalized winner-input fingerprints.
+The typical median throughput improvement across 20 workloads is 2.20x. The
+worst case is RandomSteering at 1.15x and the best is dense SmoothSteering over
+500 ticks at 6.45x. Dense mixed search improves by 4.78x over 100 ticks and
+5.49x over 500 ticks. The table intentionally reports every workload and the
+worst case rather than selecting only the largest speedup.
 
-| Workload group | End-to-end attempts/s | Mutation-stage speedup | Candidate input memory | Mutation scratch |
-| --- | ---: | ---: | ---: | ---: |
-| Random steering, 10/100 eps | 1.01x / 1.01x | 0.99x / 1.02x | unchanged | unchanged |
-| Existing event, 10/100 eps | 1.00x / 1.00x | 1.01x / 1.28x | -25.8% / -50.5% | -15.7% / -34.8% |
-| Smooth steering, 10/100 eps | 1.17x / 1.20x | 2.16x / 2.34x | -13.5% / -30.9% | -9.5% / -23.0% |
-| Input insertion, sparse/held | 1.00x / 1.08x | 1.07x / 2.64x | -25.5% / -37.5% | -14.2% / -31.0% |
-| Input deletion, 10/100 eps | 1.01x / 1.02x | 2.51x / 3.49x | -25.8% / -50.5% | -15.7% / -34.8% |
-| Mixed, 10/100 eps | 1.18x / 1.20x | 2.23x / 2.33x | -10.7% / -25.5% | -9.3% / -22.6% |
-| Mixed finish-time, 100 eps | 1.32x | 2.17x | -9.0% | -8.0% |
+| Workload group | End-to-end attempts/s | Mutation-stage speedup | Candidate-event allocation |
+| --- | ---: | ---: | ---: |
+| Random steering, 10/100 eps | 1.16x / 1.15x | approximately flat per candidate | unchanged per candidate |
+| Existing event, 10/100 eps | 1.40x / 1.28x | 1.59x / 2.78x per candidate | 61.0 to 15.7 / 307.3 to 15.3 MiB |
+| Static existing event, 100 eps | 1.25x | 3.23x per candidate | 191.3 to 21.3 MiB |
+| Smooth steering, 10/100 eps | 2.48x / 3.89x | 3.11x / 5.55x per candidate | 105.0 to 77.4 / 351.3 to 77.0 MiB |
+| Input insertion, sparse/held | 1.25x / 4.66x | 1.60x / 12.17x per candidate | 61.5 to 9.6 / 331.3 to 47.8 MiB |
+| Input deletion, 10/100 eps | 1.35x / 2.15x | 8.04x / 38.86x per candidate | 61.0 to 9.2 / 307.3 to 8.8 MiB |
+| Mixed, 10/100 eps | 2.43x / 4.78x | 2.83x / 6.53x per candidate | 129.0 to 127.0 / 375.3 to 142.0 MiB |
+| Dense mixed, 500 ticks | 5.49x | 8.63x per candidate | 352.3 to 243.6 MiB |
 
-Dense late-boundary resident memory fell by 20.6 MB for ExistingEvent,
-20.6 MB for InputDeletion, 27.5 MB for held insertion, and 29.8 MB for the
-mixed pipeline. The measured simulation kernel stayed at 255 registers per
-thread and 16.67% theoretical occupancy for the 4,096-candidate latency
-launch. Local memory fell from 12,528 to 11,944 bytes per thread. The
-8,192-candidate throughput launch was also capacity-checked and reported 128
-registers, 12,008 local bytes, and 33.33% theoretical occupancy.
+The throughput kernel reports 128 registers per thread and 33.33% theoretical
+occupancy in both builds. Local memory falls from 12,592 to 12,024 bytes per
+thread. The full timing, chosen batch, resident allocation, scratch allocation,
+winner replay, register, local-memory, and occupancy results are in
+`before-after.md`.
 
 Nsight Compute is not installed on the benchmark host, so no hardware-counter
 DRAM throughput claim is made. `summary.jsonl` reports the reproducible
-candidate-input-plus-scratch working-set/time proxy instead. It rises from
-1.31 to 2.25 GB/s for dense SmoothSteering, 3.54 to 6.27 GB/s for held
-insertion, 12.70 to 26.40 GB/s for dense deletion, and 1.49 to 2.66 GB/s for
-the dense mixed pipeline.
+candidate-input-plus-scratch working-set/time proxy instead.
 
 ## Architecture
 
@@ -99,15 +105,23 @@ The executor partitions the normalized replay once at
 immutable host-owned prefix; candidate buffers contain only zero-based
 suffix-relative events. Cached branch and mutable-boundary control states
 carry held values, their exact change timestamps, and stunt timestamps into
-generation, simulation, finish refinement, and winner replay. Only the winning
-suffix is copied back and joined to the immutable prefix.
+generation, simulation, finish refinement, and winner replay. The unused
+second branch-control allocation was removed.
 
-The shared candidate-event core provides ordinal-major, warp-coalesced compact
-edits for value/time changes, replacement, insertion, and erasure. Value-only
-RandomSteering remains overlay-only. Structural pipelines materialize only
-their suffix and use a stable merge plus equal-time hash deduplication,
-preserving first-key ordering and last-write-wins values without the previous
-quadratic insertion and duplicate scans.
+Each candidate is stored as sorted output edits and sorted suppressed baseline
+indices over one shared suffix. Fields are ordinal-major so adjacent lanes read
+the same edit ordinal coalescently. Common input/action dimensions use packed
+16- and 8-bit fields; large configurations retain the wide fallback. A
+sequential cursor merges unchanged baseline events with sparse edits during
+simulation, finish refinement, state capture, and finalization. Only the
+selected winner is materialized and joined to the immutable prefix.
+
+Value-only RandomSteering retains its smaller value overlay. Pure
+InputDeletion writes suppressed source indices directly and never materializes
+candidate streams. ExistingEvent time shifts, SmoothSteering, held insertion,
+and mixed ordered passes materialize a suffix only while later modifier
+semantics require observing prior edits. Their final normalization scratch is
+then overlaid with the compact edit storage, avoiding another resident copy.
 
 Modifier execution retains ordered pass boundaries and MT19937 draw order.
 ExistingEvent uses bounded indexed eligibility, SmoothSteering queries its
@@ -121,16 +135,20 @@ window lookup, 39.9x steering lookup, 1.37x insertion replacement, and 9.32x
 
 The merged build passed all 28 configured tests. Recorded and mutated replay
 parity passed across Reference, OptimizedCpu, and CUDA for 1,255 ticks, with
-32-candidate batch checks. The dense matrix additionally covers early/late
-boundaries, 10/100 events per second, crossing time shifts, overlapping smooth
-deformations, held restoration, multi-channel deletion, mixed passes, finish
-refinement, winner capture, cancellation, two-step capacity growth, and
-candidate-ID rollover.
+32-candidate batch checks. For all 19 workloads, `validation.jsonl` retains a
+1,024-candidate exact before/after check and a 1,024-candidate
+optimized-versus-legacy differential. Mutation counts, winner IDs and scores,
+physics-state fingerprints, and normalized winner-input fingerprints match.
 
-RandomSteering was already compact and therefore remains essentially flat.
-ExistingEvent and sparse insertion are now dominated by simulation and winner
-capture, so their reduced mutation time and memory do not materially change
-whole-batch attempts/s. Structural modifiers still keep a materialized
-candidate suffix when later passes must observe earlier edits; the compact
-edit interface leaves a path to remove more of that storage, but doing so
-without changing ordered-pass semantics is the main remaining bottleneck.
+The matrix additionally covers early/late boundaries, dense inputs before the
+branch, 10/100 events per second, 100/500 evaluation ticks, crossing time
+shifts, overlapping smooth deformations, held restoration, multi-channel
+deletion, mixed passes, finish refinement, winner capture, cancellation,
+capacity growth, and candidate-ID rollover.
+
+RandomSteering was already compact and remains flat. ExistingEvent and sparse
+insertion are increasingly simulation-bound after their preprocessing
+reductions. Ordered structural pipelines still require full temporary suffixes
+during mutation generation, but those arrays are no longer candidate storage
+for simulation or winner replay. Removing that ordered-pass scratch without
+changing observable modifier order is the remaining memory opportunity.

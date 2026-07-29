@@ -24,6 +24,12 @@ WORKLOADS = (
     Workload("random-steering-100eps-late", "random-steering", 100, 5000),
     Workload("existing-event-10eps-early", "existing-event", 10, 0),
     Workload("existing-event-100eps-late", "existing-event", 100, 5000),
+    Workload(
+        "existing-event-static-100eps-early",
+        "existing-event-static",
+        100,
+        0,
+    ),
     Workload("smooth-steering-10eps-early", "smooth-steering", 10, 0),
     Workload("smooth-steering-100eps-late", "smooth-steering", 100, 5000),
     Workload("input-insertion-10eps-early", "input-insertion", 10, 0),
@@ -265,9 +271,11 @@ def markdown_table(comparisons):
     worst_speedup, worst_workload = min(speedups)
     best_speedup, best_workload = max(speedups)
     lines = [
-        f"Typical (median) throughput speedup: **{median_speedup:.2f}x**.  ",
+        f"Typical (median) throughput speedup: **{median_speedup:.2f}x**.",
+        "",
         f"Worst case: **{worst_speedup:.2f}x** "
-        f"({worst_workload}).  ",
+        f"({worst_workload}).",
+        "",
         f"Best case: **{best_speedup:.2f}x** ({best_workload}).",
         "",
         "| Workload | Before batch | After batch | Before attempts/s | "
@@ -331,11 +339,24 @@ def main():
     parser.add_argument(
         "--calibration-candidates",
         type=lambda value: tuple(int(item) for item in value.split(",")),
-        default=(1024, 2048, 4096, 8192),
+        default=(
+            1024,
+            2048,
+            4096,
+            8192,
+            16384,
+            32768,
+            65536,
+            131072,
+        ),
     )
     parser.add_argument("--timeline-ticks", type=int, default=100)
     parser.add_argument("--repetitions", type=int, default=7)
     parser.add_argument("--branch-time-ms", type=int, default=5000)
+    parser.add_argument("--parity-candidates", type=int, default=1024)
+    parser.add_argument(
+        "--differential-candidates", type=int, default=1024
+    )
     parser.add_argument(
         "--differential",
         action=argparse.BooleanOptionalAction,
@@ -349,12 +370,15 @@ def main():
         parser.error("--timeline-ticks must be positive")
     if args.candidates is not None and args.candidates < 1:
         parser.error("--candidates must be positive")
+    if args.parity_candidates < 1 or args.differential_candidates < 1:
+        parser.error("parity candidate counts must be positive")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     raw_path = args.output_dir / "raw.jsonl"
     summary_path = args.output_dir / "summary.jsonl"
     table_path = args.output_dir / "before-after.md"
     calibration_path = args.output_dir / "calibration.json"
+    validation_path = args.output_dir / "validation.jsonl"
     builds = []
     if args.before_benchmark:
         builds.append(("before", args.before_benchmark))
@@ -384,7 +408,10 @@ def main():
 
     summaries = []
     comparisons = []
-    with raw_path.open("w", encoding="utf-8") as raw:
+    with (
+        raw_path.open("w", encoding="utf-8") as raw,
+        validation_path.open("w", encoding="utf-8") as validation,
+    ):
         for workload in WORKLOADS:
             workload_summaries = []
             for label, benchmark in builds:
@@ -420,42 +447,67 @@ def main():
                 after_candidates = calibrated[
                     ("after", scenario_key(workload))
                 ]
-                if before_candidates == after_candidates:
-                    ensure_exact(*workload_summaries)
-                else:
-                    parity_candidates = min(
-                        before_candidates, after_candidates
+                parity_candidates = min(
+                    before_candidates,
+                    after_candidates,
+                    args.parity_candidates,
+                )
+                parity = []
+                for label, benchmark in builds:
+                    parity_rows = run_workload(
+                        args,
+                        benchmark,
+                        workload,
+                        parity_candidates,
+                        "optimized",
+                        repetitions=1,
                     )
-                    parity = []
-                    for label, benchmark in builds:
-                        parity.append(
-                            summarize(
-                                label,
-                                workload,
-                                run_workload(
-                                    args,
-                                    benchmark,
-                                    workload,
-                                    parity_candidates,
-                                    "optimized",
-                                    repetitions=1,
-                                ),
+                    for row in parity_rows:
+                        validation.write(
+                            json.dumps(
+                                {
+                                    "validation": "before-after",
+                                    "build": label,
+                                    "workload": workload.name,
+                                    **row,
+                                },
+                                sort_keys=True,
                             )
+                            + "\n"
                         )
-                    ensure_exact(*parity)
+                    parity.append(
+                        summarize(label, workload, parity_rows)
+                    )
+                ensure_exact(*parity)
                 comparisons.append(tuple(workload_summaries))
 
             if args.differential:
-                run_workload(
+                differential_rows = run_workload(
                     args,
                     args.after_benchmark,
                     workload,
-                    calibrated[
-                        ("after", scenario_key(workload))
-                    ],
+                    min(
+                        calibrated[
+                            ("after", scenario_key(workload))
+                        ],
+                        args.differential_candidates,
+                    ),
                     "differential",
                     repetitions=1,
                 )
+                for row in differential_rows:
+                    validation.write(
+                        json.dumps(
+                            {
+                                "validation": "optimized-legacy",
+                                "build": "after",
+                                "workload": workload.name,
+                                **row,
+                            },
+                            sort_keys=True,
+                        )
+                        + "\n"
+                    )
 
     summary_path.write_text(
         "".join(
@@ -474,6 +526,7 @@ def main():
                 "calibrated_batch_sizes": calibration_document,
                 "raw": str(raw_path),
                 "summary": str(summary_path),
+                "validation": str(validation_path),
                 "before_after": str(table_path) if comparisons else None,
                 "workloads": len(WORKLOADS),
             },
