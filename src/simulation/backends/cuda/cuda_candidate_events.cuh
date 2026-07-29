@@ -44,32 +44,30 @@ FOREVERVALIDATOR_CANDIDATE_HD inline CanonicalSuffix SuffixFrom(
             mutableFromTimeMs};
 }
 
-enum class EditKind : std::uint32_t {
-    ChangeValue,
-    ChangeTime,
-    Replace,
-    Insert,
-    Erase,
-};
-
 struct Edit {
-    EditKind kind = EditKind::ChangeValue;
-    std::uint32_t index = 0u;
+    std::uint32_t outputIndex = 0u;
     Event event{};
 };
 
 // Edit ordinal is the major dimension. Adjacent candidate lanes therefore
-// read adjacent words while executing the same modifier pass.
+// read adjacent words while consuming the same part of their sparse stream.
+// Output edits carry final events. Suppressed baseline sources are separate
+// because they need only one word.
 struct CoalescedEditStorage {
     std::uint32_t *counts = nullptr;
-    std::uint32_t *kinds = nullptr;
-    std::uint32_t *indices = nullptr;
+    std::uint32_t *erasedCounts = nullptr;
+    std::uint32_t *outputIndices = nullptr;
     std::int32_t *times = nullptr;
     std::uint32_t *actions = nullptr;
     std::uint32_t *valueKinds = nullptr;
     std::int32_t *values = nullptr;
+    std::uint32_t *erasedSourceIndices = nullptr;
+    std::uint32_t *packedOutputActions = nullptr;
+    std::uint8_t *packedValueKinds = nullptr;
+    std::uint16_t *packedErasedSourceIndices = nullptr;
     std::uint32_t candidateStride = 0u;
     std::uint32_t editCapacity = 0u;
+    std::uint32_t eraseCapacity = 0u;
 };
 
 FOREVERVALIDATOR_CANDIDATE_HD inline std::uint64_t EditOffset(
@@ -86,13 +84,30 @@ FOREVERVALIDATOR_CANDIDATE_HD inline Edit LoadEdit(
         std::uint32_t candidate,
         std::uint32_t ordinal) {
     const std::uint64_t offset = EditOffset(storage, candidate, ordinal);
+    const bool packed = storage.packedOutputActions != nullptr;
+    const std::uint32_t outputAction = packed
+            ? storage.packedOutputActions[offset]
+            : 0u;
     return {
-            static_cast<EditKind>(storage.kinds[offset]),
-            storage.indices[offset],
+            packed ? outputAction & UINT16_MAX
+                   : storage.outputIndices[offset],
             {storage.times[offset],
-             storage.actions[offset],
-             storage.valueKinds[offset],
+             packed ? outputAction >> 16u
+                    : storage.actions[offset],
+             packed ? storage.packedValueKinds[offset]
+                    : storage.valueKinds[offset],
              storage.values[offset]}};
+}
+
+FOREVERVALIDATOR_CANDIDATE_HD inline std::uint32_t LoadErasedSource(
+        const CoalescedEditStorage &storage,
+        std::uint32_t candidate,
+        std::uint32_t ordinal) {
+    const std::uint64_t offset =
+            EditOffset(storage, candidate, ordinal);
+    return storage.packedErasedSourceIndices != nullptr
+            ? storage.packedErasedSourceIndices[offset]
+            : storage.erasedSourceIndices[offset];
 }
 
 class EditWriter {
@@ -102,7 +117,7 @@ public:
             std::uint32_t candidate)
         : storage_(storage), candidate_(candidate) {}
 
-    FOREVERVALIDATOR_CANDIDATE_HD bool Append(const Edit &edit) {
+    FOREVERVALIDATOR_CANDIDATE_HD bool Output(const Edit &edit) {
         if (storage_.counts == nullptr ||
             storage_.counts[candidate_] >= storage_.editCapacity) {
             return false;
@@ -110,49 +125,53 @@ public:
         const std::uint32_t ordinal = storage_.counts[candidate_]++;
         const std::uint64_t offset =
                 EditOffset(storage_, candidate_, ordinal);
-        storage_.kinds[offset] = static_cast<std::uint32_t>(edit.kind);
-        storage_.indices[offset] = edit.index;
+        if (storage_.packedOutputActions != nullptr) {
+            storage_.packedOutputActions[offset] =
+                    edit.outputIndex |
+                    (edit.event.action << 16u);
+            storage_.packedValueKinds[offset] =
+                    static_cast<std::uint8_t>(
+                            edit.event.valueKind);
+        } else {
+            storage_.outputIndices[offset] = edit.outputIndex;
+            storage_.actions[offset] = edit.event.action;
+            storage_.valueKinds[offset] = edit.event.valueKind;
+        }
         storage_.times[offset] = edit.event.timeMs;
-        storage_.actions[offset] = edit.event.action;
-        storage_.valueKinds[offset] = edit.event.valueKind;
         storage_.values[offset] = edit.event.value;
         return true;
     }
 
-    FOREVERVALIDATOR_CANDIDATE_HD bool ChangeValue(
-            std::uint32_t index,
-            std::int32_t value) {
-        Edit edit;
-        edit.kind = EditKind::ChangeValue;
-        edit.index = index;
-        edit.event.value = value;
-        return Append(edit);
-    }
-
-    FOREVERVALIDATOR_CANDIDATE_HD bool ChangeTime(
-            std::uint32_t index,
-            std::int32_t timeMs) {
-        Edit edit;
-        edit.kind = EditKind::ChangeTime;
-        edit.index = index;
-        edit.event.timeMs = timeMs;
-        return Append(edit);
-    }
-
     FOREVERVALIDATOR_CANDIDATE_HD bool Replace(
-            std::uint32_t index,
+            std::uint32_t outputIndex,
             const Event &event) {
-        return Append({EditKind::Replace, index, event});
+        return Output({outputIndex, event});
     }
 
     FOREVERVALIDATOR_CANDIDATE_HD bool Insert(
-            std::uint32_t index,
+            std::uint32_t outputIndex,
             const Event &event) {
-        return Append({EditKind::Insert, index, event});
+        return Output({outputIndex, event});
     }
 
-    FOREVERVALIDATOR_CANDIDATE_HD bool Erase(std::uint32_t index) {
-        return Append({EditKind::Erase, index, {}});
+    FOREVERVALIDATOR_CANDIDATE_HD bool Erase(
+            std::uint32_t sourceIndex) {
+        if (storage_.erasedCounts == nullptr ||
+            storage_.erasedCounts[candidate_] >=
+                    storage_.eraseCapacity) {
+            return false;
+        }
+        const std::uint32_t ordinal =
+                storage_.erasedCounts[candidate_]++;
+        const std::uint64_t offset =
+                EditOffset(storage_, candidate_, ordinal);
+        if (storage_.packedErasedSourceIndices != nullptr) {
+            storage_.packedErasedSourceIndices[offset] =
+                    static_cast<std::uint16_t>(sourceIndex);
+        } else {
+            storage_.erasedSourceIndices[offset] = sourceIndex;
+        }
+        return true;
     }
 
 private:
@@ -164,37 +183,67 @@ struct CandidateView {
     CanonicalSuffix baseline{};
     CoalescedEditStorage edits{};
     std::uint32_t candidate = 0u;
+    std::uint32_t finalCount = 0u;
 
     FOREVERVALIDATOR_CANDIDATE_HD std::uint32_t EditCount() const {
         return edits.counts == nullptr ? 0u : edits.counts[candidate];
     }
 
-    FOREVERVALIDATOR_CANDIDATE_HD bool RequiresMaterialization() const {
+    FOREVERVALIDATOR_CANDIDATE_HD std::uint32_t ErasedCount() const {
+        return edits.erasedCounts == nullptr
+                ? 0u : edits.erasedCounts[candidate];
+    }
+
+    FOREVERVALIDATOR_CANDIDATE_HD bool SourceEdited(
+            std::uint32_t sourceIndex) const {
         for (std::uint32_t ordinal = 0u;
-             ordinal < EditCount(); ++ordinal) {
-            if (LoadEdit(edits, candidate, ordinal).kind !=
-                EditKind::ChangeValue) {
+             ordinal < ErasedCount(); ++ordinal) {
+            if (LoadErasedSource(edits, candidate, ordinal) ==
+                sourceIndex) {
                 return true;
             }
         }
         return false;
     }
+};
 
-    // Value-only modifier pipelines can be consumed without a candidate-sized
-    // event array. Later writes win, matching ordered modifier passes.
-    FOREVERVALIDATOR_CANDIDATE_HD Event OverlayAt(
-            std::uint32_t index) const {
-        Event result = baseline.events[index];
-        for (std::uint32_t ordinal = 0u;
-             ordinal < EditCount(); ++ordinal) {
-            const Edit edit = LoadEdit(edits, candidate, ordinal);
-            if (edit.kind == EditKind::ChangeValue &&
-                edit.index == index) {
-                result.value = edit.event.value;
+class CandidateCursor {
+public:
+    FOREVERVALIDATOR_CANDIDATE_HD explicit CandidateCursor(
+            CandidateView view)
+        : view_(view) {}
+
+    FOREVERVALIDATOR_CANDIDATE_HD bool Next(Event *event) {
+        if (event == nullptr || outputIndex_ >= view_.finalCount) {
+            return false;
+        }
+        if (editOrdinal_ < view_.EditCount()) {
+            const Edit edit = LoadEdit(
+                    view_.edits, view_.candidate, editOrdinal_);
+            if (edit.outputIndex == outputIndex_) {
+                *event = edit.event;
+                ++editOrdinal_;
+                ++outputIndex_;
+                return true;
             }
         }
-        return result;
+        while (baselineIndex_ < view_.baseline.count &&
+               view_.SourceEdited(baselineIndex_)) {
+            ++baselineIndex_;
+        }
+        if (baselineIndex_ >= view_.baseline.count) {
+            return false;
+        }
+        *event = view_.baseline.events[baselineIndex_++];
+        ++outputIndex_;
+        return true;
     }
+
+private:
+    CandidateView view_{};
+    std::uint32_t outputIndex_ = 0u;
+    std::uint32_t baselineIndex_ = 0u;
+    std::uint32_t editOrdinal_ = 0u;
 };
 
 FOREVERVALIDATOR_CANDIDATE_HD inline std::int32_t SaturateValue(
@@ -362,77 +411,20 @@ FOREVERVALIDATOR_CANDIDATE_HD inline std::uint32_t NormalizeWithPrefix(
     return prefixCount + suffixCount;
 }
 
-FOREVERVALIDATOR_CANDIDATE_HD inline bool ApplyOrderedEdits(
+FOREVERVALIDATOR_CANDIDATE_HD inline bool Materialize(
         const CandidateView &candidate,
         Event *events,
-        std::uint32_t *count,
         std::uint32_t capacity) {
-    if (candidate.baseline.count > capacity) {
+    if (candidate.finalCount > capacity) {
         return false;
     }
-    *count = candidate.baseline.count;
-    for (std::uint32_t index = 0u; index < *count; ++index) {
-        events[index] = candidate.baseline.events[index];
-    }
-    for (std::uint32_t ordinal = 0u;
-         ordinal < candidate.EditCount(); ++ordinal) {
-        const Edit edit =
-                LoadEdit(candidate.edits, candidate.candidate, ordinal);
-        switch (edit.kind) {
-        case EditKind::ChangeValue:
-            if (edit.index >= *count) {
-                return false;
-            }
-            events[edit.index].value = edit.event.value;
-            break;
-        case EditKind::ChangeTime:
-            if (edit.index >= *count) {
-                return false;
-            }
-            events[edit.index].timeMs = edit.event.timeMs;
-            break;
-        case EditKind::Replace:
-            if (edit.index >= *count) {
-                return false;
-            }
-            events[edit.index] = edit.event;
-            break;
-        case EditKind::Insert:
-            if (edit.index > *count || *count >= capacity) {
-                return false;
-            }
-            for (std::uint32_t index = *count;
-                 index > edit.index; --index) {
-                events[index] = events[index - 1u];
-            }
-            events[edit.index] = edit.event;
-            ++*count;
-            break;
-        case EditKind::Erase:
-            if (edit.index >= *count) {
-                return false;
-            }
-            for (std::uint32_t index = edit.index + 1u;
-                 index < *count; ++index) {
-                events[index - 1u] = events[index];
-            }
-            --*count;
-            break;
+    CandidateCursor cursor(candidate);
+    for (std::uint32_t index = 0u;
+         index < candidate.finalCount; ++index) {
+        if (!cursor.Next(events + index)) {
+            return false;
         }
     }
-    return true;
-}
-
-FOREVERVALIDATOR_CANDIDATE_HD inline bool MaterializeNormalized(
-        const CandidateView &candidate,
-        Event *events,
-        Event *scratch,
-        std::uint32_t *count,
-        std::uint32_t capacity) {
-    if (!ApplyOrderedEdits(candidate, events, count, capacity)) {
-        return false;
-    }
-    *count = NormalizeSuffix(events, *count, scratch);
     return true;
 }
 
