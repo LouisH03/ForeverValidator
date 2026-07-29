@@ -1863,284 +1863,6 @@ __global__ __launch_bounds__(
     candidateBestSamples[slot + 1u] = localBest;
 }
 
-struct StagedSearchRun {
-    std::uint64_t firstCandidateId = 0u;
-    bool baseline = false;
-    bool validBranchState = false;
-};
-
-struct StagedSearchFields {
-    CudaCandidatePhysicsState *states = nullptr;
-    DeviceControlState *controls = nullptr;
-    std::uint32_t *eventCursors = nullptr;
-};
-
-__global__ void ConfigureStagedSearchRunKernel(
-        StagedSearchRun *run,
-        std::uint64_t firstCandidateId,
-        bool baseline,
-        bool validBranchState) {
-    if (blockIdx.x == 0u && threadIdx.x == 0u) {
-        run->firstCandidateId = firstCandidateId;
-        run->baseline = baseline;
-        run->validBranchState = validBranchState;
-    }
-}
-
-__global__ void InitializeStagedSearchKernel(
-        const CudaCandidateState *branchState,
-        std::int64_t branchTimeMs,
-        std::uint32_t eventCapacity,
-        const CudaSearchInputEvent *baselineInputs,
-        const CudaSearchInputEvent *candidateEvents,
-        const std::int32_t *candidateInputValues,
-        const std::uint32_t *compactInputOffsets,
-        std::uint32_t compactInputCount,
-        bool compactRandomSteeringPipeline,
-        const std::uint32_t *eventCounts,
-        const std::uint32_t *activeCandidateSlots,
-        const std::uint32_t *activeCandidateCount,
-        const StagedSearchRun *run,
-        StagedSearchFields fields) {
-    const std::uint32_t queueIndex =
-            blockIdx.x * blockDim.x + threadIdx.x;
-    if (queueIndex >= *activeCandidateCount) {
-        return;
-    }
-    const std::uint32_t slot =
-            activeCandidateSlots[queueIndex];
-    const CudaSearchInputEvent *events =
-            candidateEvents == nullptr
-            ? nullptr
-            : candidateEvents +
-                      static_cast<std::uint64_t>(slot) *
-                              eventCapacity;
-    const std::int32_t *compactValues =
-            candidateInputValues == nullptr
-            ? nullptr
-            : candidateInputValues +
-                      static_cast<std::uint64_t>(slot) *
-                              compactInputCount;
-    fields.states[slot] =
-            static_cast<const CudaCandidatePhysicsState &>(
-                    *branchState);
-    fields.states[slot].candidateId =
-            static_cast<std::uint32_t>(
-                    run->firstCandidateId + slot);
-    DeviceControlState control;
-    std::uint32_t eventCursor = 0u;
-    while (eventCursor < eventCounts[slot]) {
-        const CudaSearchInputEvent event = CandidateInputAt(
-                baselineInputs, events, compactValues,
-                compactInputOffsets,
-                compactRandomSteeringPipeline, eventCursor);
-        if (event.timeMs > branchTimeMs) {
-            break;
-        }
-        ApplyControlEvent(control, event);
-        ++eventCursor;
-    }
-    fields.controls[slot] = control;
-    fields.eventCursors[slot] = eventCursor;
-}
-
-__global__ __launch_bounds__(
-        SimulationBlockSize,
-        LatencyKernelMinimumBlocksPerSm)
-void SimulateStagedSearchKernel(
-        const void *sceneData,
-        const void *configurationData,
-        const CudaControlTick *baselineTicks,
-        std::uint32_t timelineTickCount,
-        const CudaSearchEvaluatorConfiguration *evaluator,
-        std::uint32_t tickDurationMs,
-        std::uint32_t prestartDurationMs,
-        std::int64_t branchTimeMs,
-        std::int64_t evaluationStartTimeMs,
-        std::uint32_t evaluationTickCount,
-        std::uint32_t eventCapacity,
-        const CudaSearchInputEvent *baselineInputs,
-        const CudaSearchInputEvent *candidateEvents,
-        const std::int32_t *candidateInputValues,
-        const std::uint32_t *compactInputOffsets,
-        std::uint32_t compactInputCount,
-        bool compactRandomSteeringPipeline,
-        const std::uint32_t *eventCounts,
-        const std::uint32_t *activeCandidateSlots,
-        const std::uint32_t *activeCandidateCount,
-        const StagedSearchRun *run,
-        StagedSearchFields fields,
-        DeviceSample *candidateBestSamples,
-        DeviceCandidateStatus *statuses,
-        CudaCandidatePhysicsState *finishStartStates,
-        CudaControlTick *finishStartTicks,
-        bool *finishStartValid,
-        CudaCandidatePhysicsState *finishBestStates,
-        DeviceReplacementOverflow *finishBestReplacementOverflow,
-        cuda::collision::CudaCollision *collisionScratch,
-        cuda::collision::CudaCollision *shapeCollisionScratch,
-        GmIso4 *shapeWorldScratch,
-        GmBoxAligned *movingBoundsScratch,
-        cuda::collision::CudaCollisionSurfaceHit *surfaceHitScratch,
-        cuda::collision::CudaCollisionMeshRange *meshRangeScratch,
-        std::uint32_t *meshCellScratch,
-        std::uint32_t scratchStride,
-        std::uint32_t shapeCapacity,
-        const std::uint32_t *cancellation) {
-    const std::uint32_t queueIndex =
-            blockIdx.x * blockDim.x + threadIdx.x;
-    if (queueIndex >= *activeCandidateCount) {
-        return;
-    }
-    const std::uint32_t slot = activeCandidateSlots[queueIndex];
-    if (!ValidPackedInputs(sceneData, configurationData) ||
-        !run->validBranchState) {
-        statuses[slot] =
-                DeviceCandidateStatus::UnsupportedPhysicsTransition;
-        candidateBestSamples[slot + 1u] = {};
-        return;
-    }
-
-    const CudaSearchInputEvent *events =
-            candidateEvents == nullptr
-            ? nullptr
-            : candidateEvents +
-                      static_cast<std::uint64_t>(slot) * eventCapacity;
-    const std::int32_t *compactValues =
-            candidateInputValues == nullptr
-            ? nullptr
-            : candidateInputValues +
-                      static_cast<std::uint64_t>(slot) *
-                              compactInputCount;
-    const std::uint32_t eventCount = eventCounts[slot];
-    const std::uint64_t candidateId =
-            run->firstCandidateId + slot;
-    CudaCandidatePhysicsState state = fields.states[slot];
-    DeviceControlState control = fields.controls[slot];
-    std::uint32_t eventCursor = fields.eventCursors[slot];
-    std::uint32_t evaluationIndex = 0u;
-    DeviceSample localBest;
-    bool evaluatorReported = false;
-    const CudaSearchEvaluatorConfiguration configuredEvaluator =
-            *evaluator;
-    cuda::collision::CudaCollisionSearchScratch candidateScratch{
-            0u,
-            0u,
-            0u,
-            false,
-            false,
-            collisionScratch,
-            shapeCollisionScratch,
-            shapeWorldScratch,
-            movingBoundsScratch,
-            surfaceHitScratch,
-            meshRangeScratch,
-            meshCellScratch,
-            slot,
-            scratchStride,
-            shapeCapacity};
-    for (std::uint32_t tickIndex = 0u;
-         tickIndex < timelineTickCount; ++tickIndex) {
-        if ((tickIndex & 63u) == 0u &&
-            *reinterpret_cast<volatile const std::uint32_t *>(
-                    cancellation) != 0u) {
-            statuses[slot] = DeviceCandidateStatus::Cancelled;
-            candidateBestSamples[slot + 1u] = localBest;
-            return;
-        }
-        const std::int64_t publicTime =
-                branchTimeMs +
-                static_cast<std::int64_t>(tickIndex + 1u) *
-                        tickDurationMs;
-        while (eventCursor < eventCount) {
-            const CudaSearchInputEvent event = CandidateInputAt(
-                    baselineInputs, events, compactValues,
-                    compactInputOffsets,
-                    compactRandomSteeringPipeline, eventCursor);
-            if (event.timeMs > publicTime) {
-                break;
-            }
-            ApplyControlEvent(control, event);
-            ++eventCursor;
-        }
-        CudaControlTick tick = baselineTicks[tickIndex];
-        tick.controls = ControlsFromState(control);
-        tick.stuntsInput =
-                StuntsFromState(control, prestartDurationMs);
-        const GmVec3 previousPosition = state.body.current.position;
-        ApplyControlPrefix(state, tick);
-        if (!state.firstStep) {
-            cuda::transition::PrepareStep(
-                    state, tick,
-                    static_cast<const
-                            CudaPackedStaticConfigurationHeader *>(
-                            configurationData));
-        }
-        state.vehicle.mobil.absorbContactEnabled = true;
-        state.vehicle.mobil.physicsUpdatesEnabled =
-                (tick.actionFlags &
-                 CudaControlActionSuppressVehicleForceCallbacks) == 0u;
-        for (std::uint32_t respawn = 0u;
-             respawn < tick.respawnAtCheckpointCount; ++respawn) {
-            if (cuda::transition::Respawn(
-                        state,
-                        static_cast<const
-                                CudaPackedStaticConfigurationHeader *>(
-                                configurationData))) {
-                ++state.incrementalRespawnCount;
-            }
-        }
-        if (ReadyForFinalFinish(state)) {
-            finishStartStates[slot] = state;
-            finishStartTicks[slot] = tick;
-            finishStartValid[slot] = true;
-        }
-        const cuda::physics::Status physicsStatus =
-                cuda::physics::Step<false, false, true>(
-                        static_cast<const CudaPackedSceneHeader *>(
-                                sceneData),
-                        static_cast<const
-                            CudaPackedStaticConfigurationHeader *>(
-                                configurationData),
-                        state, candidateScratch);
-        if (physicsStatus != cuda::physics::Status::Success) {
-            statuses[slot] =
-                    DeviceCandidateStatus::
-                            UnsupportedPhysicsTransition;
-            candidateBestSamples[slot + 1u] = localBest;
-            return;
-        }
-        state.firstStep = false;
-        ++state.controlCursor;
-        if (publicTime < evaluationStartTimeMs) {
-            continue;
-        }
-        DeviceSample sample = EvaluateState(
-                configuredEvaluator, state, previousPosition,
-                static_cast<double>(publicTime - tickDurationMs),
-                static_cast<double>(publicTime),
-                &evaluatorReported);
-        sample.candidateId = candidateId;
-        sample.candidateSlot = slot;
-        sample.evaluationTick = evaluationIndex;
-        sample.logicalOrder =
-                1u +
-                static_cast<std::uint64_t>(slot) *
-                        evaluationTickCount +
-                evaluationIndex;
-        sample.mutation = !run->baseline;
-        if (StrictlyBetter(sample, localBest, false)) {
-            localBest = sample;
-            finishBestStates[slot] = state;
-            cuda::collision::detail::CaptureReplacementOverflow(
-                    candidateScratch,
-                    finishBestReplacementOverflow[slot]);
-        }
-        ++evaluationIndex;
-    }
-    candidateBestSamples[slot + 1u] = localBest;
-}
-
 __global__ void RefineSearchFinishTimesKernel(
         const void *sceneData,
         const void *configurationData,
@@ -2581,9 +2303,6 @@ struct CudaSearchExecutor::Impl {
     std::uint32_t multiprocessorCount = 0u;
     SimulationKernelMetrics latencyKernelMetrics;
     SimulationKernelMetrics throughputKernelMetrics;
-    SimulationKernelMetrics stagedPhysicsKernelMetrics;
-    cudaGraph_t stagedGraph = nullptr;
-    cudaGraphExec_t stagedGraphExec = nullptr;
 
     DeviceAllocation<CudaCandidateState> branchState;
     DeviceAllocation<CudaControlTick> baselineTicks;
@@ -2614,10 +2333,6 @@ struct CudaSearchExecutor::Impl {
     DeviceAllocation<bool> activeCandidates;
     DeviceAllocation<std::uint32_t> activeCandidateSlots;
     DeviceAllocation<std::uint32_t> activeCandidateCount;
-    DeviceAllocation<StagedSearchRun> stagedRun;
-    DeviceAllocation<CudaCandidatePhysicsState> stagedStates;
-    DeviceAllocation<DeviceControlState> stagedControls;
-    DeviceAllocation<std::uint32_t> stagedEventCursors;
     DeviceAllocation<DeviceSample> reducedBest;
     DeviceAllocation<std::byte> reductionTemporary;
     DeviceAllocation<cuda::collision::CudaCollision> collisionScratch;
@@ -2636,34 +2351,6 @@ struct CudaSearchExecutor::Impl {
     DeviceAllocation<std::uint32_t> globalBestEventCount;
     DeviceAllocation<std::uint32_t> globalBestMutationCount;
     DeviceAllocation<DeviceBatchSummary> summary;
-
-    ~Impl() {
-        ResetStagedGraph();
-    }
-
-    bool UsesStagedPipeline() const {
-        return configuration.evaluator.kind ==
-                       CudaSearchEvaluatorKind::FinishTime &&
-                !configuration.branchState.stuntsEnabled;
-    }
-
-    void ResetStagedGraph() {
-        if (stagedGraphExec != nullptr) {
-            cudaGraphExecDestroy(stagedGraphExec);
-            stagedGraphExec = nullptr;
-        }
-        if (stagedGraph != nullptr) {
-            cudaGraphDestroy(stagedGraph);
-            stagedGraph = nullptr;
-        }
-    }
-
-    StagedSearchFields StagedFields() const {
-        return {
-                stagedStates.Get(),
-                stagedControls.Get(),
-                stagedEventCursors.Get()};
-    }
 
     void UpdateResidentBytes() {
         residentBytes = 0u;
@@ -2696,10 +2383,6 @@ struct CudaSearchExecutor::Impl {
         ADD_BYTES(activeCandidates);
         ADD_BYTES(activeCandidateSlots);
         ADD_BYTES(activeCandidateCount);
-        ADD_BYTES(stagedRun);
-        ADD_BYTES(stagedStates);
-        ADD_BYTES(stagedControls);
-        ADD_BYTES(stagedEventCursors);
         ADD_BYTES(reducedBest);
         ADD_BYTES(reductionTemporary);
         ADD_BYTES(collisionScratch);
@@ -2800,7 +2483,7 @@ struct CudaSearchExecutor::Impl {
         multiprocessorCount =
                 static_cast<std::uint32_t>(
                         properties.multiProcessorCount);
-        const bool monolithicLoaded = LoadSimulationKernelMetrics(
+        return LoadSimulationKernelMetrics(
                        SimulationKernel<
                                LatencyKernelMinimumBlocksPerSm>(),
                        properties,
@@ -2812,144 +2495,6 @@ struct CudaSearchExecutor::Impl {
                        properties,
                        &throughputKernelMetrics,
                        diagnostic);
-        return monolithicLoaded &&
-                (!UsesStagedPipeline() ||
-                 LoadSimulationKernelMetrics(
-                         reinterpret_cast<const void *>(
-                                 SimulateStagedSearchKernel),
-                         properties,
-                         &stagedPhysicsKernelMetrics,
-                         diagnostic));
-    }
-
-    bool BuildStagedGraph(std::string *diagnostic) {
-        ResetStagedGraph();
-        if (!UsesStagedPipeline()) {
-            if (diagnostic != nullptr) {
-                diagnostic->clear();
-            }
-            return true;
-        }
-
-        cudaStream_t captureStream = nullptr;
-        cudaError_t error = cudaStreamCreateWithFlags(
-                &captureStream, cudaStreamNonBlocking);
-        if (error != cudaSuccess) {
-            if (diagnostic != nullptr) {
-                *diagnostic = CudaFailure(
-                        "creating CUDA staged-search capture stream",
-                        error);
-            }
-            return false;
-        }
-        const auto fail = [&](const char *operation,
-                              cudaError_t failure) {
-            cudaStreamDestroy(captureStream);
-            ResetStagedGraph();
-            if (diagnostic != nullptr) {
-                *diagnostic = CudaFailure(operation, failure);
-            }
-            return false;
-        };
-
-        error = cudaStreamBeginCapture(
-                captureStream, cudaStreamCaptureModeThreadLocal);
-        if (error != cudaSuccess) {
-            return fail(
-                    "beginning CUDA staged-search graph capture", error);
-        }
-        const std::uint32_t blocks =
-                (configuration.maximumBatchSize - 1u) /
-                        SimulationBlockSize +
-                1u;
-        const StagedSearchFields fields = StagedFields();
-        InitializeStagedSearchKernel
-                <<<blocks, SimulationBlockSize, 0u, captureStream>>>(
-                branchState.Get(),
-                configuration.branchTimeMs,
-                static_cast<std::uint32_t>(
-                        configuration.maximumEventCount),
-                baselineInputs.Get(),
-                candidateEvents.Get(),
-                candidateInputValues.Get(),
-                compactInputOffsets.Get(),
-                compactInputCount,
-                compactRandomSteeringPipeline,
-                eventCounts.Get(),
-                activeCandidateSlots.Get(),
-                activeCandidateCount.Get(),
-                stagedRun.Get(),
-                fields);
-        // Profiling rejected per-tick and 32/128-tick boundaries: reloading
-        // the physics state outweighed their smaller kernel footprints.
-        SimulateStagedSearchKernel
-                <<<blocks, SimulationBlockSize, 0u,
-                   captureStream>>>(
-                configuration.deviceScene,
-                configuration.deviceStaticConfiguration,
-                baselineTicks.Get(),
-                timelineTickCount,
-                evaluator.Get(),
-                configuration.tickDurationMs,
-                configuration.prestartDurationMs,
-                configuration.branchTimeMs,
-                configuration.evaluationStartTimeMs,
-                evaluationTickCount,
-                static_cast<std::uint32_t>(
-                        configuration.maximumEventCount),
-                baselineInputs.Get(),
-                candidateEvents.Get(),
-                candidateInputValues.Get(),
-                compactInputOffsets.Get(),
-                compactInputCount,
-                compactRandomSteeringPipeline,
-                eventCounts.Get(),
-                activeCandidateSlots.Get(),
-                activeCandidateCount.Get(),
-                stagedRun.Get(),
-                fields,
-                candidateBestSamples.Get(),
-                statuses.Get(),
-                finishStartStates.Get(),
-                finishStartTicks.Get(),
-                finishStartValid.Get(),
-                finishBestStates.Get(),
-                finishBestReplacementOverflow.Get(),
-                collisionScratch.Get(),
-                shapeCollisionScratch.Get(),
-                shapeWorldScratch.Get(),
-                movingBoundsScratch.Get(),
-                surfaceHitScratch.Get(),
-                meshRangeScratch.Get(),
-                meshCellScratch.Get(),
-                configuration.maximumBatchSize,
-                collisionShapeCount,
-                cancellation.Get());
-        error = cudaStreamEndCapture(captureStream, &stagedGraph);
-        if (error != cudaSuccess) {
-            return fail(
-                    "ending CUDA staged-search graph capture", error);
-        }
-        error = cudaGraphInstantiate(
-                &stagedGraphExec, stagedGraph, nullptr, nullptr, 0u);
-        if (error != cudaSuccess) {
-            return fail(
-                    "instantiating CUDA staged-search graph", error);
-        }
-        error = cudaStreamDestroy(captureStream);
-        if (error != cudaSuccess) {
-            ResetStagedGraph();
-            if (diagnostic != nullptr) {
-                *diagnostic = CudaFailure(
-                        "destroying CUDA staged-search capture stream",
-                        error);
-            }
-            return false;
-        }
-        if (diagnostic != nullptr) {
-            diagnostic->clear();
-        }
-        return true;
     }
 
     bool ReserveBatchCapacity(
@@ -3052,9 +2597,6 @@ struct CudaSearchExecutor::Impl {
         DeviceAllocation<DeviceCandidateStatus> nextStatuses;
         DeviceAllocation<bool> nextActiveCandidates;
         DeviceAllocation<std::uint32_t> nextActiveCandidateSlots;
-        DeviceAllocation<CudaCandidatePhysicsState> nextStagedStates;
-        DeviceAllocation<DeviceControlState> nextStagedControls;
-        DeviceAllocation<std::uint32_t> nextStagedEventCursors;
         DeviceAllocation<std::byte> nextReductionTemporary;
         DeviceAllocation<cuda::collision::CudaCollision>
                 nextCollisionScratch;
@@ -3116,12 +2658,6 @@ struct CudaSearchExecutor::Impl {
             !nextStatuses.Allocate(candidates) ||
             !nextActiveCandidates.Allocate(candidates) ||
             !nextActiveCandidateSlots.Allocate(candidates) ||
-            !nextStagedStates.Allocate(
-                    UsesStagedPipeline() ? candidates : 0u) ||
-            !nextStagedControls.Allocate(
-                    UsesStagedPipeline() ? candidates : 0u) ||
-            !nextStagedEventCursors.Allocate(
-                    UsesStagedPipeline() ? candidates : 0u) ||
             !nextCollisionScratch.Allocate(collisionSlots) ||
             !nextShapeCollisionScratch.Allocate(
                     shapeCollisionSlots) ||
@@ -3160,7 +2696,6 @@ struct CudaSearchExecutor::Impl {
             return false;
         }
 
-        ResetStagedGraph();
         candidateBestSamples = std::move(nextCandidateBestSamples);
         finishRefinements = std::move(nextFinishRefinements);
         finishStartStates = std::move(nextFinishStartStates);
@@ -3182,9 +2717,6 @@ struct CudaSearchExecutor::Impl {
         activeCandidates = std::move(nextActiveCandidates);
         activeCandidateSlots =
                 std::move(nextActiveCandidateSlots);
-        stagedStates = std::move(nextStagedStates);
-        stagedControls = std::move(nextStagedControls);
-        stagedEventCursors = std::move(nextStagedEventCursors);
         reductionTemporary = std::move(nextReductionTemporary);
         collisionScratch = std::move(nextCollisionScratch);
         shapeCollisionScratch =
@@ -3196,9 +2728,6 @@ struct CudaSearchExecutor::Impl {
         meshRangeScratch = std::move(nextMeshRangeScratch);
         meshCellScratch = std::move(nextMeshCellScratch);
         configuration.maximumBatchSize = candidateCount;
-        if (!BuildStagedGraph(diagnostic)) {
-            return false;
-        }
         UpdateResidentBytes();
         if (diagnostic != nullptr) {
             diagnostic->clear();
@@ -3346,11 +2875,8 @@ struct CudaSearchExecutor::Impl {
                         latencyKernelMetrics.
                                 activeBlocksPerMultiprocessor) *
                         multiprocessorCount;
-        const bool useStagedPipeline = UsesStagedPipeline();
         const SimulationKernelMetrics &simulationMetrics =
-                useStagedPipeline
-                ? stagedPhysicsKernelMetrics
-                : useThroughputKernel
+                useThroughputKernel
                 ? throughputKernelMetrics
                 : latencyKernelMetrics;
         const auto launchSimulation = [&](auto stateType,
@@ -3418,21 +2944,7 @@ struct CudaSearchExecutor::Impl {
                        LatencyKernelMinimumBlocksPerSm>{});
             }
         };
-        if (useStagedPipeline) {
-            ConfigureStagedSearchRunKernel<<<1u, 1u>>>(
-                    stagedRun.Get(),
-                    firstCandidateId,
-                    baseline,
-                    configuration.branchState.schemaVersion ==
-                            CudaCandidateState::SchemaVersion);
-            error = cudaGraphLaunch(stagedGraphExec, nullptr);
-            if (error != cudaSuccess) {
-                result.status = CudaSearchStatus::DeviceFailure;
-                result.diagnostic = CudaFailure(
-                        "launching CUDA staged-search graph", error);
-                return result;
-            }
-        } else if (configuration.branchState.stuntsEnabled) {
+        if (configuration.branchState.stuntsEnabled) {
             launchSimulation(
                     CudaCandidateState{},
                     std::true_type{});
@@ -4038,14 +3550,6 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
             !impl->activeCandidates.Allocate(candidates) ||
             !impl->activeCandidateSlots.Allocate(candidates) ||
             !impl->activeCandidateCount.Allocate(1u) ||
-            !impl->stagedRun.Allocate(
-                    impl->UsesStagedPipeline() ? 1u : 0u) ||
-            !impl->stagedStates.Allocate(
-                    impl->UsesStagedPipeline() ? candidates : 0u) ||
-            !impl->stagedControls.Allocate(
-                    impl->UsesStagedPipeline() ? candidates : 0u) ||
-            !impl->stagedEventCursors.Allocate(
-                    impl->UsesStagedPipeline() ? candidates : 0u) ||
             !impl->reducedBest.Allocate(1u) ||
             !impl->collisionScratch.Allocate(collisionSlots) ||
             !impl->shapeCollisionScratch.Allocate(
@@ -4175,9 +3679,6 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
         }
 
         if (!impl->LoadSimulationKernelMetrics(diagnostic)) {
-            return {};
-        }
-        if (!impl->BuildStagedGraph(diagnostic)) {
             return {};
         }
         impl->UpdateResidentBytes();
