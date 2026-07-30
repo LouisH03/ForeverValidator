@@ -458,6 +458,28 @@ endif()
 if(FOREVERVALIDATOR_BUILD_TESTS)
     enable_testing()
 
+    add_executable(forevervalidator-race-camera-tests
+        tests/race_camera_tests.cpp)
+    target_include_directories(forevervalidator-race-camera-tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(forevervalidator-race-camera-tests PRIVATE
+        forevervalidator_core)
+    forevervalidator_configure_target(forevervalidator-race-camera-tests)
+    add_test(NAME forevervalidator-race-camera
+             COMMAND forevervalidator-race-camera-tests)
+
+    add_executable(forevervalidator-race-camera-pack-tests
+        tests/race_camera_pack_tests.cpp)
+    target_include_directories(forevervalidator-race-camera-pack-tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(forevervalidator-race-camera-pack-tests PRIVATE
+        forevervalidator_core)
+    forevervalidator_configure_target(forevervalidator-race-camera-pack-tests)
+    add_test(NAME forevervalidator-race-camera-pack
+             COMMAND forevervalidator-race-camera-pack-tests)
+
     add_executable(forevervalidator-finish-time-tests
         tests/replay_finish_time_estimator_tests.cpp)
     target_include_directories(forevervalidator-finish-time-tests PRIVATE
