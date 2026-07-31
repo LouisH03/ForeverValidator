@@ -32,8 +32,8 @@ struct CudaFixedArray {
     T values[Capacity]{};
 };
 
-constexpr std::size_t CudaCollisionReplacementInlineCapacity = 64u;
-constexpr std::size_t CudaCollisionReplacementOverflowCapacity = 448u;
+constexpr std::size_t CudaCollisionReplacementInlineCapacity = 1u;
+constexpr std::size_t CudaCollisionReplacementOverflowCapacity = 511u;
 constexpr std::size_t CudaCollisionReplacementCapacity =
         CudaCollisionReplacementInlineCapacity +
         CudaCollisionReplacementOverflowCapacity;
@@ -81,8 +81,6 @@ struct CudaWheelState {
     CSceneVehicleCar::SSimulationWheel::SRealTimeState realTime{};
     CSceneVehicleCar::SSimulationWheel::SState previousPhysics{};
     CSceneVehicleCar::SSimulationWheel::SState currentPhysics{};
-    CSceneVehicleCar::SSimulationWheel::SState previousAsync{};
-    CSceneVehicleCar::SSimulationWheel::SState currentAsync{};
     bool surfaceMovedByUpdate = false;
 };
 
@@ -121,19 +119,12 @@ struct CudaVehicleCarFrameState {
 struct CudaFrameHistory {
     CudaVehicleCarFrameState physicsPrevious{};
     CudaVehicleCarFrameState physicsCurrent{};
-    CudaVehicleCarFrameState asyncCurrent{};
-    CudaVehicleCarFrameState asyncPrevious{};
 };
 
 struct CudaVehicleState {
     CSceneMobil::RuntimeClone mobil{};
     CSceneVehicle::SEventSlot vehicleEvents[2]{};
     CSceneVehicle::SWaterState water{};
-    bool updateAsync = true;
-    bool networked = false;
-    std::uint32_t predictionDelayTicks = 0u;
-    CudaOptional<CSceneVehicle::SStateSampleWindow> stateSampleWindow{};
-    float asyncPeriodSeconds = 0.0f;
 
     CudaFixedArray<CudaWheelState, 4u> wheels{};
     CSceneVehicleCar::SControls controls{};
@@ -152,6 +143,37 @@ struct CudaVehicleState {
     std::uint32_t lastComputeForcesTick = 0u;
     GmSpring<float> dynaPartSprings[4]{};
     CSceneVehicleCar::SForceAccumulators forceAccumulators{};
+};
+
+#if defined(__CUDACC__)
+namespace cuda::facts {
+
+__device__ inline std::uint32_t WheelCount(
+        const CudaVehicleState &vehicle) {
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_FOUR_WHEELS)
+    return 4u;
+#else
+    return vehicle.wheels.count;
+#endif
+}
+
+}  // namespace cuda::facts
+#endif
+
+struct CudaWheelPassthroughState {
+    CSceneVehicleCar::SSimulationWheel::SState previousAsync{};
+    CSceneVehicleCar::SSimulationWheel::SState currentAsync{};
+};
+
+struct CudaVehiclePassthroughState {
+    bool updateAsync = true;
+    bool networked = false;
+    std::uint32_t predictionDelayTicks = 0u;
+    CudaOptional<CSceneVehicle::SStateSampleWindow> stateSampleWindow{};
+    float asyncPeriodSeconds = 0.0f;
+    CudaVehicleCarFrameState asyncCurrent{};
+    CudaVehicleCarFrameState asyncPrevious{};
+    CudaWheelPassthroughState wheels[4]{};
 };
 
 struct CudaDynamicBodyState {
@@ -215,7 +237,7 @@ struct CudaRaceState : CudaRacePhysicsState {
 };
 
 struct CudaCandidatePhysicsState {
-    static constexpr std::uint32_t SchemaVersion = 9u;
+    static constexpr std::uint32_t SchemaVersion = 11u;
 
     std::uint32_t schemaVersion = SchemaVersion;
     std::uint32_t candidateId = 0u;
@@ -234,6 +256,7 @@ struct CudaCandidatePhysicsState {
 };
 
 struct CudaCandidateState : CudaCandidatePhysicsState {
+    CudaVehiclePassthroughState vehiclePassthrough{};
     CudaStuntState stunts{};
     CudaFixedArray<ReplayStuntEvent, 2048u> stuntEvents{};
     CudaFixedArray<

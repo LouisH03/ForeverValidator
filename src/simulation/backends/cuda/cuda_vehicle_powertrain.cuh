@@ -37,7 +37,7 @@ __device__ inline float TransmissionValue(
 __device__ inline bool AllWheelsAirborne(
         const CudaVehicleState &vehicle) {
     for (std::uint32_t index = 0u;
-         index < vehicle.wheels.count; ++index) {
+         index < facts::WheelCount(vehicle); ++index) {
         if (vehicle.wheels.values[index].realTime.contactPresent) {
             return false;
         }
@@ -432,6 +432,9 @@ __device__ inline void IntegrateGearedEngine(
             vehicle, configuration, inputActive, burnoutState);
 }
 
+template <
+        CudaHandlingSpecialization Handling =
+                CudaHandlingSpecialization::Generic>
 __device__ inline void IntegrateEngine(
         CudaVehicleState &vehicle,
         const CudaPackedStaticConfigurationHeader *configuration,
@@ -445,9 +448,21 @@ __device__ inline void IntegrateEngine(
     const bool blocked =
             detail::AllWheelsAirborne(vehicle) ||
             0.0f < vehicle.engine.shiftCooldown;
-    if (configuration->tuning.handlingModel !=
-        static_cast<std::uint32_t>(
-                CSceneVehicleCarHandlingModel_GearedDrive)) {
+    if constexpr (Handling == CudaHandlingSpecialization::Legacy) {
+        IntegrateLegacyEngine(
+                vehicle, configuration, input, dt, blocked);
+    } else if constexpr (
+            Handling ==
+                    CudaHandlingSpecialization::GearedDriveDry ||
+            Handling ==
+                    CudaHandlingSpecialization::GearedDriveWater) {
+        IntegrateGearedEngine(
+                vehicle, configuration, dt,
+                inputActive, blocked);
+    } else if (
+            configuration->tuning.handlingModel !=
+            static_cast<std::uint32_t>(
+                    CSceneVehicleCarHandlingModel_GearedDrive)) {
         IntegrateLegacyEngine(
                 vehicle, configuration, input, dt, blocked);
     } else {

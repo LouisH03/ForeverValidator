@@ -2,6 +2,7 @@
 #define FOREVERVALIDATOR_CUDA_COLLISION_RESPONSE_CUH
 
 #include "simulation/backends/cuda/cuda_collision.cuh"
+#include "simulation/backends/cuda/cuda_dynamics.cuh"
 #include "simulation/backends/cuda/cuda_race.cuh"
 
 namespace forevervalidator::simulation::cuda::collision {
@@ -84,13 +85,14 @@ __device__ inline GmVec3 SpeedAtPoint(
 __device__ inline std::uint32_t WheelIndexForShape(
         const CudaVehicleCollisionShape &shape,
         const CudaCandidatePhysicsState &candidate) {
-    return shape.wheelIndex < candidate.vehicle.wheels.count
+    return shape.wheelIndex < facts::WheelCount(candidate.vehicle)
             ? shape.wheelIndex
             : UINT32_MAX;
 }
 
+template <typename Collision>
 __device__ inline Contact MakeVehicleContact(
-        const CudaCollision &collision,
+        const Collision &collision,
         const CudaVehicleCollisionShape &shape,
         const CudaSceneActor &actor,
         const CudaPackedStaticConfigurationHeader *configuration,
@@ -124,12 +126,32 @@ __device__ inline Contact MakeVehicleContact(
     return contact;
 }
 
-template<typename Scratch>
+template<bool CompactReplacements = false, typename Scratch>
 __device__ inline void AddReplacement(
         CudaCandidatePhysicsState &candidate,
         Scratch &scratch,
         const GmVec3 &replacement,
         bool &overflow) {
+    if constexpr (CompactReplacements) {
+        if (scratch.replacementOverflowCount >=
+            CudaCollisionReplacementCapacity) {
+            overflow = true;
+            return;
+        }
+        if (scratch.replacementOverflowCount++ == 0u) {
+            scratch.replacementSumX = replacement.x;
+            scratch.replacementSumY = replacement.y;
+            scratch.replacementSumZ = replacement.z;
+        } else {
+            dynamics::AccumulateReplacement(
+                    replacement,
+                    scratch.replacementSumX,
+                    scratch.replacementSumY,
+                    scratch.replacementSumZ);
+        }
+        candidate.body.dynamicActive = true;
+        return;
+    }
     auto &items = candidate.body.collisionReplacements;
     if (items.count <
         sizeof(items.values) / sizeof(items.values[0])) {
@@ -385,9 +407,7 @@ __device__ inline void AddWorldImpulseAtPoint(
     state.linearSpeed.y += impulse.y * inverseMass;
     state.linearSpeed.z =
             impulse.z * inverseMass + state.linearSpeed.z;
-    if (candidate.body.dynamicType ==
-        static_cast<std::uint32_t>(
-                CHmsDyna::EDynamicType_FullAngularDynamics)) {
+    if (dynamics::IsFullAngular(candidate.body)) {
         const GmVec3 center = WorldCenterOfMass(candidate);
         const GmVec3 lever = {
                 point.x - center.x,
@@ -412,9 +432,10 @@ __device__ inline void AddWorldImpulseAtPoint(
     candidate.body.dynamicActive = true;
 }
 
+template <typename Collision>
 __device__ inline void ApplyGenericImpulse(
         CudaCandidatePhysicsState &candidate,
-        const CudaCollision &collision,
+        const Collision &collision,
         const GmVec3 &originalSpeed) {
     const MaterialData materialA =
             Material(collision.materialA);
@@ -440,9 +461,7 @@ __device__ inline void ApplyGenericImpulse(
     };
     float denominator =
             1.0f / candidate.body.parameters.mass;
-    if (candidate.body.dynamicType ==
-        static_cast<std::uint32_t>(
-                CHmsDyna::EDynamicType_FullAngularDynamics)) {
+    if (dynamics::IsFullAngular(candidate.body)) {
         const GmVec3 center = WorldCenterOfMass(candidate);
         const GmVec3 lever = {
                 collision.contactPoint.x - center.x,
@@ -684,7 +703,8 @@ __device__ inline void AbsorbWheel(
             &wheel.realTime.peerCorpusId,
             &contact.peerCorpusId,
             sizeof(contact.peerCorpusId));
-    if (configuration->tuning.wheelForceMode !=
+    if (::forevervalidator::simulation::cuda::facts::
+                WheelForceMode(configuration) !=
         static_cast<std::uint32_t>(
                 CSceneVehicleCarWheelForceMode_FollowAbsorbWithImpulse)) {
         return;
@@ -737,12 +757,10 @@ __device__ inline void AbsorbVehicle(
         !(contact.localNormal.y > 0.2f)) {
         candidate.vehicle.contacts.bodyImpactBucket += impact;
     } else {
-        const CudaWheelState &wheel =
-                candidate.vehicle.wheels.values[
-                        contact.wheelIndex];
-        if (wheel.axle ==
-            static_cast<std::uint32_t>(
-                    VehicleWheelAxle::Rear)) {
+        if (facts::WheelAxle(
+                    configuration,
+                    contact.wheelIndex) ==
+            VehicleWheelAxle::Rear) {
             candidate.vehicle.contacts.rearWheelImpactBucket +=
                     impact;
         } else {
@@ -783,7 +801,8 @@ __device__ inline void AbsorbVehicle(
     candidate.vehicle.contacts.lastBodyContactMaterial =
             static_cast<EPlugSurfaceMaterialId>(
                     contact.peerMaterial);
-    if (configuration->tuning.wheelForceMode ==
+    if (::forevervalidator::simulation::cuda::facts::
+                WheelForceMode(configuration) ==
         static_cast<std::uint32_t>(
                 CSceneVehicleCarWheelForceMode_FollowAbsorbWithImpulse)) {
         ApplyBodyContactImpulse(
@@ -796,6 +815,7 @@ __device__ inline void AbsorbVehicle(
 template <
         bool TrackDiagnostics = true,
         bool TrustedInputs = false,
+        bool CompactReplacements = false,
         typename Scratch = CudaCollisionScratch>
 __device__ inline Status Respond(
         const CudaPackedSceneHeader *scene,
@@ -816,9 +836,9 @@ __device__ inline Status Respond(
                     configuration->collisionShapes);
     bool overflow = false;
     for (std::uint32_t index = 0u;
-         index < scratch.collisionCount; ++index) {
-        const CudaCollision &collision =
-                detail::CollisionAt(scratch, index);
+        index < scratch.collisionCount; ++index) {
+        decltype(auto) collision =
+                detail::OrderedCollisionAt(scratch, index);
         if (collision.staticActorIndex >= scene->actors.count ||
             collision.movingShapeIndex >=
                     configuration->collisionShapes.count) {
@@ -870,7 +890,7 @@ __device__ inline Status Respond(
                           candidate.body.current.rotation,
                           contact.replacement)
                 : detail::Negate(collision.separation);
-        response_detail::AddReplacement(
+        response_detail::AddReplacement<CompactReplacements>(
                 candidate, scratch, worldReplacement, overflow);
         if (overflow) {
             scratch.overflowReason =

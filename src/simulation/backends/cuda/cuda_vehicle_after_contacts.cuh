@@ -224,7 +224,7 @@ __device__ inline void AfterContacts(
     vehicle.frameHistory.physicsPrevious =
             vehicle.frameHistory.physicsCurrent;
     for (std::uint32_t wheel = 0u;
-         wheel < vehicle.wheels.count; ++wheel) {
+         wheel < facts::WheelCount(vehicle); ++wheel) {
         vehicle.wheels.values[wheel].previousPhysics =
                 vehicle.wheels.values[wheel].currentPhysics;
     }
@@ -285,12 +285,21 @@ __device__ inline void AfterContacts(
     vehicle.contacts.bodyContactPointSum = {};
     vehicle.contacts.bodyContactNormalSum = {};
     for (std::uint32_t wheel = 0u;
-         wheel < vehicle.wheels.count; ++wheel) {
+         wheel < facts::WheelCount(vehicle); ++wheel) {
         after_detail::UpdateWheelSnapshot(
                 candidate, vehicle.wheels.values[wheel]);
     }
     after_detail::UpdateMaterialFeedback(
             candidate, configuration);
+}
+
+__device__ inline void AfterContactsWithoutSnapshots(
+        CudaCandidatePhysicsState &candidate) {
+    auto &contacts = candidate.vehicle.contacts;
+    contacts.wheelContactCount = 0u;
+    contacts.bodyContactCount = 0u;
+    contacts.bodyContactPointSum = {};
+    contacts.bodyContactNormalSum = {};
 }
 
 }  // namespace forevervalidator::simulation::cuda::vehicle

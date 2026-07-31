@@ -112,6 +112,8 @@ int main() {
             static_cast<std::size_t>(
                     CudaTuningCurveId::MaxSideFrictionFromSpeed)];
     if (curve.keyCount != 2u ||
+        (curve.reserved &
+         CudaTuningCurvePositionsNondecreasing) == 0u ||
         first.curveKeys[curve.firstKey + 1u].value != 0.5f) {
         std::cerr << "tuning curve ordering changed\n";
         return 1;

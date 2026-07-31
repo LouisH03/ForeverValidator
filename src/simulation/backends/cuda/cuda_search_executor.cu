@@ -1,15 +1,33 @@
+#define FOREVERVALIDATOR_CUDA_RESEARCH_WHEEL_FORCE_MODE 2u
+#define FOREVERVALIDATOR_CUDA_RESEARCH_STEADY_INTEGRATION
+#define FOREVERVALIDATOR_CUDA_RESEARCH_FULL_ANGULAR_DYNAMICS
+#define FOREVERVALIDATOR_CUDA_RESEARCH_ONE_UNIFORM_FORCE_FIELD
+#if !defined(FOREVERVALIDATOR_CUDA_RESEARCH_SESSION_LTO)
+#define FOREVERVALIDATOR_CUDA_RESEARCH_CONSTANT_CONFIGURATION
+#define FOREVERVALIDATOR_CUDA_RESEARCH_CONSTANT_SCENE
+#define FOREVERVALIDATOR_CUDA_RESEARCH_CONSTANT_COLLISION_SHAPES
+#define FOREVERVALIDATOR_CUDA_RESEARCH_CONSTANT_CURVE_KEYS
+#endif
+#define FOREVERVALIDATOR_CUDA_RESEARCH_EIGHT_ROOT_SHAPES
+#define FOREVERVALIDATOR_CUDA_RESEARCH_FOUR_WHEELS
+#define FOREVERVALIDATOR_CUDA_RESEARCH_CANONICAL_WHEEL_FACTS
+
 #include "simulation/backends/cuda/cuda_search_executor.h"
 
 #include <cuda_runtime.h>
 #include <cub/device/device_reduce.cuh>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstring>
 #include <limits>
 #include <new>
 #include <thread>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 
@@ -21,17 +39,58 @@
 #include "simulation/backends/cuda/cuda_physics_step.cuh"
 #include "simulation/backends/cuda/cuda_static_configuration.h"
 #include "simulation/backends/cuda/cuda_scene_layout.h"
+#include "simulation/backends/cuda/cuda_session_specialization.h"
 #include "simulation/backends/cuda/cuda_search_branch_state.cuh"
 #include "simulation/backends/cuda/cuda_search_winner_selection.cuh"
 #include "simulation/backends/cuda/cuda_stunts.cuh"
 #include "simulation/backends/cuda/cuda_vehicle_transitions.cuh"
 
+#define FOREVERVALIDATOR_CUDA_RESEARCH_WATER_ONLY
+
 namespace forevervalidator::simulation {
+
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_SESSION_LTO)
+extern "C" __device__
+CudaPackedStaticConfigurationHeader
+ForeverValidatorSessionConfiguration();
+extern "C" __device__
+CudaPackedSceneHeader ForeverValidatorSessionScene();
+#endif
+
 namespace {
 
 constexpr std::uint32_t SimulationBlockSize = 32u;
-constexpr std::uint32_t LatencyKernelMinimumBlocksPerSm = 1u;
 constexpr std::uint32_t ThroughputKernelMinimumBlocksPerSm = 16u;
+constexpr std::uint32_t TailKernelMinimumBlocksPerSm = 17u;
+constexpr std::uint32_t DenseTailKernelMinimumBlocksPerSm = 24u;
+
+template<typename... Arguments, std::size_t... Indices>
+CUresult LaunchDriverKernelImpl(
+        CUfunction function,
+        std::uint32_t blocks,
+        std::tuple<Arguments...> &arguments,
+        std::index_sequence<Indices...>) {
+    std::array<void *, sizeof...(Arguments)> pointers{
+            static_cast<void *>(&std::get<Indices>(arguments))...};
+    return cuLaunchKernel(
+            function,
+            blocks, 1u, 1u,
+            SimulationBlockSize, 1u, 1u,
+            0u, nullptr, pointers.data(), nullptr);
+}
+
+template<typename... Arguments>
+CUresult LaunchDriverKernel(
+        CUfunction function,
+        std::uint32_t blocks,
+        Arguments... arguments) {
+    std::tuple<Arguments...> storage(arguments...);
+    return LaunchDriverKernelImpl(
+            function,
+            blocks,
+            storage,
+            std::index_sequence_for<Arguments...>{});
+}
 
 enum class DeviceCandidateStatus : std::uint32_t {
     Success,
@@ -2343,17 +2402,19 @@ __device__ State LoadSearchState(
 template <
         typename State,
         bool SimulateStunts,
+        bool SteadyTimeline,
+        CudaHandlingSpecialization Handling,
         std::uint32_t MinimumBlocksPerSm>
 __global__ __launch_bounds__(
         SimulationBlockSize,
         MinimumBlocksPerSm) void SimulateSearchCandidatesKernel(
-        const void *sceneData,
-        const void *configurationData,
-        const CudaCandidateState *branchState,
-        const DeviceControlState *mutableBoundaryControls,
-        const CudaControlTick *baselineTicks,
+        const void *__restrict__ sceneData,
+        const void *__restrict__ configurationData,
+        const CudaCandidateState *__restrict__ branchState,
+        const DeviceControlState *__restrict__ mutableBoundaryControls,
+        const CudaControlTick *__restrict__ baselineTicks,
         std::uint32_t timelineTickCount,
-        const CudaSearchEvaluatorConfiguration *evaluator,
+        const CudaSearchEvaluatorConfiguration *__restrict__ evaluator,
         std::uint32_t tickDurationMs,
         std::uint32_t prestartDurationMs,
         std::int64_t branchTimeMs,
@@ -2364,33 +2425,49 @@ __global__ __launch_bounds__(
         std::uint32_t candidateCount,
         bool baseline,
         std::uint32_t eventCapacity,
-        DeviceSample *candidateBestSamples,
-        const CudaSearchInputEvent *baselineInputs,
+        DeviceSample *__restrict__ candidateBestSamples,
+        const CudaSearchInputEvent *__restrict__ baselineInputs,
         std::uint32_t baselineInputCount,
-        const CudaSearchInputEvent *candidateEvents,
-        const std::int32_t *candidateInputValues,
-        const std::uint32_t *compactInputOffsets,
+        const CudaSearchInputEvent *__restrict__ candidateEvents,
+        const std::int32_t *__restrict__ candidateInputValues,
+        const std::uint32_t *__restrict__ compactInputOffsets,
         std::uint32_t compactInputCount,
         bool compactRandomSteeringPipeline,
         bool compactEditPipeline,
         bool sparseMutationPipeline,
         cuda::candidate_events::CoalescedEditStorage candidateEdits,
         sparse_events::Storage sparseCandidateEvents,
-        const std::uint32_t *eventCounts,
-        DeviceCandidateStatus *statuses,
-        const bool *activeCandidates,
-        cuda::collision::CudaCollision *collisionScratch,
-        cuda::collision::CudaCollision *shapeCollisionScratch,
-        GmIso4 *shapeWorldScratch,
-        GmBoxAligned *movingBoundsScratch,
+        const std::uint32_t *__restrict__ eventCounts,
+        DeviceCandidateStatus *__restrict__ statuses,
+        const bool *__restrict__ activeCandidates,
+        cuda::collision::CudaCollisionSearchTile *__restrict__
+                collisionScratch,
+        cuda::collision::CudaCollisionSearchTile *__restrict__
+                shapeCollisionScratch,
+        GmIso4 *__restrict__ shapeWorldScratch,
+        GmBoxAligned *__restrict__ movingBoundsScratch,
         cuda::collision::CudaCollisionSurfaceHit *
-                surfaceHitScratch,
+                __restrict__ surfaceHitScratch,
         cuda::collision::CudaCollisionMeshRange *
-                meshRangeScratch,
-        std::uint32_t *meshCellScratch,
+                __restrict__ meshRangeScratch,
+        std::uint32_t *__restrict__ meshCellScratch,
+        std::uint16_t *__restrict__ responseOrderScratch,
         std::uint32_t scratchStride,
         std::uint32_t shapeCapacity,
-        const std::uint32_t *cancellation) {
+        const std::uint32_t *__restrict__ cancellation) {
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_SESSION_LTO)
+    sceneData = reinterpret_cast<const CudaPackedSceneHeader *>(
+            cuda::research::ForeverValidatorSessionSceneBytes());
+    configurationData =
+            reinterpret_cast<
+                    const CudaPackedStaticConfigurationHeader *>(
+                    cuda::research::
+                            ForeverValidatorSessionConfigurationBytes());
+#elif defined(FOREVERVALIDATOR_CUDA_RESEARCH_WATER_ONLY)
+    sceneData = &cuda::research::StaticScene;
+    configurationData =
+            &cuda::research::StaticConfiguration;
+#endif
     const std::uint32_t slot =
             blockIdx.x * blockDim.x + threadIdx.x;
     if (slot >= candidateCount || !activeCandidates[slot]) {
@@ -2429,8 +2506,7 @@ __global__ __launch_bounds__(
             0u,
             0u,
             false,
-            MinimumBlocksPerSm ==
-                    ThroughputKernelMinimumBlocksPerSm,
+            true,
             collisionScratch,
             shapeCollisionScratch,
             shapeWorldScratch,
@@ -2441,6 +2517,8 @@ __global__ __launch_bounds__(
             slot,
             scratchStride,
             shapeCapacity};
+    candidateScratch.responseOrderStorage =
+            responseOrderScratch;
     DeviceControlState controlState = *mutableBoundaryControls;
     bool evaluatorReported = false;
     const bool maximize = MaximizesScore(configuredEvaluator.kind);
@@ -2473,36 +2551,51 @@ __global__ __launch_bounds__(
         const GmVec3 previousPosition = state.body.current.position;
         ApplyControlPrefix(state, tick);
         if (!state.firstStep) {
-            cuda::transition::PrepareStep(
-                    state, tick,
-                    static_cast<const
-                            CudaPackedStaticConfigurationHeader *>(
-                            configurationData));
-        }
-        state.vehicle.mobil.absorbContactEnabled = true;
-        state.vehicle.mobil.physicsUpdatesEnabled =
-                (tick.actionFlags &
-                 CudaControlActionSuppressVehicleForceCallbacks) == 0u;
-        for (std::uint32_t respawn = 0u;
-             respawn < tick.respawnAtCheckpointCount; ++respawn) {
-            if (cuda::transition::Respawn(
-                        state,
+            if constexpr (SteadyTimeline) {
+                cuda::transition::PrepareSteadyStep(state, tick);
+            } else {
+                cuda::transition::PrepareStep(
+                        state, tick,
                         static_cast<const
                                 CudaPackedStaticConfigurationHeader *>(
-                                configurationData))) {
-                ++state.incrementalRespawnCount;
-                if constexpr (SimulateStunts) {
-                    cuda::stunts::ApplyRespawnPenalty(
-                            state.stunts);
+                                configurationData));
+            }
+        }
+        state.vehicle.mobil.absorbContactEnabled = true;
+        if constexpr (SteadyTimeline) {
+            state.vehicle.mobil.physicsUpdatesEnabled = true;
+        } else {
+            state.vehicle.mobil.physicsUpdatesEnabled =
+                    (tick.actionFlags &
+                     CudaControlActionSuppressVehicleForceCallbacks) ==
+                    0u;
+            for (std::uint32_t respawn = 0u;
+                 respawn < tick.respawnAtCheckpointCount; ++respawn) {
+                if (cuda::transition::Respawn(
+                            state,
+                            static_cast<const
+                                    CudaPackedStaticConfigurationHeader *>(
+                                    configurationData))) {
+                    ++state.incrementalRespawnCount;
+                    if constexpr (SimulateStunts) {
+                        cuda::stunts::ApplyRespawnPenalty(
+                                state.stunts);
+                    }
                 }
             }
         }
         const cuda::physics::Status physicsStatus =
                 cuda::physics::Step<
                         false,
-                        MinimumBlocksPerSm ==
-                                ThroughputKernelMinimumBlocksPerSm,
-                        true>(
+                        (MinimumBlocksPerSm >
+                         1u),
+                        true,
+                        true,
+                        true,
+                        (MinimumBlocksPerSm !=
+                         ThroughputKernelMinimumBlocksPerSm),
+                        SimulateStunts,
+                        Handling>(
                         static_cast<const CudaPackedSceneHeader *>(
                                 sceneData),
                         static_cast<const
@@ -2586,8 +2679,8 @@ __global__ void RefineSearchFinishTimesKernel(
         const std::uint32_t *eventCounts,
         DeviceCandidateStatus *statuses,
         const bool *activeCandidates,
-        cuda::collision::CudaCollision *collisionScratch,
-        cuda::collision::CudaCollision *shapeCollisionScratch,
+        cuda::collision::CudaCollisionSearchTile *collisionScratch,
+        cuda::collision::CudaCollisionSearchTile *shapeCollisionScratch,
         GmIso4 *shapeWorldScratch,
         GmBoxAligned *movingBoundsScratch,
         cuda::collision::CudaCollisionSurfaceHit *
@@ -2595,6 +2688,7 @@ __global__ void RefineSearchFinishTimesKernel(
         cuda::collision::CudaCollisionMeshRange *
                 meshRangeScratch,
         std::uint32_t *meshCellScratch,
+        std::uint16_t *responseOrderScratch,
         std::uint32_t scratchStride,
         std::uint32_t shapeCapacity,
         const std::uint32_t *cancellation,
@@ -2647,6 +2741,8 @@ __global__ void RefineSearchFinishTimesKernel(
             slot,
             scratchStride,
             shapeCapacity};
+    candidateScratch.responseOrderStorage =
+            responseOrderScratch;
     DeviceControlState controlState = *mutableBoundaryControls;
     for (std::uint32_t tickIndex = 0u;
          tickIndex < timelineTickCount; ++tickIndex) {
@@ -2771,8 +2867,8 @@ __global__ void CaptureSearchWinnerStateKernel(
         std::uint32_t candidateCount,
         const std::uint32_t *eventCounts,
         DeviceCandidateStatus *statuses,
-        cuda::collision::CudaCollision *collisionScratch,
-        cuda::collision::CudaCollision *shapeCollisionScratch,
+        cuda::collision::CudaCollisionSearchTile *collisionScratch,
+        cuda::collision::CudaCollisionSearchTile *shapeCollisionScratch,
         GmIso4 *shapeWorldScratch,
         GmBoxAligned *movingBoundsScratch,
         cuda::collision::CudaCollisionSurfaceHit *
@@ -2780,6 +2876,7 @@ __global__ void CaptureSearchWinnerStateKernel(
         cuda::collision::CudaCollisionMeshRange *
                 meshRangeScratch,
         std::uint32_t *meshCellScratch,
+        std::uint16_t *responseOrderScratch,
         std::uint32_t scratchStride,
         std::uint32_t shapeCapacity,
         CudaCandidateState *capturedWinnerState) {
@@ -2831,6 +2928,8 @@ __global__ void CaptureSearchWinnerStateKernel(
             slot,
             scratchStride,
             shapeCapacity};
+    candidateScratch.responseOrderStorage =
+            responseOrderScratch;
     CudaCandidateState state = *branchState;
     state.candidateId =
             static_cast<std::uint32_t>(winner.candidateId);
@@ -3059,14 +3158,19 @@ struct CudaSearchExecutor::Impl {
     bool needsTemporaryEvents = true;
     bool needsPassBaselineEvents = true;
     bool needsEligibleIndices = true;
+    bool steadyTimeline = false;
     std::uint32_t compactInputCount = 0u;
     std::uint32_t sharedEligibleCount = 0u;
     std::uint32_t editCapacity = 0u;
     std::uint32_t eraseCapacity = 0u;
     std::size_t editStorageBytes = 0u;
     std::uint32_t multiprocessorCount = 0u;
-    SimulationKernelMetrics latencyKernelMetrics;
+    CudaHandlingSpecialization handlingSpecialization =
+            CudaHandlingSpecialization::Generic;
     SimulationKernelMetrics throughputKernelMetrics;
+    SimulationKernelMetrics tailKernelMetrics;
+    SimulationKernelMetrics denseTailKernelMetrics;
+    cuda::specialization::SessionModule specializedModule;
 
     DeviceAllocation<CudaCandidateState> branchState;
     DeviceAllocation<DeviceControlState> mutableBoundaryControls;
@@ -3098,8 +3202,10 @@ struct CudaSearchExecutor::Impl {
     DeviceAllocation<bool> activeCandidates;
     DeviceAllocation<DeviceSample> reducedBest;
     DeviceAllocation<std::byte> reductionTemporary;
-    DeviceAllocation<cuda::collision::CudaCollision> collisionScratch;
-    DeviceAllocation<cuda::collision::CudaCollision> shapeCollisionScratch;
+    DeviceAllocation<cuda::collision::CudaCollisionSearchTile>
+            collisionScratch;
+    DeviceAllocation<cuda::collision::CudaCollisionSearchTile>
+            shapeCollisionScratch;
     DeviceAllocation<GmIso4> shapeWorldScratch;
     DeviceAllocation<GmBoxAligned> movingBoundsScratch;
     DeviceAllocation<cuda::collision::CudaCollisionSurfaceHit>
@@ -3107,6 +3213,7 @@ struct CudaSearchExecutor::Impl {
     DeviceAllocation<cuda::collision::CudaCollisionMeshRange>
             meshRangeScratch;
     DeviceAllocation<std::uint32_t> meshCellScratch;
+    DeviceAllocation<std::uint16_t> responseOrderScratch;
     MappedCancellation cancellation;
     DeviceAllocation<DeviceSample> globalBestSample;
     DeviceAllocation<CudaCandidateState> globalBestState;
@@ -3155,6 +3262,7 @@ struct CudaSearchExecutor::Impl {
         ADD_BYTES(surfaceHitScratch);
         ADD_BYTES(meshRangeScratch);
         ADD_BYTES(meshCellScratch);
+        ADD_BYTES(responseOrderScratch);
         ADD_BYTES(cancellation);
         ADD_BYTES(globalBestSample);
         ADD_BYTES(globalBestState);
@@ -3320,19 +3428,75 @@ struct CudaSearchExecutor::Impl {
                         configuration.maximumEventCount)};
     }
 
-    template <std::uint32_t MinimumBlocksPerSm>
+    template <
+            std::uint32_t MinimumBlocksPerSm,
+            CudaHandlingSpecialization Handling>
     const void *SimulationKernel() const {
-        return configuration.branchState.stuntsEnabled
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_WATER_ONLY)
+        return reinterpret_cast<const void *>(
+                SimulateSearchCandidatesKernel<
+                        CudaCandidatePhysicsState,
+                        false,
+                        true,
+                        Handling,
+                        MinimumBlocksPerSm>);
+#else
+        if (configuration.branchState.stuntsEnabled) {
+            return reinterpret_cast<const void *>(
+                    SimulateSearchCandidatesKernel<
+                            CudaCandidateState,
+                            true,
+                            false,
+                            Handling,
+                            MinimumBlocksPerSm>);
+        }
+        return steadyTimeline
                 ? reinterpret_cast<const void *>(
                           SimulateSearchCandidatesKernel<
-                                  CudaCandidateState,
+                                  CudaCandidatePhysicsState,
+                                  false,
                                   true,
+                                  Handling,
                                   MinimumBlocksPerSm>)
                 : reinterpret_cast<const void *>(
                           SimulateSearchCandidatesKernel<
                                   CudaCandidatePhysicsState,
                                   false,
+                                  false,
+                                  Handling,
                                   MinimumBlocksPerSm>);
+#endif
+    }
+
+    template <std::uint32_t MinimumBlocksPerSm>
+    const void *SelectedSimulationKernel() const {
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_WATER_ONLY)
+        return SimulationKernel<
+                MinimumBlocksPerSm,
+                CudaHandlingSpecialization::GearedDriveWater>();
+#else
+        switch (handlingSpecialization) {
+        case CudaHandlingSpecialization::Legacy:
+            return SimulationKernel<
+                    MinimumBlocksPerSm,
+                    CudaHandlingSpecialization::Legacy>();
+        case CudaHandlingSpecialization::GearedDriveDry:
+            return SimulationKernel<
+                    MinimumBlocksPerSm,
+                    CudaHandlingSpecialization::GearedDriveDry>();
+        case CudaHandlingSpecialization::GearedDriveWater:
+            return SimulationKernel<
+                    MinimumBlocksPerSm,
+                    CudaHandlingSpecialization::GearedDriveWater>();
+        case CudaHandlingSpecialization::Generic:
+            return SimulationKernel<
+                    MinimumBlocksPerSm,
+                    CudaHandlingSpecialization::Generic>();
+        }
+        return SimulationKernel<
+                MinimumBlocksPerSm,
+                CudaHandlingSpecialization::Generic>();
+#endif
     }
 
     bool LoadSimulationKernelMetrics(
@@ -3397,17 +3561,54 @@ struct CudaSearchExecutor::Impl {
         multiprocessorCount =
                 static_cast<std::uint32_t>(
                         properties.multiProcessorCount);
+        if (specializedModule.Ready()) {
+            const auto load =
+                    [&](std::uint32_t minimumBlocks,
+                        SimulationKernelMetrics *metrics) {
+                const cuda::specialization::KernelMetrics &source =
+                        specializedModule.Metrics(minimumBlocks);
+                metrics->registersPerThread =
+                        source.registersPerThread;
+                metrics->localBytesPerThread =
+                        source.localBytesPerThread;
+                metrics->activeBlocksPerMultiprocessor =
+                        source.activeBlocksPerMultiprocessor;
+                metrics->theoreticalOccupancy =
+                        properties.maxThreadsPerMultiProcessor == 0
+                        ? 0.0
+                        : static_cast<double>(
+                                  source.activeBlocksPerMultiprocessor *
+                                  SimulationBlockSize) /
+                                  properties.maxThreadsPerMultiProcessor;
+            };
+            load(ThroughputKernelMinimumBlocksPerSm,
+                 &throughputKernelMetrics);
+            load(TailKernelMinimumBlocksPerSm,
+                 &tailKernelMetrics);
+            load(DenseTailKernelMinimumBlocksPerSm,
+                 &denseTailKernelMetrics);
+            if (diagnostic != nullptr) {
+                diagnostic->clear();
+            }
+            return true;
+        }
         return LoadSimulationKernelMetrics(
-                       SimulationKernel<
-                               LatencyKernelMinimumBlocksPerSm>(),
-                       properties,
-                       &latencyKernelMetrics,
-                       diagnostic) &&
-               LoadSimulationKernelMetrics(
-                       SimulationKernel<
+                       SelectedSimulationKernel<
                                ThroughputKernelMinimumBlocksPerSm>(),
                        properties,
                        &throughputKernelMetrics,
+                       diagnostic) &&
+               LoadSimulationKernelMetrics(
+                       SelectedSimulationKernel<
+                               TailKernelMinimumBlocksPerSm>(),
+                       properties,
+                       &tailKernelMetrics,
+                       diagnostic) &&
+               LoadSimulationKernelMetrics(
+                       SelectedSimulationKernel<
+                               DenseTailKernelMinimumBlocksPerSm>(),
+                       properties,
+                       &denseTailKernelMetrics,
                        diagnostic);
     }
 
@@ -3434,6 +3635,16 @@ struct CudaSearchExecutor::Impl {
         const std::uint64_t shapeCollisionSlots64 =
                 static_cast<std::uint64_t>(candidateCount) *
                 cuda::collision::ShapeCollisionCapacity;
+        const std::uint64_t collisionTileStride64 =
+                (static_cast<std::uint64_t>(candidateCount) +
+                 cuda::collision::CudaCollisionSearchTileWidth - 1u) /
+                cuda::collision::CudaCollisionSearchTileWidth;
+        const std::uint64_t collisionTileSlots64 =
+                collisionTileStride64 *
+                cuda::collision::CollisionCapacity;
+        const std::uint64_t shapeCollisionTileSlots64 =
+                collisionTileStride64 *
+                cuda::collision::ShapeCollisionCapacity;
         const std::uint64_t shapeQuerySlots64 =
                 static_cast<std::uint64_t>(candidateCount) *
                 collisionShapeCount;
@@ -3454,6 +3665,10 @@ struct CudaSearchExecutor::Impl {
             collisionSlots64 >
                     std::numeric_limits<std::size_t>::max() ||
             shapeCollisionSlots64 >
+                    std::numeric_limits<std::size_t>::max() ||
+            collisionTileSlots64 >
+                    std::numeric_limits<std::size_t>::max() ||
+            shapeCollisionTileSlots64 >
                     std::numeric_limits<std::size_t>::max() ||
             shapeQuerySlots64 >
                     std::numeric_limits<std::size_t>::max() ||
@@ -3479,8 +3694,11 @@ struct CudaSearchExecutor::Impl {
                 static_cast<std::size_t>(winnerSlots64);
         const std::size_t collisionSlots =
                 static_cast<std::size_t>(collisionSlots64);
-        const std::size_t shapeCollisionSlots =
-                static_cast<std::size_t>(shapeCollisionSlots64);
+        const std::size_t collisionTileSlots =
+                static_cast<std::size_t>(collisionTileSlots64);
+        const std::size_t shapeCollisionTileSlots =
+                static_cast<std::size_t>(
+                        shapeCollisionTileSlots64);
         const std::size_t shapeQuerySlots =
                 static_cast<std::size_t>(shapeQuerySlots64);
         const std::size_t surfaceHitSlots =
@@ -3514,9 +3732,9 @@ struct CudaSearchExecutor::Impl {
         DeviceAllocation<DeviceCandidateStatus> nextStatuses;
         DeviceAllocation<bool> nextActiveCandidates;
         DeviceAllocation<std::byte> nextReductionTemporary;
-        DeviceAllocation<cuda::collision::CudaCollision>
+        DeviceAllocation<cuda::collision::CudaCollisionSearchTile>
                 nextCollisionScratch;
-        DeviceAllocation<cuda::collision::CudaCollision>
+        DeviceAllocation<cuda::collision::CudaCollisionSearchTile>
                 nextShapeCollisionScratch;
         DeviceAllocation<GmIso4> nextShapeWorldScratch;
         DeviceAllocation<GmBoxAligned> nextMovingBoundsScratch;
@@ -3525,6 +3743,7 @@ struct CudaSearchExecutor::Impl {
         DeviceAllocation<cuda::collision::CudaCollisionMeshRange>
                 nextMeshRangeScratch;
         DeviceAllocation<std::uint32_t> nextMeshCellScratch;
+        DeviceAllocation<std::uint16_t> nextResponseOrderScratch;
         if (!nextCandidateBestSamples.Allocate(winnerSlots) ||
             !nextFinishRefinements.Allocate(
                     configuration.evaluator.kind ==
@@ -3559,14 +3778,15 @@ struct CudaSearchExecutor::Impl {
             !nextMutationCounts.Allocate(candidates) ||
             !nextStatuses.Allocate(candidates) ||
             !nextActiveCandidates.Allocate(candidates) ||
-            !nextCollisionScratch.Allocate(collisionSlots) ||
+            !nextCollisionScratch.Allocate(collisionTileSlots) ||
             !nextShapeCollisionScratch.Allocate(
-                    shapeCollisionSlots) ||
+                    shapeCollisionTileSlots) ||
             !nextShapeWorldScratch.Allocate(shapeQuerySlots) ||
             !nextMovingBoundsScratch.Allocate(shapeQuerySlots) ||
             !nextSurfaceHitScratch.Allocate(surfaceHitSlots) ||
             !nextMeshRangeScratch.Allocate(meshRangeSlots) ||
-            !nextMeshCellScratch.Allocate(meshCellSlots)) {
+            !nextMeshCellScratch.Allocate(meshCellSlots) ||
+            !nextResponseOrderScratch.Allocate(collisionSlots)) {
             static_cast<void>(cudaGetLastError());
             if (diagnostic != nullptr) {
                 *diagnostic =
@@ -3626,6 +3846,8 @@ struct CudaSearchExecutor::Impl {
         surfaceHitScratch = std::move(nextSurfaceHitScratch);
         meshRangeScratch = std::move(nextMeshRangeScratch);
         meshCellScratch = std::move(nextMeshCellScratch);
+        responseOrderScratch =
+                std::move(nextResponseOrderScratch);
         configuration.maximumBatchSize = candidateCount;
         UpdateResidentBytes();
         if (diagnostic != nullptr) {
@@ -3790,29 +4012,117 @@ struct CudaSearchExecutor::Impl {
         cudaEventRecord(mutationsGenerated.Get());
         const std::uint32_t simulationBlocks =
                 (candidateCount - 1u) / SimulationBlockSize + 1u;
-        // Pay the throughput kernel's spill cost only when the latency
-        // kernel would need another full resident wave.
-        const bool useThroughputKernel =
-                static_cast<std::uint64_t>(simulationBlocks) >
-                static_cast<std::uint64_t>(
-                        latencyKernelMetrics.
-                                activeBlocksPerMultiprocessor) *
-                        multiprocessorCount;
-        const SimulationKernelMetrics &simulationMetrics =
-                useThroughputKernel
-                ? throughputKernelMetrics
-                : latencyKernelMetrics;
+        const auto residentWaves =
+                [&](const SimulationKernelMetrics &metrics) {
+            const std::uint64_t residentBlocks =
+                    static_cast<std::uint64_t>(
+                            metrics.activeBlocksPerMultiprocessor) *
+                    multiprocessorCount;
+            return residentBlocks == 0u
+                    ? UINT64_MAX
+                    : (simulationBlocks + residentBlocks - 1u) /
+                              residentBlocks;
+        };
+        std::uint32_t selectedMinimumBlocks =
+                ThroughputKernelMinimumBlocksPerSm;
+        const SimulationKernelMetrics *simulationMetrics =
+                &throughputKernelMetrics;
+        std::uint64_t selectedWaves =
+                residentWaves(*simulationMetrics);
+        const auto considerKernel =
+                [&](std::uint32_t minimumBlocks,
+                    const SimulationKernelMetrics &metrics) {
+            const std::uint64_t waves = residentWaves(metrics);
+            if (waves < selectedWaves) {
+                selectedMinimumBlocks = minimumBlocks;
+                simulationMetrics = &metrics;
+                selectedWaves = waves;
+            }
+        };
+        considerKernel(
+                TailKernelMinimumBlocksPerSm,
+                tailKernelMetrics);
+        considerKernel(
+                DenseTailKernelMinimumBlocksPerSm,
+                denseTailKernelMetrics);
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_WATER_ONLY)
+        const CUresult simulationLaunch = LaunchDriverKernel(
+                specializedModule.Kernel(selectedMinimumBlocks),
+                simulationBlocks,
+                configuration.deviceScene,
+                configuration.deviceStaticConfiguration,
+                branchState.Get(),
+                mutableBoundaryControls.Get(),
+                baselineTicks.Get(),
+                timelineTickCount,
+                evaluator.Get(),
+                configuration.tickDurationMs,
+                configuration.prestartDurationMs,
+                configuration.branchTimeMs,
+                mutableFromTimeMs,
+                configuration.evaluationStartTimeMs,
+                evaluationTickCount,
+                firstCandidateId,
+                candidateCount,
+                baseline,
+                static_cast<std::uint32_t>(
+                        configuration.maximumEventCount),
+                candidateBestSamples.Get(),
+                baselineInputs.Get(),
+                static_cast<std::uint32_t>(
+                        configuration.baselineInputs.size()),
+                candidateEvents.Get(),
+                candidateInputValues.Get(),
+                compactInputOffsets.Get(),
+                compactInputCount,
+                compactRandomSteeringPipeline,
+                compactEditPipeline,
+                CandidateEdits(candidateCount),
+                eventCounts.Get(),
+                statuses.Get(),
+                activeCandidates.Get(),
+                collisionScratch.Get(),
+                shapeCollisionScratch.Get(),
+                shapeWorldScratch.Get(),
+                movingBoundsScratch.Get(),
+                surfaceHitScratch.Get(),
+                meshRangeScratch.Get(),
+                meshCellScratch.Get(),
+                responseOrderScratch.Get(),
+                static_cast<std::uint32_t>(
+                        configuration.maximumBatchSize),
+                collisionShapeCount,
+                cancellation.Get());
+        if (simulationLaunch != CUDA_SUCCESS) {
+            const char *message = nullptr;
+            cuGetErrorString(simulationLaunch, &message);
+            result.status = CudaSearchStatus::DeviceFailure;
+            result.diagnostic =
+                    "launching specialized CUDA simulation kernel: " +
+                    std::string(
+                            message == nullptr ? "unknown" : message);
+            return result;
+        }
+#else
         const auto launchSimulation = [&](auto stateType,
-                                          auto simulateStunts) {
+                                          auto simulateStunts,
+                                          auto steadyTimelineTag) {
             using State = decltype(stateType);
             constexpr bool SimulateStunts =
                     decltype(simulateStunts)::value;
-            const auto launch = [&](auto minimumBlocks) {
+            constexpr bool SteadyTimeline =
+                    decltype(steadyTimelineTag)::value;
+            const auto launch = [&](auto minimumBlocks,
+                                    auto handling) {
                 constexpr std::uint32_t MinimumBlocksPerSm =
                         decltype(minimumBlocks)::value;
+                constexpr CudaHandlingSpecialization
+                        Handling = decltype(handling)::value;
                 SimulateSearchCandidatesKernel<
                         State,
                         SimulateStunts,
+                        SteadyTimeline,
+                        Handling,
                         MinimumBlocksPerSm>
                         <<<simulationBlocks, SimulationBlockSize>>>(
                         configuration.deviceScene,
@@ -3856,29 +4166,87 @@ struct CudaSearchExecutor::Impl {
                         surfaceHitScratch.Get(),
                         meshRangeScratch.Get(),
                         meshCellScratch.Get(),
+                        responseOrderScratch.Get(),
                         configuration.maximumBatchSize,
                         collisionShapeCount,
                         cancellation.Get());
             };
-            if (useThroughputKernel) {
-                launch(std::integral_constant<
-                       std::uint32_t,
-                       ThroughputKernelMinimumBlocksPerSm>{});
-            } else {
-                launch(std::integral_constant<
-                       std::uint32_t,
-                       LatencyKernelMinimumBlocksPerSm>{});
+            const auto launchForHandling = [&](auto handling) {
+                if (selectedMinimumBlocks ==
+                    DenseTailKernelMinimumBlocksPerSm) {
+                    launch(std::integral_constant<
+                                   std::uint32_t,
+                                   DenseTailKernelMinimumBlocksPerSm>{},
+                           handling);
+                } else if (selectedMinimumBlocks ==
+                           TailKernelMinimumBlocksPerSm) {
+                    launch(std::integral_constant<
+                                   std::uint32_t,
+                                   TailKernelMinimumBlocksPerSm>{},
+                           handling);
+                } else {
+                    launch(std::integral_constant<
+                                   std::uint32_t,
+                                   ThroughputKernelMinimumBlocksPerSm>{},
+                           handling);
+                }
+            };
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_WATER_ONLY)
+            launchForHandling(std::integral_constant<
+                    CudaHandlingSpecialization,
+                    CudaHandlingSpecialization::
+                            GearedDriveWater>{});
+#else
+            switch (handlingSpecialization) {
+            case CudaHandlingSpecialization::Legacy:
+                launchForHandling(std::integral_constant<
+                        CudaHandlingSpecialization,
+                        CudaHandlingSpecialization::Legacy>{});
+                break;
+            case CudaHandlingSpecialization::GearedDriveDry:
+                launchForHandling(std::integral_constant<
+                        CudaHandlingSpecialization,
+                        CudaHandlingSpecialization::
+                                GearedDriveDry>{});
+                break;
+            case CudaHandlingSpecialization::GearedDriveWater:
+                launchForHandling(std::integral_constant<
+                        CudaHandlingSpecialization,
+                        CudaHandlingSpecialization::
+                                GearedDriveWater>{});
+                break;
+            case CudaHandlingSpecialization::Generic:
+                launchForHandling(std::integral_constant<
+                        CudaHandlingSpecialization,
+                        CudaHandlingSpecialization::Generic>{});
+                break;
             }
+#endif
         };
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_WATER_ONLY)
+        launchSimulation(
+                CudaCandidatePhysicsState{},
+                std::false_type{},
+                std::true_type{});
+#else
         if (configuration.branchState.stuntsEnabled) {
             launchSimulation(
                     CudaCandidateState{},
+                    std::true_type{},
+                    std::false_type{});
+        } else if (steadyTimeline) {
+            launchSimulation(
+                    CudaCandidatePhysicsState{},
+                    std::false_type{},
                     std::true_type{});
         } else {
             launchSimulation(
                     CudaCandidatePhysicsState{},
+                    std::false_type{},
                     std::false_type{});
         }
+#endif
+#endif
         cudaEventRecord(simulationFinished.Get());
         if (configuration.evaluator.kind ==
             CudaSearchEvaluatorKind::FinishTime) {
@@ -3925,6 +4293,7 @@ struct CudaSearchExecutor::Impl {
                         surfaceHitScratch.Get(),
                         meshRangeScratch.Get(),
                         meshCellScratch.Get(),
+                        responseOrderScratch.Get(),
                         configuration.maximumBatchSize,
                         collisionShapeCount,
                         cancellation.Get(),
@@ -3994,6 +4363,7 @@ struct CudaSearchExecutor::Impl {
                 surfaceHitScratch.Get(),
                 meshRangeScratch.Get(),
                 meshCellScratch.Get(),
+                responseOrderScratch.Get(),
                 configuration.maximumBatchSize,
                 collisionShapeCount,
                 capturedWinnerState.Get());
@@ -4104,13 +4474,13 @@ struct CudaSearchExecutor::Impl {
         result.finalizationKernelMilliseconds = milliseconds;
         result.simulationThreadsPerBlock = SimulationBlockSize;
         result.simulationRegistersPerThread =
-                simulationMetrics.registersPerThread;
+                simulationMetrics->registersPerThread;
         result.simulationLocalBytesPerThread =
-                simulationMetrics.localBytesPerThread;
+                simulationMetrics->localBytesPerThread;
         result.simulationActiveBlocksPerMultiprocessor =
-                simulationMetrics.activeBlocksPerMultiprocessor;
+                simulationMetrics->activeBlocksPerMultiprocessor;
         result.simulationTheoreticalOccupancy =
-                simulationMetrics.theoreticalOccupancy;
+                simulationMetrics->theoreticalOccupancy;
 
         DeviceBatchSummary hostSummary;
         error = cudaMemcpy(
@@ -4281,6 +4651,261 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
             }
             return {};
         }
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_FOUR_WHEELS)
+        if (configuration.branchState.vehicle.wheels.count != 4u) {
+            if (diagnostic != nullptr) {
+                *diagnostic =
+                        "research wheel-count fact does not match";
+            }
+            return {};
+        }
+        for (std::uint32_t index = 0u; index < 4u; ++index) {
+            const CudaWheelState &stateWheel =
+                    configuration.branchState.vehicle.wheels.
+                            values[index];
+            const VehicleWheelDefinition &definitionWheel =
+                    reinterpret_cast<
+                            const VehicleWheelDefinition *>(
+                            &packedConfiguration.wheels.wheels)[index];
+            const bool immutableFieldsMatch =
+                    stateWheel.killsLateralSpeedOnContact ==
+                            definitionWheel.
+                                    killsLateralSpeedOnContact &&
+                    stateWheel.axle ==
+                            static_cast<std::uint32_t>(
+                                    definitionWheel.axle) &&
+                    std::memcmp(
+                            &stateWheel.rollingRadius,
+                            &definitionWheel.rollingRadius,
+                            sizeof(float)) == 0 &&
+                    std::memcmp(
+                            &stateWheel.forceApplicationPoint,
+                            &definitionWheel.forceApplicationPoint,
+                            sizeof(GmVec3)) == 0 &&
+                    std::memcmp(
+                            &stateWheel.restPose,
+                            &definitionWheel.restSurfacePose,
+                            sizeof(GmIso4)) == 0;
+            if (!immutableFieldsMatch) {
+                if (diagnostic != nullptr) {
+                    *diagnostic =
+                            "research immutable wheel facts do not match";
+                }
+                return {};
+            }
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_CANONICAL_WHEEL_FACTS)
+            const GmMat3 identityRotation = {
+                    {1.0f, 0.0f, 0.0f},
+                    {0.0f, 1.0f, 0.0f},
+                    {0.0f, 0.0f, 1.0f},
+            };
+            const VehicleWheelDefinition &firstWheel =
+                    *reinterpret_cast<
+                            const VehicleWheelDefinition *>(
+                            &packedConfiguration.wheels.wheels);
+            const VehicleWheelAxle expectedAxle =
+                    index < 2u
+                    ? VehicleWheelAxle::Front
+                    : VehicleWheelAxle::Rear;
+            const bool canonicalFactsMatch =
+                    definitionWheel.axle == expectedAxle &&
+                    definitionWheel.
+                            killsLateralSpeedOnContact &&
+                    std::memcmp(
+                            &definitionWheel.rollingRadius,
+                            &firstWheel.rollingRadius,
+                            sizeof(float)) == 0 &&
+                    std::memcmp(
+                            &definitionWheel.restSurfacePose.rotation,
+                            &identityRotation,
+                            sizeof(GmMat3)) == 0;
+            if (!canonicalFactsMatch) {
+                if (diagnostic != nullptr) {
+                    *diagnostic =
+                            "research canonical wheel facts do not match";
+                }
+                return {};
+            }
+#endif
+        }
+#endif
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_WATER_ONLY)
+        CudaPackedSceneHeader packedScene{};
+        const cudaError_t sceneCopyError = cudaMemcpy(
+                &packedScene,
+                configuration.deviceScene,
+                sizeof(packedScene),
+                cudaMemcpyDeviceToHost);
+        if (sceneCopyError != cudaSuccess ||
+            packedScene.magic != CudaPackedSceneHeader::Magic ||
+            packedScene.schemaVersion !=
+                    CudaPackedSceneHeader::SchemaVersion) {
+            if (diagnostic != nullptr) {
+                *diagnostic = sceneCopyError != cudaSuccess
+                        ? CudaFailure(
+                                  "reading CUDA scene header",
+                                  sceneCopyError)
+                        : "invalid CUDA scene header";
+            }
+            return {};
+        }
+        const std::uint64_t sceneBase =
+                reinterpret_cast<std::uintptr_t>(
+                        configuration.deviceScene);
+        cudaError_t researchConstantError =
+                cudaMemcpyToSymbol(
+                        cuda::research::StaticSceneBase,
+                        &sceneBase,
+                        sizeof(sceneBase),
+                        0u,
+                        cudaMemcpyHostToDevice);
+        if (researchConstantError == cudaSuccess) {
+            researchConstantError = cudaMemcpyToSymbol(
+                    cuda::research::StaticScene,
+                    &packedScene,
+                    sizeof(packedScene),
+                    0u,
+                    cudaMemcpyHostToDevice);
+        }
+        if (researchConstantError != cudaSuccess) {
+            if (diagnostic != nullptr) {
+                *diagnostic = CudaFailure(
+                        "copying research CUDA scene header",
+                        researchConstantError);
+            }
+            return {};
+        }
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_CONSTANT_COLLISION_SHAPES)
+        if (packedConfiguration.collisionShapes.count != 8u ||
+            packedConfiguration.collisionShapes.stride !=
+                    sizeof(CudaVehicleCollisionShape)) {
+            if (diagnostic != nullptr) {
+                *diagnostic =
+                        "research collision shape facts do not match";
+            }
+            return {};
+        }
+        std::array<CudaVehicleCollisionShape, 8u>
+                constantCollisionShapes{};
+        const auto *configurationBytes =
+                static_cast<const std::byte *>(
+                        configuration.deviceStaticConfiguration);
+        researchConstantError = cudaMemcpy(
+                constantCollisionShapes.data(),
+                configurationBytes +
+                        packedConfiguration.collisionShapes.offset,
+                sizeof(constantCollisionShapes),
+                cudaMemcpyDeviceToHost);
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_EIGHT_ROOT_SHAPES)
+        constexpr std::uint32_t ExpectedWheelIndices[] = {
+                UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX,
+                0u, 1u, 3u, 2u};
+        if (researchConstantError == cudaSuccess) {
+            for (std::uint32_t index = 0u;
+                 index < constantCollisionShapes.size(); ++index) {
+                if (constantCollisionShapes[index].
+                                parentShapeIndex != UINT32_MAX ||
+                    constantCollisionShapes[index].wheelIndex !=
+                            ExpectedWheelIndices[index]) {
+                    if (diagnostic != nullptr) {
+                        *diagnostic =
+                                "research collision shape topology "
+                                "does not match";
+                    }
+                    return {};
+                }
+            }
+        }
+#endif
+        if (researchConstantError == cudaSuccess) {
+            researchConstantError = cudaMemcpyToSymbol(
+                    cuda::research::StaticCollisionShapes,
+                    constantCollisionShapes.data(),
+                    sizeof(constantCollisionShapes),
+                    0u,
+                    cudaMemcpyHostToDevice);
+        }
+        if (researchConstantError != cudaSuccess) {
+            if (diagnostic != nullptr) {
+                *diagnostic = CudaFailure(
+                        "copying research CUDA collision shapes",
+                        researchConstantError);
+            }
+            return {};
+        }
+#endif
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_CONSTANT_CURVE_KEYS)
+        if (packedConfiguration.curveKeys.count > 4096u ||
+            packedConfiguration.curveKeys.stride !=
+                    sizeof(CudaTuningCurveKey)) {
+            if (diagnostic != nullptr) {
+                *diagnostic =
+                        "research tuning curve key facts do not match";
+            }
+            return {};
+        }
+        std::vector<CudaTuningCurveKey> constantCurveKeys(
+                packedConfiguration.curveKeys.count);
+        researchConstantError = cudaMemcpy(
+                constantCurveKeys.data(),
+                configurationBytes +
+                        packedConfiguration.curveKeys.offset,
+                constantCurveKeys.size() *
+                        sizeof(CudaTuningCurveKey),
+                cudaMemcpyDeviceToHost);
+        if (researchConstantError == cudaSuccess &&
+            !constantCurveKeys.empty()) {
+            researchConstantError = cudaMemcpyToSymbol(
+                    cuda::research::StaticCurveKeys,
+                    constantCurveKeys.data(),
+                    constantCurveKeys.size() *
+                            sizeof(CudaTuningCurveKey),
+                    0u,
+                    cudaMemcpyHostToDevice);
+        }
+        if (researchConstantError != cudaSuccess) {
+            if (diagnostic != nullptr) {
+                *diagnostic = CudaFailure(
+                        "copying research CUDA tuning curve keys",
+                        researchConstantError);
+            }
+            return {};
+        }
+#endif
+        const std::uint64_t configurationBase =
+                reinterpret_cast<std::uintptr_t>(
+                        configuration.deviceStaticConfiguration);
+        const cudaError_t constantBaseError =
+                cudaMemcpyToSymbol(
+                        cuda::research::StaticConfigurationBase,
+                        &configurationBase,
+                        sizeof(configurationBase),
+                        0u,
+                        cudaMemcpyHostToDevice);
+        if (constantBaseError != cudaSuccess) {
+            if (diagnostic != nullptr) {
+                *diagnostic = CudaFailure(
+                        "copying research CUDA configuration base",
+                        constantBaseError);
+            }
+            return {};
+        }
+        const cudaError_t constantConfigurationError =
+                cudaMemcpyToSymbol(
+                        cuda::research::StaticConfiguration,
+                        &packedConfiguration,
+                        sizeof(packedConfiguration),
+                        0u,
+                        cudaMemcpyHostToDevice);
+        if (constantConfigurationError != cudaSuccess) {
+            if (diagnostic != nullptr) {
+                *diagnostic = CudaFailure(
+                        "copying research CUDA static configuration",
+                        constantConfigurationError);
+            }
+            return {};
+        }
+#endif
         const std::int64_t mutableFromTimeMs =
                 configuration.branchTimeMs +
                 configuration.tickDurationMs;
@@ -4369,6 +4994,17 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
                 static_cast<std::uint64_t>(
                         preparedConfiguration.maximumBatchSize) *
                 cuda::collision::ShapeCollisionCapacity;
+        const std::uint64_t collisionTileStride =
+                (static_cast<std::uint64_t>(
+                         preparedConfiguration.maximumBatchSize) +
+                 cuda::collision::CudaCollisionSearchTileWidth - 1u) /
+                cuda::collision::CudaCollisionSearchTileWidth;
+        const std::uint64_t collisionTileCount =
+                collisionTileStride *
+                cuda::collision::CollisionCapacity;
+        const std::uint64_t shapeCollisionTileCount =
+                collisionTileStride *
+                cuda::collision::ShapeCollisionCapacity;
         const std::uint64_t shapeQueryCount =
                 static_cast<std::uint64_t>(
                         preparedConfiguration.maximumBatchSize) *
@@ -4391,6 +5027,10 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
                     std::numeric_limits<std::size_t>::max() ||
             shapeCollisionCount >
                     std::numeric_limits<std::size_t>::max() ||
+            collisionTileCount >
+                    std::numeric_limits<std::size_t>::max() ||
+            shapeCollisionTileCount >
+                    std::numeric_limits<std::size_t>::max() ||
             shapeQueryCount >
                     std::numeric_limits<std::size_t>::max() ||
             surfaceHitCount >
@@ -4407,6 +5047,28 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
 
         auto impl = std::make_unique<Impl>();
         impl->configuration = preparedConfiguration;
+        switch (packedConfiguration.tuning.handlingModel) {
+        case static_cast<std::uint32_t>(
+                CSceneVehicleCarHandlingModel_Standard):
+        case static_cast<std::uint32_t>(
+                CSceneVehicleCarHandlingModel_Lateral):
+            impl->handlingSpecialization =
+                    CudaHandlingSpecialization::Legacy;
+            break;
+        case static_cast<std::uint32_t>(
+                CSceneVehicleCarHandlingModel_GearedDrive):
+            impl->handlingSpecialization =
+                    packedConfiguration.water.present
+                    ? CudaHandlingSpecialization::
+                              GearedDriveWater
+                    : CudaHandlingSpecialization::
+                              GearedDriveDry;
+            break;
+        default:
+            impl->handlingSpecialization =
+                    CudaHandlingSpecialization::Generic;
+            break;
+        }
         impl->immutableInputPrefix =
                 std::move(inputPartition.immutablePrefix);
         impl->immutableInputTail =
@@ -4414,6 +5076,13 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
         impl->mutableFromTimeMs = mutableFromTimeMs;
         impl->timelineTickCount = static_cast<std::uint32_t>(
                 preparedConfiguration.baselineTicks.size());
+        impl->steadyTimeline = std::all_of(
+                preparedConfiguration.baselineTicks.begin(),
+                preparedConfiguration.baselineTicks.end(),
+                [](const CudaControlTick &tick) {
+                    return tick.actionFlags == 0u &&
+                            tick.respawnAtCheckpointCount == 0u;
+                });
         impl->evaluationTickCount =
                 static_cast<std::uint32_t>(evaluationTicks);
         impl->collisionShapeCount =
@@ -4632,8 +5301,11 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
                 static_cast<std::size_t>(winnerSampleCount);
         const std::size_t collisionSlots =
                 static_cast<std::size_t>(collisionCount);
-        const std::size_t shapeCollisionSlots =
-                static_cast<std::size_t>(shapeCollisionCount);
+        const std::size_t collisionTileSlots =
+                static_cast<std::size_t>(collisionTileCount);
+        const std::size_t shapeCollisionTileSlots =
+                static_cast<std::size_t>(
+                        shapeCollisionTileCount);
         const std::size_t shapeQuerySlots =
                 static_cast<std::size_t>(shapeQueryCount);
         const std::size_t surfaceHitSlots =
@@ -4663,7 +5335,9 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
                 impl->editStorageBytes <=
                         eventSlots *
                                 sizeof(CudaSearchInputEvent);
-        if (!impl->branchState.Allocate(1u) ||
+        if (!impl->shapeCollisionScratch.Allocate(
+                    shapeCollisionTileSlots) ||
+            !impl->branchState.Allocate(1u) ||
             !impl->mutableBoundaryControls.Allocate(1u) ||
             !impl->baselineTicks.Allocate(
                     preparedConfiguration.baselineTicks.size()) ||
@@ -4718,14 +5392,13 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
             !impl->statuses.Allocate(candidates) ||
             !impl->activeCandidates.Allocate(candidates) ||
             !impl->reducedBest.Allocate(1u) ||
-            !impl->collisionScratch.Allocate(collisionSlots) ||
-            !impl->shapeCollisionScratch.Allocate(
-                    shapeCollisionSlots) ||
+            !impl->collisionScratch.Allocate(collisionTileSlots) ||
             !impl->shapeWorldScratch.Allocate(shapeQuerySlots) ||
             !impl->movingBoundsScratch.Allocate(shapeQuerySlots) ||
             !impl->surfaceHitScratch.Allocate(surfaceHitSlots) ||
             !impl->meshRangeScratch.Allocate(meshRangeSlots) ||
             !impl->meshCellScratch.Allocate(meshCellSlots) ||
+            !impl->responseOrderScratch.Allocate(collisionSlots) ||
             !impl->cancellation.Allocate() ||
             !impl->globalBestSample.Allocate(1u) ||
             !impl->globalBestState.Allocate(1u) ||
@@ -4862,6 +5535,16 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
             return {};
         }
 
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_WATER_ONLY)
+        if (!impl->specializedModule.Build(
+                    packedConfiguration,
+                    configurationBase,
+                    packedScene,
+                    sceneBase,
+                    diagnostic)) {
+            return {};
+        }
+#endif
         if (!impl->LoadSimulationKernelMetrics(diagnostic)) {
             return {};
         }

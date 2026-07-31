@@ -1,0 +1,9 @@
+if(NOT DEFINED INPUT OR NOT DEFINED OUTPUT OR NOT DEFINED SYMBOL)
+    message(FATAL_ERROR "INPUT, OUTPUT, and SYMBOL are required")
+endif()
+
+find_program(XXD_EXECUTABLE xxd REQUIRED)
+execute_process(
+    COMMAND "${XXD_EXECUTABLE}" -i -n "${SYMBOL}" "${INPUT}"
+    OUTPUT_FILE "${OUTPUT}"
+    COMMAND_ERROR_IS_FATAL ANY)

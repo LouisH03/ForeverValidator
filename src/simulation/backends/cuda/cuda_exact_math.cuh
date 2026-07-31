@@ -69,6 +69,82 @@ __device__ inline double Atan2(double y, double x) {
     return yNegative ? -angle : angle;
 }
 
+struct AtanApproximation {
+    double value;
+    double error;
+};
+
+__device__ inline AtanApproximation AtanUnitApproximation(
+        double value) {
+    const bool aroundOne = value > 0.4142135623730950488;
+    const double reduced =
+            aroundOne ? (value - 1.0) / (value + 1.0) : value;
+    const double square = reduced * reduced;
+    double power = reduced;
+    double result = reduced;
+    for (unsigned termIndex = 1u; termIndex <= 8u; ++termIndex) {
+        power *= -square;
+        result += power / static_cast<double>(termIndex * 2u + 1u);
+    }
+    const double firstOmitted = power * -square;
+    const double tailBound =
+            fabs(firstOmitted) /
+            (19.0 * (1.0 - square));
+    return {
+            aroundOne ? QuarterPi + result : result,
+            tailBound + 2.0e-14,
+    };
+}
+
+__device__ inline AtanApproximation Atan2Approximation(
+        double y, double x) {
+    const bool yNegative = signbit(y);
+    const bool xNegative = signbit(x);
+    const double absY = fabs(y);
+    const double absX = fabs(x);
+    AtanApproximation result =
+            absY <= absX
+            ? AtanUnitApproximation(absY / absX)
+            : AtanUnitApproximation(absX / absY);
+    if (absY > absX) {
+        result.value = HalfPi - result.value;
+    }
+    if (xNegative) {
+        result.value = Pi - result.value;
+    }
+    if (yNegative) {
+        result.value = -result.value;
+    }
+    return result;
+}
+
+__device__ inline bool CertifiedFloatRound(
+        const AtanApproximation &approximation,
+        float *result) {
+    const float rounded = __double2float_rn(
+            approximation.value);
+    const float previous = nextafterf(
+            rounded,
+            -__uint_as_float(0x7f800000u));
+    const float next = nextafterf(
+            rounded,
+            __uint_as_float(0x7f800000u));
+    const double lower =
+            (static_cast<double>(previous) +
+             static_cast<double>(rounded)) *
+            0.5;
+    const double upper =
+            (static_cast<double>(rounded) +
+             static_cast<double>(next)) *
+            0.5;
+    if (approximation.value - approximation.error <= lower ||
+        approximation.value + approximation.error >= upper) {
+        return false;
+    }
+    *result = rounded;
+    return true;
+}
+
 __device__ inline double SinPolynomial(double value) {
     const double square = value * value;
     double coefficient = -1.0 / 121645100408832000.0;
@@ -248,6 +324,18 @@ __device__ inline float Sqrt(float value) {
 __device__ inline float Atan2(float y, float x) {
     if (isnan(x) || isnan(y)) {
         return detail::QuietNaN();
+    }
+    if (y != 0.0f && x != 0.0f &&
+        isfinite(y) && isfinite(x)) {
+        const detail::AtanApproximation approximation =
+                detail::Atan2Approximation(
+                        static_cast<double>(y),
+                        static_cast<double>(x));
+        float result = 0.0f;
+        if (detail::CertifiedFloatRound(
+                    approximation, &result)) {
+            return result;
+        }
     }
     return FromDouble(detail::Atan2(
             static_cast<double>(y), static_cast<double>(x)));

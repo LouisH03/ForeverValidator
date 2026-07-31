@@ -17,6 +17,9 @@ namespace detail {
 constexpr float DirectionEpsilonSquared = 1.0e-10f;
 constexpr float CollisionDistance = 1.0e-5f;
 constexpr float SphereNormalAlignment = 0.8660254f;
+static_assert(
+        CudaCollisionReplacementOverflowCapacity <=
+        ShapeCollisionCapacity * 2u);
 
 __device__ inline CudaCollision &CollisionAt(
         CudaCollisionScratch &scratch,
@@ -30,44 +33,180 @@ __device__ inline const CudaCollision &CollisionAt(
     return scratch.collisions[index];
 }
 
-__device__ inline CudaCollision &CollisionAt(
+__device__ inline CudaCollisionSearchReference CollisionAt(
         CudaCollisionSearchScratch &scratch,
         std::uint32_t index) {
-    return scratch.collisionStorage[
-            static_cast<std::uint64_t>(index) * scratch.stride +
-            scratch.slot];
+    const std::uint32_t tileStride =
+            (scratch.stride + CudaCollisionSearchTileWidth - 1u) /
+            CudaCollisionSearchTileWidth;
+    CudaCollisionSearchTile &tile =
+            scratch.collisionStorage[
+                    static_cast<std::uint64_t>(index) * tileStride +
+                    scratch.slot / CudaCollisionSearchTileWidth];
+    const std::uint32_t lane =
+            scratch.slot % CudaCollisionSearchTileWidth;
+    return {
+            {tile.separationX[lane], tile.separationY[lane],
+             tile.separationZ[lane]},
+            {tile.impulseNormalX[lane], tile.impulseNormalY[lane],
+             tile.impulseNormalZ[lane]},
+            {tile.contactPointX[lane], tile.contactPointY[lane],
+             tile.contactPointZ[lane]},
+            tile.materialA[lane],
+            tile.materialB[lane],
+            tile.sphereMergePrimary[lane],
+            {tile.extraNegatedX[lane], tile.extraNegatedY[lane],
+             tile.extraNegatedZ[lane]},
+            tile.movingShapeIndex[lane],
+            tile.staticSurfaceIndex[lane],
+            tile.staticActorIndex[lane],
+    };
 }
 
-__device__ inline const CudaCollision &CollisionAt(
+__device__ inline CudaCollisionSearchConstReference CollisionAt(
         const CudaCollisionSearchScratch &scratch,
         std::uint32_t index) {
-    return scratch.collisionStorage[
-            static_cast<std::uint64_t>(index) * scratch.stride +
-            scratch.slot];
+    const std::uint32_t tileStride =
+            (scratch.stride + CudaCollisionSearchTileWidth - 1u) /
+            CudaCollisionSearchTileWidth;
+    const CudaCollisionSearchTile &tile =
+            scratch.collisionStorage[
+                    static_cast<std::uint64_t>(index) * tileStride +
+                    scratch.slot / CudaCollisionSearchTileWidth];
+    const std::uint32_t lane =
+            scratch.slot % CudaCollisionSearchTileWidth;
+    return {
+            {tile.separationX[lane], tile.separationY[lane],
+             tile.separationZ[lane]},
+            {tile.impulseNormalX[lane], tile.impulseNormalY[lane],
+             tile.impulseNormalZ[lane]},
+            {tile.contactPointX[lane], tile.contactPointY[lane],
+             tile.contactPointZ[lane]},
+            tile.materialA[lane],
+            tile.materialB[lane],
+            tile.sphereMergePrimary[lane],
+            {tile.extraNegatedX[lane], tile.extraNegatedY[lane],
+             tile.extraNegatedZ[lane]},
+            tile.movingShapeIndex[lane],
+            tile.staticSurfaceIndex[lane],
+            tile.staticActorIndex[lane],
+    };
+}
+
+__device__ inline CudaCollision &ShapeCollisionAt(
+        CudaCollisionScratch &scratch,
+        std::uint32_t index) {
+    return scratch.shapeCollisions[index];
+}
+
+__device__ inline const CudaCollision &ShapeCollisionAt(
+        const CudaCollisionScratch &scratch,
+        std::uint32_t index) {
+    return scratch.shapeCollisions[index];
+}
+
+__device__ inline CudaCollisionSearchReference ShapeCollisionAt(
+        CudaCollisionSearchScratch &scratch,
+        std::uint32_t index) {
+    const std::uint32_t tileStride =
+            (scratch.stride +
+             CudaCollisionSearchTileWidth - 1u) /
+            CudaCollisionSearchTileWidth;
+    CudaCollisionSearchTile &tile =
+            scratch.shapeCollisionStorage[
+                    static_cast<std::uint64_t>(index) * tileStride +
+                    scratch.slot / CudaCollisionSearchTileWidth];
+    const std::uint32_t lane =
+            scratch.slot % CudaCollisionSearchTileWidth;
+    return {
+            {tile.separationX[lane], tile.separationY[lane],
+             tile.separationZ[lane]},
+            {tile.impulseNormalX[lane], tile.impulseNormalY[lane],
+             tile.impulseNormalZ[lane]},
+            {tile.contactPointX[lane], tile.contactPointY[lane],
+             tile.contactPointZ[lane]},
+            tile.materialA[lane],
+            tile.materialB[lane],
+            tile.sphereMergePrimary[lane],
+            {tile.extraNegatedX[lane], tile.extraNegatedY[lane],
+             tile.extraNegatedZ[lane]},
+            tile.movingShapeIndex[lane],
+            tile.staticSurfaceIndex[lane],
+            tile.staticActorIndex[lane],
+    };
+}
+
+__device__ inline CudaCollisionSearchConstReference ShapeCollisionAt(
+    const CudaCollisionSearchScratch &scratch,
+        std::uint32_t index) {
+    const std::uint32_t tileStride =
+            (scratch.stride +
+             CudaCollisionSearchTileWidth - 1u) /
+            CudaCollisionSearchTileWidth;
+    const CudaCollisionSearchTile &tile =
+            scratch.shapeCollisionStorage[
+                    static_cast<std::uint64_t>(index) * tileStride +
+                    scratch.slot / CudaCollisionSearchTileWidth];
+    const std::uint32_t lane =
+            scratch.slot % CudaCollisionSearchTileWidth;
+    return {
+            {tile.separationX[lane], tile.separationY[lane],
+             tile.separationZ[lane]},
+            {tile.impulseNormalX[lane], tile.impulseNormalY[lane],
+             tile.impulseNormalZ[lane]},
+            {tile.contactPointX[lane], tile.contactPointY[lane],
+             tile.contactPointZ[lane]},
+            tile.materialA[lane],
+            tile.materialB[lane],
+            tile.sphereMergePrimary[lane],
+            {tile.extraNegatedX[lane], tile.extraNegatedY[lane],
+             tile.extraNegatedZ[lane]},
+            tile.movingShapeIndex[lane],
+            tile.staticSurfaceIndex[lane],
+            tile.staticActorIndex[lane],
+    };
 }
 
 __device__ inline GmVec3 &ReplacementOverflowAt(
         CudaCollisionScratch &scratch,
         std::uint32_t index) {
-    return scratch.collisions[index].extraNegated;
+    CudaCollision &storage =
+            ShapeCollisionAt(scratch, index >> 1u);
+    return (index & 1u) == 0u
+            ? storage.extraNegated
+            : storage.contactPoint;
 }
 
 __device__ inline const GmVec3 &ReplacementOverflowAt(
         const CudaCollisionScratch &scratch,
         std::uint32_t index) {
-    return scratch.collisions[index].extraNegated;
+    const CudaCollision &storage =
+            ShapeCollisionAt(scratch, index >> 1u);
+    return (index & 1u) == 0u
+            ? storage.extraNegated
+            : storage.contactPoint;
 }
 
-__device__ inline GmVec3 &ReplacementOverflowAt(
+__device__ inline CudaCollisionSearchVectorReference
+ReplacementOverflowAt(
         CudaCollisionSearchScratch &scratch,
         std::uint32_t index) {
-    return CollisionAt(scratch, index).extraNegated;
+    const CudaCollisionSearchReference storage =
+            ShapeCollisionAt(scratch, index >> 1u);
+    return (index & 1u) == 0u
+            ? storage.extraNegated
+            : storage.contactPoint;
 }
 
-__device__ inline const GmVec3 &ReplacementOverflowAt(
+__device__ inline CudaCollisionSearchConstVectorReference
+ReplacementOverflowAt(
         const CudaCollisionSearchScratch &scratch,
         std::uint32_t index) {
-    return CollisionAt(scratch, index).extraNegated;
+    const CudaCollisionSearchConstReference storage =
+            ShapeCollisionAt(scratch, index >> 1u);
+    return (index & 1u) == 0u
+            ? storage.extraNegated
+            : storage.contactPoint;
 }
 
 template<typename Scratch>
@@ -77,40 +216,17 @@ __device__ inline void CaptureReplacementOverflow(
                 GmVec3,
                 CudaCollisionReplacementOverflowCapacity>
                 &destination) {
+    const std::uint32_t previousCount = destination.count;
     destination.count = scratch.replacementOverflowCount;
     for (std::uint32_t index = 0u;
          index < destination.count; ++index) {
         destination.values[index] =
                 ReplacementOverflowAt(scratch, index);
     }
-}
-
-__device__ inline CudaCollision &ShapeCollisionAt(
-        CudaCollisionScratch &scratch,
-        std::uint32_t index) {
-    return scratch.shapeCollisions[index];
-}
-
-__device__ inline const CudaCollision &ShapeCollisionAt(
-        const CudaCollisionScratch &scratch,
-        std::uint32_t index) {
-    return scratch.shapeCollisions[index];
-}
-
-__device__ inline CudaCollision &ShapeCollisionAt(
-        CudaCollisionSearchScratch &scratch,
-        std::uint32_t index) {
-    return scratch.shapeCollisionStorage[
-            static_cast<std::uint64_t>(index) * scratch.stride +
-            scratch.slot];
-}
-
-__device__ inline const CudaCollision &ShapeCollisionAt(
-        const CudaCollisionSearchScratch &scratch,
-        std::uint32_t index) {
-    return scratch.shapeCollisionStorage[
-            static_cast<std::uint64_t>(index) * scratch.stride +
-            scratch.slot];
+    for (std::uint32_t index = destination.count;
+         index < previousCount; ++index) {
+        destination.values[index] = {};
+    }
 }
 
 __device__ inline GmIso4 &ShapeWorldAt(
@@ -120,6 +236,34 @@ __device__ inline GmIso4 &ShapeWorldAt(
             static_cast<std::uint64_t>(traversal) *
                     scratch.stride +
             scratch.slot];
+}
+
+__device__ inline const GmIso4 &ShapeWorldAt(
+        const CudaCollisionSearchScratch &scratch,
+        std::uint32_t traversal) {
+    return scratch.shapeWorldStorage[
+            static_cast<std::uint64_t>(traversal) *
+                    scratch.stride +
+            scratch.slot];
+}
+
+__device__ inline GmBoxAligned UnifiedMovingBoundsAt(
+        const CudaCollisionSearchScratch &scratch) {
+    GmBoxAligned result;
+    __builtin_memcpy(
+            &result,
+            &scratch.shapeWorldStorage[scratch.slot],
+            sizeof(result));
+    return result;
+}
+
+__device__ inline void StoreUnifiedMovingBounds(
+        CudaCollisionSearchScratch &scratch,
+        const GmBoxAligned &value) {
+    __builtin_memcpy(
+            &scratch.shapeWorldStorage[scratch.slot],
+            &value,
+            sizeof(value));
 }
 
 __device__ inline GmBoxAligned &MovingBoundsAt(
@@ -185,6 +329,68 @@ __device__ inline const std::uint32_t &MeshCellAt(
             scratch.slot];
 }
 
+__device__ inline CudaCollision &OrderedCollisionAt(
+        CudaCollisionScratch &scratch,
+        std::uint32_t index) {
+    return CollisionAt(scratch, index);
+}
+
+__device__ inline CudaCollisionSearchReference OrderedCollisionAt(
+        CudaCollisionSearchScratch &scratch,
+        std::uint32_t index) {
+    return CollisionAt(
+            scratch,
+            scratch.responseOrderStorage[
+                static_cast<std::uint64_t>(index) *
+                            scratch.stride +
+                    scratch.slot]);
+}
+
+__device__ inline void InitializeResponseOrder(
+        CudaCollisionScratch &) {}
+
+__device__ inline void InitializeResponseOrder(
+        CudaCollisionSearchScratch &scratch) {
+    for (std::uint32_t index = 0u;
+         index < scratch.collisionCount; ++index) {
+        scratch.responseOrderStorage[
+                static_cast<std::uint64_t>(index) *
+                        scratch.stride +
+                scratch.slot] =
+                static_cast<std::uint16_t>(index);
+    }
+}
+
+__device__ inline void SwapOrdered(
+        CudaCollisionScratch &scratch,
+        std::uint32_t left,
+        std::uint32_t right) {
+    const CudaCollision temporary =
+            CollisionAt(scratch, left);
+    CollisionAt(scratch, left) =
+            CollisionAt(scratch, right);
+    CollisionAt(scratch, right) = temporary;
+}
+
+__device__ inline void SwapOrdered(
+        CudaCollisionSearchScratch &scratch,
+        std::uint32_t left,
+        std::uint32_t right) {
+    std::uint16_t &leftIndex =
+            scratch.responseOrderStorage[
+                    static_cast<std::uint64_t>(left) *
+                            scratch.stride +
+                    scratch.slot];
+    std::uint16_t &rightIndex =
+            scratch.responseOrderStorage[
+                    static_cast<std::uint64_t>(right) *
+                            scratch.stride +
+                    scratch.slot];
+    const std::uint16_t temporary = leftIndex;
+    leftIndex = rightIndex;
+    rightIndex = temporary;
+}
+
 template <bool TrackDiagnostics, typename Scratch>
 __device__ inline void Clear(Scratch &scratch) {
     scratch.collisionCount = 0u;
@@ -205,44 +411,66 @@ __device__ inline void Clear(Scratch &scratch) {
 }
 
 template <typename Scratch>
-__device__ inline CudaCollision *AddShape(
+__device__ inline std::uint32_t AddShape(
         Scratch &scratch) {
     if (scratch.shapeCollisionCount >=
         ShapeCollisionCapacity) {
         scratch.overflow = true;
         scratch.overflowReason =
                 OverflowReason::ShapeCollisionCapacity;
-        return nullptr;
+        return UINT32_MAX;
     }
-    CudaCollision *result = &ShapeCollisionAt(
-            scratch, scratch.shapeCollisionCount++);
-    *result = {};
+    const std::uint32_t result = scratch.shapeCollisionCount++;
+    ShapeCollisionAt(scratch, result).sphereMergePrimary = false;
     return result;
 }
 
-template <typename Scratch>
+template <typename Scratch, typename Collision>
 __device__ inline void AddMain(
         Scratch &scratch,
-        const CudaCollision &value) {
+        const Collision &value) {
     if (scratch.collisionCount >= CollisionCapacity) {
         scratch.overflow = true;
         scratch.overflowReason = OverflowReason::CollisionCapacity;
         return;
     }
-    CollisionAt(scratch, scratch.collisionCount++) = value;
+    decltype(auto) destination =
+            CollisionAt(scratch, scratch.collisionCount++);
+    destination.separation = value.separation;
+    destination.impulseNormal = value.impulseNormal;
+    destination.contactPoint = value.contactPoint;
+    destination.materialA = value.materialA;
+    destination.materialB = value.materialB;
+    destination.sphereMergePrimary = value.sphereMergePrimary;
+    destination.extraNegated = value.extraNegated;
+    destination.movingShapeIndex = value.movingShapeIndex;
+    destination.staticActorIndex = value.staticActorIndex;
 }
 
 template<typename T>
 __device__ inline const T *SceneSection(
         const CudaPackedSceneHeader *scene,
         const CudaSceneSection &section) {
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_SESSION_LTO)
+    const auto *base =
+            reinterpret_cast<const std::byte *>(
+                    ::forevervalidator::simulation::cuda::
+                            research::SessionSceneBase());
+#elif defined(FOREVERVALIDATOR_CUDA_RESEARCH_CONSTANT_SCENE)
+    const auto *base =
+            reinterpret_cast<const std::byte *>(
+                    ::forevervalidator::simulation::cuda::
+                            research::StaticSceneBase);
+#else
+    const auto *base =
+            reinterpret_cast<const std::byte *>(scene);
+#endif
     return reinterpret_cast<const T *>(
-            reinterpret_cast<const std::byte *>(scene) +
-            section.offset);
+            base + section.offset);
 }
 
-__device__ inline float Dot(
-        const GmVec3 &left, const GmVec3 &right) {
+__device__ __forceinline__ float Dot(
+        GmVec3 left, GmVec3 right) {
     const float xy = left.x * right.x + left.y * right.y;
     return xy + left.z * right.z;
 }
@@ -300,25 +528,16 @@ __device__ inline GmVec3 Normalize(
 
 __device__ inline GmVec3 TransformDirection(
         const GmMat3 &matrix, const GmVec3 &direction) {
-    const GmVec3 rowX = {
-            matrix.basisX.x,
-            matrix.basisY.x,
-            matrix.basisZ.x,
-    };
-    const GmVec3 rowY = {
-            matrix.basisX.y,
-            matrix.basisY.y,
-            matrix.basisZ.y,
-    };
-    const GmVec3 rowZ = {
-            matrix.basisX.z,
-            matrix.basisY.z,
-            matrix.basisZ.z,
-    };
     return {
-            Dot(rowX, direction),
-            Dot(rowY, direction),
-            Dot(rowZ, direction),
+            (matrix.basisX.x * direction.x +
+             matrix.basisY.x * direction.y) +
+                    matrix.basisZ.x * direction.z,
+            (matrix.basisX.y * direction.x +
+             matrix.basisY.y * direction.y) +
+                    matrix.basisZ.y * direction.z,
+            (matrix.basisX.z * direction.x +
+             matrix.basisY.z * direction.y) +
+                    matrix.basisZ.z * direction.z,
     };
 }
 
@@ -362,11 +581,9 @@ __device__ inline GmIso4 Inverse(const GmIso4 &transform) {
 
 __device__ inline GmIso4 Compose(
         const GmIso4 &first, const GmIso4 &second) {
-    const GmIso4 left = first;
-    const GmIso4 right = second;
     return {
-            Compose(left.rotation, right.rotation),
-            TransformPoint(right, left.translation),
+            Compose(first.rotation, second.rotation),
+            TransformPoint(second, first.translation),
     };
 }
 
@@ -412,26 +629,28 @@ __device__ inline void ScaleRows(
 
 __device__ inline GmBoxAligned TransformBox(
         const GmBoxAligned &box, const GmIso4 &transform) {
-    GmMat3 absoluteRotation;
-    absoluteRotation.basisX = {
-            fabsf(transform.rotation.basisX.x),
-            fabsf(transform.rotation.basisX.y),
-            fabsf(transform.rotation.basisX.z),
-    };
-    absoluteRotation.basisY = {
-            fabsf(transform.rotation.basisY.x),
-            fabsf(transform.rotation.basisY.y),
-            fabsf(transform.rotation.basisY.z),
-    };
-    absoluteRotation.basisZ = {
-            fabsf(transform.rotation.basisZ.x),
-            fabsf(transform.rotation.basisZ.y),
-            fabsf(transform.rotation.basisZ.z),
-    };
     return {
             TransformPoint(transform, box.center),
-            TransformDirection(
-                    absoluteRotation, box.halfExtents),
+            {
+                    (fabsf(transform.rotation.basisX.x) *
+                                     box.halfExtents.x +
+                     fabsf(transform.rotation.basisY.x) *
+                                     box.halfExtents.y) +
+                            fabsf(transform.rotation.basisZ.x) *
+                                    box.halfExtents.z,
+                    (fabsf(transform.rotation.basisX.y) *
+                                     box.halfExtents.x +
+                     fabsf(transform.rotation.basisY.y) *
+                                     box.halfExtents.y) +
+                            fabsf(transform.rotation.basisZ.y) *
+                                    box.halfExtents.z,
+                    (fabsf(transform.rotation.basisX.z) *
+                                     box.halfExtents.x +
+                     fabsf(transform.rotation.basisY.z) *
+                                     box.halfExtents.y) +
+                            fabsf(transform.rotation.basisZ.z) *
+                                    box.halfExtents.z,
+            },
     };
 }
 
@@ -586,22 +805,12 @@ struct UnitSphereTriangleQuery {
     Scratch &scratch;
     GmVec3 center{};
     float radius = 1.0f;
-    std::uint32_t materialA = 0u;
     GmVec3 triangleNormal{};
-    std::uint32_t materialB = 0u;
-    std::uint32_t movingShapeIndex = UINT32_MAX;
-    std::uint32_t staticSurfaceIndex = UINT32_MAX;
-    std::uint32_t staticActorIndex = UINT32_MAX;
 
-    __device__ CudaCollision *AddCollision(void) {
-        CudaCollision *collision = AddShape(scratch);
-        if (collision == nullptr) return nullptr;
-        collision->materialA = materialA;
-        collision->materialB = materialB;
-        collision->movingShapeIndex = movingShapeIndex;
-        collision->staticSurfaceIndex = staticSurfaceIndex;
-        collision->staticActorIndex = staticActorIndex;
-        return collision;
+    __device__ std::uint32_t AddCollision(void) {
+        const std::uint32_t index = AddShape(scratch);
+        if (index == UINT32_MAX) return UINT32_MAX;
+        return index;
     }
 
     __device__ int EmitFeature(
@@ -620,14 +829,16 @@ struct UnitSphereTriangleQuery {
         const GmVec3 normal = Scale(toCenter, inverse);
         const GmVec3 penetration = Scale(
                 toCenter, (distance - radius) * inverse);
-        CudaCollision *collision = AddCollision();
-        if (collision == nullptr) return 0;
-        collision->impulseNormal = normal;
-        collision->separation = Scale(
+        const std::uint32_t collisionIndex = AddCollision();
+        if (collisionIndex == UINT32_MAX) return 0;
+        decltype(auto) collision =
+                ShapeCollisionAt(scratch, collisionIndex);
+        collision.impulseNormal = normal;
+        collision.separation = Scale(
                 triangleNormal,
                 Dot(penetration, triangleNormal));
-        collision->contactPoint = point;
-        collision->extraNegated = triangleNormal;
+        collision.contactPoint = point;
+        collision.extraNegated = triangleNormal;
         return 1;
     }
 
@@ -646,14 +857,16 @@ struct UnitSphereTriangleQuery {
         const GmVec3 penetration = Scale(
                 toCenter,
                 (endpointDistance - radius) * inverse);
-        CudaCollision *collision = AddCollision();
-        if (collision == nullptr) return 0;
-        collision->impulseNormal = normal;
-        collision->separation = Scale(
+        const std::uint32_t collisionIndex = AddCollision();
+        if (collisionIndex == UINT32_MAX) return 0;
+        decltype(auto) collision =
+                ShapeCollisionAt(scratch, collisionIndex);
+        collision.impulseNormal = normal;
+        collision.separation = Scale(
                 triangleNormal,
                 Dot(penetration, triangleNormal));
-        collision->contactPoint = point;
-        collision->extraNegated = triangleNormal;
+        collision.contactPoint = point;
+        collision.extraNegated = triangleNormal;
         return 1;
     }
 
@@ -702,14 +915,16 @@ struct UnitSphereTriangleQuery {
             }
         }
         if (planeDistance > 0.0f) {
-            CudaCollision *collision = AddCollision();
-            if (collision == nullptr) return 0;
-            collision->impulseNormal = triangleNormal;
-            collision->separation = Scale(
+            const std::uint32_t collisionIndex = AddCollision();
+            if (collisionIndex == UINT32_MAX) return 0;
+            decltype(auto) collision =
+                    ShapeCollisionAt(scratch, collisionIndex);
+            collision.impulseNormal = triangleNormal;
+            collision.separation = Scale(
                     triangleNormal, planeDistance - radius);
-            collision->contactPoint = projected;
-            collision->sphereMergePrimary = true;
-            collision->extraNegated = triangleNormal;
+            collision.contactPoint = projected;
+            collision.sphereMergePrimary = true;
+            collision.extraNegated = triangleNormal;
             return 1;
         }
         return 0;
@@ -721,11 +936,21 @@ __device__ inline void TransformNewCollisions(
         Scratch &scratch,
         std::uint32_t firstNew,
         const GmIso4 &contactToWorld,
-        const GmIso4 &normalToWorld) {
+        const GmIso4 &normalToWorld,
+        std::uint32_t materialA,
+        std::uint32_t materialB,
+        std::uint32_t movingShapeIndex,
+        std::uint32_t staticSurfaceIndex,
+        std::uint32_t staticActorIndex) {
     for (std::uint32_t index = firstNew;
          index < scratch.shapeCollisionCount; ++index) {
-        CudaCollision &collision =
+        decltype(auto) collision =
                 ShapeCollisionAt(scratch, index);
+        collision.materialA = materialA;
+        collision.materialB = materialB;
+        collision.movingShapeIndex = movingShapeIndex;
+        collision.staticSurfaceIndex = staticSurfaceIndex;
+        collision.staticActorIndex = staticActorIndex;
         collision.contactPoint = TransformPoint(
                 contactToWorld, collision.contactPoint);
         collision.impulseNormal = Normalize(
@@ -814,30 +1039,36 @@ __device__ inline int SphereMesh(
                 scratch,
                 sphereCenterMesh,
                 radius,
-                shape.wheelIndex != UINT32_MAX &&
-                                configuration->tuning.contactResponse.
-                                        singleMaterial <
-                                        EPlugSurfaceMaterialId_Count
-                        ? static_cast<std::uint32_t>(
-                                  configuration->tuning.
-                                          contactResponse.
-                                          singleMaterial)
-                        : shape.surfaceMaterial,
                 triangle.normal,
-                SurfaceMaterial(scene, surface,
-                                triangle.material),
-                shapeIndex,
-                surfaceIndex,
-                actorIndex,
         };
         if (query.Collide(triangleVertices)) {
             if constexpr (TrackDiagnostics) {
                 ++scratch.triangleHits;
             }
+            const std::uint32_t materialA =
+                    shape.wheelIndex != UINT32_MAX &&
+                                    configuration->tuning.
+                                                    contactResponse.
+                                            singleMaterial <
+                                            EPlugSurfaceMaterialId_Count
+                    ? static_cast<std::uint32_t>(
+                              configuration->tuning.
+                                      contactResponse.
+                                      singleMaterial)
+                    : shape.surfaceMaterial;
+            const std::uint32_t materialB =
+                    SurfaceMaterial(
+                            scene, surface,
+                            triangle.material);
             for (std::uint32_t index = firstNew;
                  index < scratch.shapeCollisionCount; ++index) {
-                CudaCollision &collision =
+                decltype(auto) collision =
                         ShapeCollisionAt(scratch, index);
+                collision.materialA = materialA;
+                collision.materialB = materialB;
+                collision.movingShapeIndex = shapeIndex;
+                collision.staticSurfaceIndex = surfaceIndex;
+                collision.staticActorIndex = actorIndex;
                 collision.impulseNormal = TransformDirection(
                         surface.localToWorld.rotation,
                         collision.impulseNormal);
@@ -906,7 +1137,6 @@ __device__ inline int EllipsoidMesh(
             MultInverse(normalToWorld, meshToEllipsoid);
     normalToWorld =
             Compose(normalToWorld, surface.localToWorld);
-
     const GmVec3 *vertices =
             SceneSection<GmVec3>(scene, scene->vertices);
     const CudaSceneTriangle *triangles =
@@ -1011,21 +1241,7 @@ __device__ inline int EllipsoidMesh(
                 scratch,
                 {},
                 1.0f,
-                shape.wheelIndex != UINT32_MAX &&
-                                configuration->tuning.contactResponse.
-                                        singleMaterial <
-                                        EPlugSurfaceMaterialId_Count
-                        ? static_cast<std::uint32_t>(
-                                  configuration->tuning.
-                                          contactResponse.
-                                          singleMaterial)
-                        : shape.surfaceMaterial,
                 triangleNormal,
-                SurfaceMaterial(scene, surface,
-                                triangle.material),
-                shapeIndex,
-                surfaceIndex,
-                actorIndex,
         };
         if (query.Collide(unitVertices)) {
             if constexpr (TrackDiagnostics) {
@@ -1033,7 +1249,23 @@ __device__ inline int EllipsoidMesh(
             }
             TransformNewCollisions(
                     scratch, firstNew,
-                    contactToWorld, normalToWorld);
+                    contactToWorld, normalToWorld,
+                    shape.wheelIndex != UINT32_MAX &&
+                                    configuration->tuning.
+                                                    contactResponse.
+                                            singleMaterial <
+                                            EPlugSurfaceMaterialId_Count
+                    ? static_cast<std::uint32_t>(
+                              configuration->tuning.
+                                      contactResponse.
+                                      singleMaterial)
+                    : shape.surfaceMaterial,
+                    SurfaceMaterial(
+                            scene, surface,
+                            triangle.material),
+                    shapeIndex,
+                    surfaceIndex,
+                    actorIndex);
             hit = 1;
         }
         if (scratch.overflow) return hit;
@@ -1041,9 +1273,240 @@ __device__ inline int EllipsoidMesh(
     return hit;
 }
 
+#if 0
+struct EllipsoidMeshContext {
+    GmBoxAligned bounds;
+    GmIso4 meshToUnit;
+    GmIso4 contactToWorld;
+    GmIso4 normalToWorld;
+};
+
+__device__ inline EllipsoidMeshContext PrepareEllipsoidMeshContext(
+        const CudaSceneSurface &surface,
+        const CudaVehicleCollisionShape &shape,
+        const GmIso4 &shapeWorld) {
+    const GmVec3 radii = shape.localBounds.halfExtents;
+    const GmVec3 inverseRadii = {
+            1.0f / radii.x,
+            1.0f / radii.y,
+            1.0f / radii.z,
+    };
+    const GmIso4 ellipsoidToMesh =
+            Compose(shapeWorld, surface.worldToLocal);
+    const GmBoxAligned bounds = TransformBox(
+            {{0.0f, 0.0f, 0.0f}, radii},
+            ellipsoidToMesh);
+    const GmIso4 meshToEllipsoid = Inverse(ellipsoidToMesh);
+    GmIso4 meshToUnit = meshToEllipsoid;
+    ScaleRows(meshToUnit, inverseRadii);
+    GmIso4 contactToWorld = DiagonalTransform(
+            radii, {0.0f, 0.0f, 0.0f});
+    contactToWorld =
+            MultInverse(contactToWorld, meshToEllipsoid);
+    contactToWorld =
+            Compose(contactToWorld, surface.localToWorld);
+    GmIso4 normalToWorld = DiagonalTransform(
+            inverseRadii, {0.0f, 0.0f, 0.0f});
+    normalToWorld =
+            MultInverse(normalToWorld, meshToEllipsoid);
+    normalToWorld =
+            Compose(normalToWorld, surface.localToWorld);
+    return {
+            bounds,
+            meshToUnit,
+            contactToWorld,
+            normalToWorld,
+    };
+}
+
+template<typename Scratch>
+__device__ inline bool TestEllipsoidMeshTriangle(
+        const EllipsoidMeshContext &context,
+        const GmVec3 (&meshVertices)[3],
+        std::uint32_t materialA,
+        std::uint32_t materialB,
+        std::uint32_t shapeIndex,
+        std::uint32_t surfaceIndex,
+        std::uint32_t actorIndex,
+        Scratch &scratch) {
+    const GmVec3 unitVertices[3] = {
+            TransformPoint(context.meshToUnit, meshVertices[0]),
+            TransformPoint(context.meshToUnit, meshVertices[1]),
+            TransformPoint(context.meshToUnit, meshVertices[2]),
+    };
+    const GmVec3 edge01 =
+            Subtract(unitVertices[1], unitVertices[0]);
+    const GmVec3 edge02 =
+            Subtract(unitVertices[2], unitVertices[0]);
+    const float normalX =
+            edge02.z * edge01.y - edge02.y * edge01.z;
+    const float normalY =
+            edge01.z * edge02.x - edge02.z * edge01.x;
+    const float normalZ =
+            edge01.x * edge02.y - edge02.x * edge01.y;
+    const float normalLengthSquared =
+            (normalY * normalY + normalX * normalX) +
+            normalZ * normalZ;
+    if (!(normalLengthSquared > DirectionEpsilonSquared)) {
+        return false;
+    }
+    const float normalLength =
+            exact::Sqrt(normalLengthSquared);
+    const float inverseNormalLength = 1.0f / normalLength;
+    const GmVec3 triangleNormal = {
+            normalX * inverseNormalLength,
+            normalY * inverseNormalLength,
+            inverseNormalLength * normalZ,
+    };
+    const std::uint32_t firstNew =
+            scratch.shapeCollisionCount;
+    UnitSphereTriangleQuery<Scratch> query{
+            scratch,
+            {},
+            1.0f,
+            triangleNormal,
+    };
+    if (!query.Collide(unitVertices)) {
+        return false;
+    }
+    TransformNewCollisions(
+            scratch,
+            firstNew,
+            context.contactToWorld,
+            context.normalToWorld,
+            materialA,
+            materialB,
+            shapeIndex,
+            surfaceIndex,
+            actorIndex);
+    return true;
+}
+
+__device__ inline void EllipsoidMeshPairCached(
+        const CudaPackedSceneHeader *scene,
+        const CudaPackedStaticConfigurationHeader *configuration,
+        const CudaSceneSurface &surface,
+        std::uint32_t surfaceIndex,
+        std::uint32_t actorIndex,
+        const CudaVehicleCollisionShape &firstShape,
+        std::uint32_t firstShapeIndex,
+        const GmIso4 &firstShapeWorld,
+        const CudaVehicleCollisionShape &secondShape,
+        std::uint32_t secondShapeIndex,
+        const GmIso4 &secondShapeWorld,
+        CudaCollisionSearchTile *primaryStorage,
+        CudaCollisionSearchTile *secondaryStorage,
+        std::uint32_t *secondCollisionCount,
+        CudaCollisionSearchScratch &scratch,
+        std::uint32_t cachedCellFirst,
+        std::uint32_t cachedCellCount) {
+    const EllipsoidMeshContext first =
+            PrepareEllipsoidMeshContext(
+                    surface, firstShape, firstShapeWorld);
+    const EllipsoidMeshContext second =
+            PrepareEllipsoidMeshContext(
+                    surface, secondShape, secondShapeWorld);
+    const GmVec3 *vertices =
+            SceneSection<GmVec3>(scene, scene->vertices);
+    const CudaSceneTriangle *triangles =
+            SceneSection<CudaSceneTriangle>(
+                    scene, scene->triangles);
+    const CudaSceneOctreeCell *cells =
+            SceneSection<CudaSceneOctreeCell>(
+                    scene, scene->octreeCells);
+    const std::uint32_t firstMaterial =
+            firstShape.wheelIndex != UINT32_MAX &&
+                            configuration->tuning.
+                                            contactResponse.
+                                    singleMaterial <
+                                    EPlugSurfaceMaterialId_Count
+                    ? static_cast<std::uint32_t>(
+                              configuration->tuning.
+                                      contactResponse.
+                                      singleMaterial)
+                    : firstShape.surfaceMaterial;
+    const std::uint32_t secondMaterial =
+            secondShape.wheelIndex != UINT32_MAX &&
+                            configuration->tuning.
+                                            contactResponse.
+                                    singleMaterial <
+                                    EPlugSurfaceMaterialId_Count
+                    ? static_cast<std::uint32_t>(
+                              configuration->tuning.
+                                      contactResponse.
+                                      singleMaterial)
+                    : secondShape.surfaceMaterial;
+    for (std::uint32_t cachedCell = 0u;
+         cachedCell < cachedCellCount;
+         ++cachedCell) {
+        const std::uint32_t cellIndex = MeshCellAt(
+                scratch, cachedCellFirst + cachedCell);
+        const CudaSceneOctreeCell &entry =
+                cells[surface.firstOctreeCell + cellIndex];
+        const bool firstIntersects =
+                BoundsIntersect(first.bounds, entry.bounds);
+        const bool secondIntersects =
+                BoundsIntersect(second.bounds, entry.bounds);
+        if (!firstIntersects && !secondIntersects) {
+            continue;
+        }
+        const CudaSceneTriangle &triangle =
+                triangles[surface.firstTriangle +
+                          entry.triangleIndex];
+        const GmVec3 meshVertices[3] = {
+                vertices[surface.firstVertex +
+                         triangle.vertexIndices[0]],
+                vertices[surface.firstVertex +
+                         triangle.vertexIndices[1]],
+                vertices[surface.firstVertex +
+                         triangle.vertexIndices[2]],
+        };
+        const std::uint32_t materialB =
+                SurfaceMaterial(
+                        scene, surface, triangle.material);
+        if (firstIntersects) {
+            TestEllipsoidMeshTriangle(
+                    first,
+                    meshVertices,
+                    firstMaterial,
+                    materialB,
+                    firstShapeIndex,
+                    surfaceIndex,
+                    actorIndex,
+                    scratch);
+        }
+        if (secondIntersects) {
+            const std::uint32_t firstCollisionCount =
+                    scratch.shapeCollisionCount;
+            scratch.shapeCollisionStorage = secondaryStorage;
+            scratch.shapeCollisionCount =
+                    *secondCollisionCount;
+            TestEllipsoidMeshTriangle(
+                    second,
+                    meshVertices,
+                    secondMaterial,
+                    materialB,
+                    secondShapeIndex,
+                    surfaceIndex,
+                    actorIndex,
+                    scratch);
+            *secondCollisionCount =
+                    scratch.shapeCollisionCount;
+            scratch.shapeCollisionStorage = primaryStorage;
+            scratch.shapeCollisionCount =
+                    firstCollisionCount;
+        }
+        if (scratch.overflow) {
+            return;
+        }
+    }
+}
+#endif
+
 // Preserve octree preorder while caching only triangle leaves. Each live
 // shape still applies the authoritative bounds and triangle tests, so its
 // contacts remain an ordered subset of this conservative union query.
+template<bool UnifiedBounds = false>
 __device__ inline void BuildMeshCellCache(
         const CudaPackedSceneHeader *scene,
         const CudaSceneSurface *surfaces,
@@ -1072,20 +1535,25 @@ __device__ inline void BuildMeshCellCache(
             scratch.meshCacheValid = false;
             return;
         }
+        GmBoxAligned worldBounds;
         bool hasBounds = false;
-        GmBoxAligned worldBounds{};
-        for (std::uint32_t traversal = 0u;
-             traversal < collisionShapeCount;
-             ++traversal) {
-            if ((hit.shapeMask & (1u << traversal)) == 0u) {
-                continue;
-            }
-            const GmBoxAligned shapeBounds =
-                    MovingBoundsAt(scratch, traversal);
-            worldBounds = hasBounds
-                    ? IncludeBounds(worldBounds, shapeBounds)
-                    : shapeBounds;
+        if constexpr (UnifiedBounds) {
+            worldBounds = UnifiedMovingBoundsAt(scratch);
             hasBounds = true;
+        } else {
+            for (std::uint32_t traversal = 0u;
+                 traversal < collisionShapeCount;
+                 ++traversal) {
+                if ((hit.shapeMask & (1u << traversal)) == 0u) {
+                    continue;
+                }
+                const GmBoxAligned shapeBounds =
+                        MovingBoundsAt(scratch, traversal);
+                worldBounds = hasBounds
+                        ? IncludeBounds(worldBounds, shapeBounds)
+                        : shapeBounds;
+                hasBounds = true;
+            }
         }
         if (!hasBounds) {
             continue;
@@ -1150,12 +1618,12 @@ __device__ inline void MergeShapeContacts(
             scratch.collisionCount;
     for (std::uint32_t index = 0u;
          index < scratch.shapeCollisionCount; ++index) {
-        const CudaCollision &collision =
+        decltype(auto) collision =
                 ShapeCollisionAt(scratch, index);
         if (collision.sphereMergePrimary) continue;
         std::uint32_t target = firstTarget;
         for (; target < targetAfterPrimaries; ++target) {
-            const CudaCollision &primary =
+            decltype(auto) primary =
                     CollisionAt(scratch, target);
             if (NearlyEqual(
                         collision.extraNegated,
@@ -1178,13 +1646,34 @@ __device__ inline GmIso4 BodyPose(
     return {body.current.rotation, body.current.position};
 }
 
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_EIGHT_ROOT_SHAPES)
+__device__ inline GmIso4 RootShapeWorldPose(
+        std::uint32_t shapeIndex,
+        const CudaVehicleCollisionShape *shapes,
+        const CudaCandidatePhysicsState &candidate,
+        const GmIso4 &bodyPose) {
+    GmIso4 shapeBodyPose;
+    if (shapeIndex < 4u) {
+        shapeBodyPose = shapes[shapeIndex].bodyPose;
+    } else {
+        const std::uint32_t wheelIndex =
+                (shapeIndex - 4u) ^
+                (shapeIndex >= 6u ? 1u : 0u);
+        shapeBodyPose =
+                candidate.vehicle.wheels.values[
+                        wheelIndex].currentPose;
+    }
+    return Compose(shapeBodyPose, bodyPose);
+}
+#endif
+
 __device__ inline GmIso4 ShapeBodyPose(
         const CudaVehicleCollisionShape &shape,
         const CudaCandidatePhysicsState &candidate) {
     if (shape.wheelIndex == UINT32_MAX) {
         return shape.bodyPose;
     }
-    if (shape.wheelIndex < candidate.vehicle.wheels.count) {
+    if (shape.wheelIndex < facts::WheelCount(candidate.vehicle)) {
         return candidate.vehicle.wheels.values[
                 shape.wheelIndex].currentPose;
     }
@@ -1228,9 +1717,32 @@ __device__ inline GmIso4 ShapeWorldPose(
     return world;
 }
 
+template<typename Scratch>
+__device__ inline GmIso4 CachedShapeWorldPose(
+        std::uint32_t shapeIndex,
+        const CudaVehicleCollisionShape *shapes,
+        const CudaCandidatePhysicsState &candidate,
+        const GmIso4 &bodyPose,
+        const Scratch &scratch) {
+    const CudaVehicleCollisionShape &shape =
+            shapes[shapeIndex];
+    if (shape.wheelIndex == UINT32_MAX &&
+        shape.parentShapeIndex < shapeIndex &&
+        shapes[shape.parentShapeIndex].traversalOrder ==
+                shape.parentShapeIndex) {
+        return Compose(
+                shape.localPose,
+                ShapeWorldAt(
+                        scratch, shape.parentShapeIndex));
+    }
+    return ShapeWorldPose(
+            shapeIndex, shapes, candidate, bodyPose);
+}
+
+template <typename Left, typename Right>
 __device__ inline int CompareForResponse(
-        const CudaCollision &left,
-        const CudaCollision &right) {
+        const Left &left,
+        const Right &right) {
     const float leftValues[] = {
             left.contactPoint.x,
             left.contactPoint.y,
@@ -1266,18 +1778,12 @@ __device__ inline int CompareForResponse(
     return 1;
 }
 
-__device__ inline void Swap(
-        CudaCollision &left, CudaCollision &right) {
-    const CudaCollision temporary = left;
-    left = right;
-    right = temporary;
-}
-
 template <typename Scratch>
 __device__ inline void SortForResponse(
         Scratch &scratch) {
     constexpr std::uint32_t Cutoff = 8u;
     constexpr std::uint32_t StackSize = 30u;
+    InitializeResponseOrder(scratch);
     if (scratch.collisionCount < 2u) return;
     std::uint32_t lowStack[StackSize]{};
     std::uint32_t highStack[StackSize]{};
@@ -1292,36 +1798,32 @@ __device__ inline void SortForResponse(
                 for (std::uint32_t cursor = low + 1u;
                      cursor <= high; ++cursor) {
                     if (CompareForResponse(
-                                CollisionAt(scratch, cursor),
-                                CollisionAt(scratch, selected)) > 0) {
+                                OrderedCollisionAt(scratch, cursor),
+                                OrderedCollisionAt(scratch, selected)) > 0) {
                         selected = cursor;
                     }
                 }
                 if (selected != high) {
-                    Swap(CollisionAt(scratch, selected),
-                         CollisionAt(scratch, high));
+                    SwapOrdered(scratch, selected, high);
                 }
                 --high;
             }
         } else {
             std::uint32_t middle = low + count / 2u;
             if (CompareForResponse(
-                        CollisionAt(scratch, low),
-                        CollisionAt(scratch, middle)) > 0) {
-                Swap(CollisionAt(scratch, low),
-                     CollisionAt(scratch, middle));
+                        OrderedCollisionAt(scratch, low),
+                        OrderedCollisionAt(scratch, middle)) > 0) {
+                SwapOrdered(scratch, low, middle);
             }
             if (CompareForResponse(
-                        CollisionAt(scratch, low),
-                        CollisionAt(scratch, high)) > 0) {
-                Swap(CollisionAt(scratch, low),
-                     CollisionAt(scratch, high));
+                        OrderedCollisionAt(scratch, low),
+                        OrderedCollisionAt(scratch, high)) > 0) {
+                SwapOrdered(scratch, low, high);
             }
             if (CompareForResponse(
-                        CollisionAt(scratch, middle),
-                        CollisionAt(scratch, high)) > 0) {
-                Swap(CollisionAt(scratch, middle),
-                     CollisionAt(scratch, high));
+                        OrderedCollisionAt(scratch, middle),
+                        OrderedCollisionAt(scratch, high)) > 0) {
+                SwapOrdered(scratch, middle, high);
             }
             std::uint32_t lowCursor = low;
             std::uint32_t highCursor = high;
@@ -1332,8 +1834,10 @@ __device__ inline void SortForResponse(
                     } while (
                             lowCursor < middle &&
                             CompareForResponse(
-                                    CollisionAt(scratch, lowCursor),
-                                    CollisionAt(scratch, middle)) <= 0);
+                                    OrderedCollisionAt(
+                                            scratch, lowCursor),
+                                    OrderedCollisionAt(
+                                            scratch, middle)) <= 0);
                 }
                 if (middle <= lowCursor) {
                     do {
@@ -1341,19 +1845,22 @@ __device__ inline void SortForResponse(
                     } while (
                             lowCursor <= high &&
                             CompareForResponse(
-                                    CollisionAt(scratch, lowCursor),
-                                    CollisionAt(scratch, middle)) <= 0);
+                                    OrderedCollisionAt(
+                                            scratch, lowCursor),
+                                    OrderedCollisionAt(
+                                            scratch, middle)) <= 0);
                 }
                 do {
                     --highCursor;
                 } while (
                         highCursor > middle &&
                         CompareForResponse(
-                                CollisionAt(scratch, highCursor),
-                                CollisionAt(scratch, middle)) > 0);
+                                OrderedCollisionAt(
+                                        scratch, highCursor),
+                                OrderedCollisionAt(
+                                        scratch, middle)) > 0);
                 if (highCursor < lowCursor) break;
-                Swap(CollisionAt(scratch, lowCursor),
-                     CollisionAt(scratch, highCursor));
+                SwapOrdered(scratch, lowCursor, highCursor);
                 if (middle == highCursor) {
                     middle = lowCursor;
                 } else if (middle == lowCursor) {
@@ -1367,8 +1874,10 @@ __device__ inline void SortForResponse(
                 } while (
                         highCursor > middle &&
                         CompareForResponse(
-                                CollisionAt(scratch, highCursor),
-                                CollisionAt(scratch, middle)) == 0);
+                                OrderedCollisionAt(
+                                        scratch, highCursor),
+                                OrderedCollisionAt(
+                                        scratch, middle)) == 0);
             }
             if (middle >= highCursor) {
                 do {
@@ -1376,8 +1885,10 @@ __device__ inline void SortForResponse(
                 } while (
                         highCursor > low &&
                         CompareForResponse(
-                                CollisionAt(scratch, highCursor),
-                                CollisionAt(scratch, middle)) == 0);
+                                OrderedCollisionAt(
+                                        scratch, highCursor),
+                                OrderedCollisionAt(
+                                        scratch, middle)) == 0);
             }
             const std::uint32_t leftSpan =
                     highCursor - low;
@@ -1429,6 +1940,8 @@ __device__ inline void SortForResponse(
 template <
         bool TrackDiagnostics = true,
         bool TrustedInputs = false,
+        bool EightOrderedEllipsoids = false,
+        bool WarpCoherentAcceleration = false,
         typename Scratch = CudaCollisionScratch>
 __device__ inline Status Detect(
         const CudaPackedSceneHeader *scene,
@@ -1450,10 +1963,20 @@ __device__ inline Status Detect(
     const CudaSceneAccelerationCell *acceleration =
             detail::SceneSection<CudaSceneAccelerationCell>(
                     scene, scene->accelerationCells);
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_SESSION_LTO)
+    const CudaVehicleCollisionShape *shapes =
+            reinterpret_cast<const CudaVehicleCollisionShape *>(
+                    research::
+                            ForeverValidatorSessionCollisionShapeBytes());
+#elif defined(FOREVERVALIDATOR_CUDA_RESEARCH_CONSTANT_COLLISION_SHAPES)
+    const CudaVehicleCollisionShape *shapes =
+            research::StaticCollisionShapes;
+#else
     const CudaVehicleCollisionShape *shapes =
             tuning::Section<CudaVehicleCollisionShape>(
                     configuration,
                     configuration->collisionShapes);
+#endif
     const GmIso4 bodyPose = detail::BodyPose(candidate.body);
 
     if constexpr (!TrackDiagnostics) {
@@ -1461,10 +1984,12 @@ __device__ inline Status Detect(
         // cached broad-phase query, so reusing its hits preserves exact
         // contact discovery and response ordering.
         constexpr std::uint32_t CachedShapeCount = 8u;
-        constexpr float SurfaceCacheMargin = 0.125f;
-        constexpr float SurfaceCacheHorizonTicks = 4.0f;
+        constexpr float SurfaceCacheMargin = 0.0625f;
+        constexpr float SurfaceCacheHorizonTicks = 1.0f;
         const std::uint32_t collisionShapeCount =
-                configuration->collisionShapes.count;
+                EightOrderedEllipsoids
+                ? 8u
+                : configuration->collisionShapes.count;
         const float surfaceCacheHorizon =
                 __int2float_rn(static_cast<std::int32_t>(
                         candidate.world.schemePeriodMs)) *
@@ -1474,59 +1999,185 @@ __device__ inline Status Detect(
                 surfaceCacheHorizon);
         bool useSurfaceCache =
                 scratch.surfaceCacheEnabled &&
-                (collisionShapeCount == 5u ||
+                (EightOrderedEllipsoids ||
+                 collisionShapeCount == 5u ||
                  collisionShapeCount == CachedShapeCount) &&
                 scratch.shapeCapacity >= collisionShapeCount;
         bool refreshSurfaceCache = !scratch.surfaceCacheValid;
         if (useSurfaceCache) {
             for (std::uint32_t traversal = 0u;
-                 traversal < configuration->collisionShapes.count;
+                 traversal < collisionShapeCount;
                  ++traversal) {
                 const std::uint32_t shapeIndex = traversal;
-                if (shapes[shapeIndex].traversalOrder != traversal ||
-                    shapes[shapeIndex].surfaceType !=
-                            static_cast<std::uint32_t>(
-                                    GmSurf::EGmSurfType::Ellipsoid)) {
-                    useSurfaceCache = false;
-                    break;
+                if constexpr (!EightOrderedEllipsoids) {
+                    if (shapes[shapeIndex].traversalOrder != traversal ||
+                        shapes[shapeIndex].surfaceType !=
+                                static_cast<std::uint32_t>(
+                                        GmSurf::EGmSurfType::
+                                                Ellipsoid)) {
+                        useSurfaceCache = false;
+                        break;
+                    }
                 }
-                const GmIso4 shapeWorld =
-                        detail::ShapeWorldPose(
-                                shapeIndex, shapes,
-                                candidate, bodyPose);
-                detail::ShapeWorldAt(scratch, traversal) =
-                        shapeWorld;
+                GmIso4 shapeWorld;
+                if constexpr (EightOrderedEllipsoids) {
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_EIGHT_ROOT_SHAPES)
+                    shapeWorld = detail::RootShapeWorldPose(
+                            shapeIndex, shapes,
+                            candidate, bodyPose);
+#else
+                    const CudaVehicleCollisionShape &shape =
+                            shapes[shapeIndex];
+                    shapeWorld =
+                            shape.wheelIndex == UINT32_MAX &&
+                                    shape.parentShapeIndex < shapeIndex &&
+                                    shapes[shape.parentShapeIndex].
+                                                    traversalOrder ==
+                                            shape.parentShapeIndex
+                            ? detail::Compose(
+                                      shape.localPose,
+                                      detail::ShapeWorldAt(
+                                              scratch,
+                                              shape.parentShapeIndex))
+                            : detail::ShapeWorldPose(
+                                      shapeIndex, shapes,
+                                      candidate, bodyPose);
+#endif
+                } else {
+                    shapeWorld =
+                            detail::CachedShapeWorldPose(
+                                    shapeIndex, shapes,
+                                    candidate, bodyPose, scratch);
+                    detail::ShapeWorldAt(scratch, traversal) =
+                            shapeWorld;
+                }
                 const GmBoxAligned movingBounds =
                         detail::TransformBox(
                                 shapes[shapeIndex].localBounds,
                                 shapeWorld);
-                if (!refreshSurfaceCache &&
-                    !detail::BoundsContain(
+                if constexpr (EightOrderedEllipsoids) {
+                    if (!refreshSurfaceCache &&
+                        !detail::BoundsContain(
+                                detail::MovingBoundsAt(
+                                        scratch, traversal),
+                        movingBounds)) {
+                        refreshSurfaceCache = true;
+                    }
+                } else {
+                    if (!refreshSurfaceCache &&
+                        !detail::BoundsContain(
+                                detail::MovingBoundsAt(
+                                        scratch, traversal),
+                                movingBounds)) {
+                        refreshSurfaceCache = true;
+                        for (std::uint32_t previous = 0u;
+                             previous < traversal;
+                             ++previous) {
                             detail::MovingBoundsAt(
-                                    scratch, traversal),
-                            movingBounds)) {
-                    refreshSurfaceCache = true;
-                    for (std::uint32_t previous = 0u;
-                         previous < traversal;
-                         ++previous) {
+                                    scratch, previous) =
+                                    detail::ExpandBoundsAlong(
+                                            detail::TransformBox(
+                                                    shapes[previous].
+                                                            localBounds,
+                                                    detail::ShapeWorldAt(
+                                                            scratch,
+                                                            previous)),
+                                            surfaceCacheTravel,
+                                            SurfaceCacheMargin);
+                        }
+                    }
+                    if (refreshSurfaceCache) {
                         detail::MovingBoundsAt(
-                                scratch, previous) =
+                                scratch, traversal) =
                                 detail::ExpandBoundsAlong(
-                                        detail::TransformBox(
-                                                shapes[previous].
-                                                        localBounds,
-                                                detail::ShapeWorldAt(
-                                                        scratch,
-                                                        previous)),
+                                        movingBounds,
                                         surfaceCacheTravel,
                                         SurfaceCacheMargin);
                     }
                 }
+            }
+            if constexpr (EightOrderedEllipsoids) {
                 if (refreshSurfaceCache) {
-                    detail::MovingBoundsAt(scratch, traversal) =
-                            detail::ExpandBoundsAlong(
-                                    movingBounds, surfaceCacheTravel,
-                                    SurfaceCacheMargin);
+                    bool hasUnifiedMovingBounds = false;
+                    GmVec3 unifiedLower;
+                    GmVec3 unifiedUpper;
+                    for (std::uint32_t traversal = 0u;
+                         traversal < collisionShapeCount;
+                         ++traversal) {
+                        GmIso4 shapeWorld;
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_EIGHT_ROOT_SHAPES)
+                        shapeWorld =
+                                detail::RootShapeWorldPose(
+                                        traversal, shapes,
+                                        candidate, bodyPose);
+#else
+                        shapeWorld =
+                                detail::ShapeWorldPose(
+                                        traversal, shapes,
+                                        candidate, bodyPose);
+#endif
+                        const GmBoxAligned movingBounds =
+                                detail::TransformBox(
+                                        shapes[traversal].localBounds,
+                                        shapeWorld);
+                        GmBoxAligned cachedBounds =
+                                detail::ExpandBoundsAlong(
+                                        movingBounds,
+                                        surfaceCacheTravel,
+                                        SurfaceCacheMargin);
+                        detail::ExpandBoundsForRounding(
+                                cachedBounds);
+                        detail::MovingBoundsAt(
+                                scratch, traversal) = cachedBounds;
+                        const GmVec3 lower = {
+                                cachedBounds.center.x -
+                                        cachedBounds.halfExtents.x,
+                                cachedBounds.center.y -
+                                        cachedBounds.halfExtents.y,
+                                cachedBounds.center.z -
+                                        cachedBounds.halfExtents.z,
+                        };
+                        const GmVec3 upper = {
+                                cachedBounds.center.x +
+                                        cachedBounds.halfExtents.x,
+                                cachedBounds.center.y +
+                                        cachedBounds.halfExtents.y,
+                                cachedBounds.center.z +
+                                        cachedBounds.halfExtents.z,
+                        };
+                        if (hasUnifiedMovingBounds) {
+                            unifiedLower = {
+                                    fminf(unifiedLower.x, lower.x),
+                                    fminf(unifiedLower.y, lower.y),
+                                    fminf(unifiedLower.z, lower.z),
+                            };
+                            unifiedUpper = {
+                                    fmaxf(unifiedUpper.x, upper.x),
+                                    fmaxf(unifiedUpper.y, upper.y),
+                                    fmaxf(unifiedUpper.z, upper.z),
+                            };
+                        } else {
+                            unifiedLower = lower;
+                            unifiedUpper = upper;
+                            hasUnifiedMovingBounds = true;
+                        }
+                    }
+                    GmBoxAligned unifiedMovingBounds = {
+                            detail::Scale(
+                                    detail::Add(
+                                            unifiedLower,
+                                            unifiedUpper),
+                                    0.5f),
+                            detail::Scale(
+                                    detail::Subtract(
+                                            unifiedUpper,
+                                            unifiedLower),
+                                    0.5f),
+                    };
+                    detail::ExpandBoundsForRounding(
+                            unifiedMovingBounds);
+                    detail::StoreUnifiedMovingBounds(
+                            scratch, unifiedMovingBounds);
                 }
             }
         }
@@ -1539,85 +2190,360 @@ __device__ inline Status Detect(
                 const CudaSceneAccelerationRange range =
                         scene->accelerationGroups[group - 1u];
                 if (range.cellCount <= 1u) continue;
-                std::uint32_t cursors[CachedShapeCount];
-#pragma unroll
-                for (std::uint32_t traversal = 0u;
-                     traversal < CachedShapeCount;
-                     ++traversal) {
-                    cursors[traversal] =
-                            traversal < collisionShapeCount
-                            ? 0u
-                            : range.cellCount;
-                }
-                for (;;) {
-                    std::uint32_t index = range.cellCount;
-#pragma unroll
-                    for (std::uint32_t traversal = 0u;
-                         traversal < CachedShapeCount;
-                         ++traversal) {
-                        if (cursors[traversal] < index) {
-                            index = cursors[traversal];
+                if constexpr (EightOrderedEllipsoids) {
+                    std::uint32_t cursor = 0u;
+                    for (;;) {
+                        std::uint32_t index = cursor;
+#if __CUDA_ARCH__ >= 800
+                        if constexpr (WarpCoherentAcceleration) {
+                            index = __reduce_min_sync(
+                                    __activemask(), index);
                         }
+#endif
+                        if (index >= range.cellCount) break;
+                        std::uint32_t shapeMask = 0u;
+                        if (cursor == index) {
+                            const CudaSceneAccelerationCell &cell =
+                                    acceleration[
+                                            range.firstCell + index];
+                            const bool intersects =
+                                    detail::BoundsIntersect(
+                                            detail::
+                                                    UnifiedMovingBoundsAt(
+                                                            scratch),
+                                            cell.bounds);
+                            cursor = index +
+                                    (intersects
+                                             ? 1u
+                                             : cell.subtreeEntryCount);
+                            if (intersects &&
+                                cell.surfaceIndex != UINT32_MAX &&
+                                cell.surfaceIndex <
+                                        scene->surfaces.count) {
+                                for (std::uint32_t traversal = 0u;
+                                     traversal <
+                                             collisionShapeCount;
+                                     ++traversal) {
+                                    if (detail::BoundsIntersect(
+                                                detail::
+                                                        MovingBoundsAt(
+                                                                scratch,
+                                                                traversal),
+                                                cell.bounds)) {
+                                        shapeMask |=
+                                                1u << traversal;
+                                    }
+                                }
+                            }
+                            if (shapeMask != 0u) {
+                                if (scratch.surfaceHitCount >=
+                                    SurfaceHitCapacity) {
+                                    useSurfaceCache = false;
+                                } else {
+                                    detail::SurfaceHitAt(
+                                            scratch,
+                                            scratch.
+                                                    surfaceHitCount++) = {
+                                            cell.surfaceIndex,
+                                            shapeMask};
+                                }
+                            }
+                        }
+                        if (!useSurfaceCache) break;
                     }
-                    if (index >= range.cellCount) break;
-                    const CudaSceneAccelerationCell &cell =
-                            acceleration[
-                                    range.firstCell + index];
-                    std::uint32_t shapeMask = 0u;
+                    if (!useSurfaceCache) break;
+                } else {
+                    std::uint32_t cursors[CachedShapeCount];
 #pragma unroll
                     for (std::uint32_t traversal = 0u;
                          traversal < CachedShapeCount;
                          ++traversal) {
-                        if (cursors[traversal] != index) {
+                        cursors[traversal] =
+                                traversal < collisionShapeCount
+                                ? 0u
+                                : range.cellCount;
+                    }
+                    for (;;) {
+                        std::uint32_t index = range.cellCount;
+#pragma unroll
+                        for (std::uint32_t traversal = 0u;
+                             traversal < CachedShapeCount;
+                             ++traversal) {
+                            if (cursors[traversal] < index) {
+                                index = cursors[traversal];
+                            }
+                        }
+#if __CUDA_ARCH__ >= 800
+                        if constexpr (WarpCoherentAcceleration) {
+                            index = __reduce_min_sync(
+                                    __activemask(), index);
+                        }
+#endif
+                        if (index >= range.cellCount) break;
+                        const CudaSceneAccelerationCell &cell =
+                                acceleration[
+                                        range.firstCell + index];
+                        std::uint32_t shapeMask = 0u;
+#pragma unroll
+                        for (std::uint32_t traversal = 0u;
+                             traversal < CachedShapeCount;
+                             ++traversal) {
+                            if (cursors[traversal] != index) {
+                                continue;
+                            }
+                            const bool intersects =
+                                    detail::BoundsIntersect(
+                                            detail::MovingBoundsAt(
+                                                    scratch,
+                                                    traversal),
+                                            cell.bounds);
+                            cursors[traversal] = index +
+                                    (intersects
+                                             ? 1u
+                                             : cell.subtreeEntryCount);
+                            if (intersects) {
+                                shapeMask |= 1u << traversal;
+                            }
+                        }
+                        if (shapeMask == 0u ||
+                            cell.surfaceIndex == UINT32_MAX ||
+                            cell.surfaceIndex >=
+                                    scene->surfaces.count) {
                             continue;
                         }
-                        const bool intersects =
-                                detail::BoundsIntersect(
-                                        detail::MovingBoundsAt(
-                                                scratch,
-                                                traversal),
-                                        cell.bounds);
-                        cursors[traversal] = index +
-                                (intersects
-                                         ? 1u
-                                         : cell.subtreeEntryCount);
-                        if (intersects) {
-                            shapeMask |= 1u << traversal;
+                        if (scratch.surfaceHitCount >=
+                            SurfaceHitCapacity) {
+                            useSurfaceCache = false;
+                            break;
                         }
+                        detail::SurfaceHitAt(
+                                scratch,
+                                scratch.surfaceHitCount++) = {
+                                cell.surfaceIndex,
+                                shapeMask};
                     }
-                    if (shapeMask == 0u ||
-                        cell.surfaceIndex == UINT32_MAX ||
-                        cell.surfaceIndex >=
-                                scene->surfaces.count) {
-                        continue;
-                    }
-                    if (scratch.surfaceHitCount >=
-                        SurfaceHitCapacity) {
-                        useSurfaceCache = false;
-                        break;
-                    }
-                    detail::SurfaceHitAt(
-                            scratch,
-                            scratch.surfaceHitCount++) = {
-                            cell.surfaceIndex,
-                            shapeMask};
+                    if (!useSurfaceCache) break;
                 }
-                if (!useSurfaceCache) break;
             }
             scratch.surfaceCacheValid = useSurfaceCache;
             if (scratch.surfaceCacheValid) {
-                detail::BuildMeshCellCache(
+                detail::BuildMeshCellCache<
+                        EightOrderedEllipsoids>(
                         scene, surfaces,
                         collisionShapeCount, scratch);
             }
         }
         if (useSurfaceCache) {
+#if 0
+            if constexpr (EightOrderedEllipsoids) {
+                const std::uint32_t tileStride =
+                        (scratch.stride +
+                         CudaCollisionSearchTileWidth - 1u) /
+                        CudaCollisionSearchTileWidth;
+                CudaCollisionSearchTile *const
+                        primaryShapeCollisionStorage =
+                                scratch.shapeCollisionStorage;
+                CudaCollisionSearchTile *const
+                        secondaryShapeCollisionStorage =
+                                primaryShapeCollisionStorage +
+                        static_cast<std::uint64_t>(
+                                ShapeCollisionCapacity) *
+                        tileStride;
+                for (std::uint32_t firstTraversal = 0u;
+                     firstTraversal < collisionShapeCount;
+                     firstTraversal += 2u) {
+                    std::uint32_t secondShapeCollisionCount = 0u;
+                    const std::uint32_t secondTraversal =
+                            firstTraversal + 1u;
+                    const CudaVehicleCollisionShape &firstShape =
+                            shapes[firstTraversal];
+                    const CudaVehicleCollisionShape &secondShape =
+                            shapes[secondTraversal];
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_EIGHT_ROOT_SHAPES)
+                    const GmIso4 firstShapeWorld =
+                            detail::RootShapeWorldPose(
+                                    firstTraversal,
+                                    shapes,
+                                    candidate,
+                                    bodyPose);
+                    const GmIso4 secondShapeWorld =
+                            detail::RootShapeWorldPose(
+                                    secondTraversal,
+                                    shapes,
+                                    candidate,
+                                    bodyPose);
+#else
+                    const GmIso4 firstShapeWorld =
+                            detail::ShapeWorldPose(
+                                    firstTraversal,
+                                    shapes,
+                                    candidate,
+                                    bodyPose);
+                    const GmIso4 secondShapeWorld =
+                            detail::ShapeWorldPose(
+                                    secondTraversal,
+                                    shapes,
+                                    candidate,
+                                    bodyPose);
+#endif
+                    for (std::uint32_t hitIndex = 0u;
+                         hitIndex < scratch.surfaceHitCount;
+                         ++hitIndex) {
+                        const CudaCollisionSurfaceHit hit =
+                                detail::SurfaceHitAt(
+                                        scratch, hitIndex);
+                        if ((hit.shapeMask &
+                             ((1u << firstTraversal) |
+                              (1u << secondTraversal))) == 0u) {
+                            continue;
+                        }
+                        const CudaSceneSurface &surface =
+                                surfaces[hit.surfaceIndex];
+                        const CudaCollisionMeshRange range =
+                                detail::MeshRangeAt(
+                                        scratch, hitIndex);
+                        const bool firstEnabled =
+                                (hit.shapeMask &
+                                 (1u << firstTraversal)) != 0u;
+                        const bool secondEnabled =
+                                (hit.shapeMask &
+                                 (1u << secondTraversal)) != 0u;
+                        if (scratch.meshCacheValid &&
+                            firstEnabled &&
+                            secondEnabled) {
+                            detail::EllipsoidMeshPairCached(
+                                    scene,
+                                    configuration,
+                                    surface,
+                                    hit.surfaceIndex,
+                                    surface.actorIndex,
+                                    firstShape,
+                                    firstTraversal,
+                                    firstShapeWorld,
+                                    secondShape,
+                                    secondTraversal,
+                                    secondShapeWorld,
+                                    primaryShapeCollisionStorage,
+                                    secondaryShapeCollisionStorage,
+                                    &secondShapeCollisionCount,
+                                    scratch,
+                                    range.first,
+                                    range.count);
+                            if (scratch.overflow) {
+                                return Status::Overflow;
+                            }
+                            continue;
+                        }
+                        if (firstEnabled) {
+                            if (scratch.meshCacheValid) {
+                                detail::EllipsoidMesh<false, true>(
+                                        scene,
+                                        configuration,
+                                        surface,
+                                        hit.surfaceIndex,
+                                        surface.actorIndex,
+                                        firstShape,
+                                        firstTraversal,
+                                        firstShapeWorld,
+                                        scratch,
+                                        range.first,
+                                        range.count);
+                            } else {
+                                detail::EllipsoidMesh<false>(
+                                        scene,
+                                        configuration,
+                                        surface,
+                                        hit.surfaceIndex,
+                                        surface.actorIndex,
+                                        firstShape,
+                                        firstTraversal,
+                                        firstShapeWorld,
+                                        scratch);
+                            }
+                        }
+                        if (secondEnabled) {
+                            const std::uint32_t
+                                    firstShapeCollisionCount =
+                                            scratch.
+                                                    shapeCollisionCount;
+                            scratch.shapeCollisionStorage =
+                                    secondaryShapeCollisionStorage;
+                            scratch.shapeCollisionCount =
+                                    secondShapeCollisionCount;
+                            if (scratch.meshCacheValid) {
+                                detail::EllipsoidMesh<false, true>(
+                                        scene,
+                                        configuration,
+                                        surface,
+                                        hit.surfaceIndex,
+                                        surface.actorIndex,
+                                        secondShape,
+                                        secondTraversal,
+                                        secondShapeWorld,
+                                        scratch,
+                                        range.first,
+                                        range.count);
+                            } else {
+                                detail::EllipsoidMesh<false>(
+                                        scene,
+                                        configuration,
+                                        surface,
+                                        hit.surfaceIndex,
+                                        surface.actorIndex,
+                                        secondShape,
+                                        secondTraversal,
+                                        secondShapeWorld,
+                                        scratch);
+                            }
+                            secondShapeCollisionCount =
+                                    scratch.shapeCollisionCount;
+                            scratch.shapeCollisionStorage =
+                                    primaryShapeCollisionStorage;
+                            scratch.shapeCollisionCount =
+                                    firstShapeCollisionCount;
+                        }
+                        if (scratch.overflow) {
+                            return Status::Overflow;
+                        }
+                    }
+                    detail::MergeShapeContacts(scratch);
+                    scratch.shapeCollisionStorage =
+                            secondaryShapeCollisionStorage;
+                    scratch.shapeCollisionCount =
+                            secondShapeCollisionCount;
+                    detail::MergeShapeContacts(scratch);
+                    scratch.shapeCollisionStorage =
+                            primaryShapeCollisionStorage;
+                    if (scratch.overflow) {
+                        return Status::Overflow;
+                    }
+                }
+                detail::SortForResponse(scratch);
+                return Status::Success;
+            }
+#endif
             for (std::uint32_t traversal = 0u;
-                 traversal < configuration->collisionShapes.count;
+                 traversal < collisionShapeCount;
                  ++traversal) {
                 const std::uint32_t shapeIndex = traversal;
                 const CudaVehicleCollisionShape &shape =
                         shapes[shapeIndex];
+                GmIso4 shapeWorld;
+                if constexpr (EightOrderedEllipsoids) {
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_EIGHT_ROOT_SHAPES)
+                    shapeWorld = detail::RootShapeWorldPose(
+                            shapeIndex, shapes,
+                            candidate, bodyPose);
+#else
+                    shapeWorld = detail::ShapeWorldPose(
+                            shapeIndex, shapes,
+                            candidate, bodyPose);
+#endif
+                } else {
+                    shapeWorld =
+                            detail::ShapeWorldAt(
+                                    scratch, traversal);
+                }
                 for (std::uint32_t hitIndex = 0u;
                      hitIndex < scratch.surfaceHitCount;
                      ++hitIndex) {
@@ -1644,8 +2570,7 @@ __device__ inline Status Detect(
                                 hit.surfaceIndex,
                                 surface.actorIndex,
                                 shape, shapeIndex,
-                                detail::ShapeWorldAt(
-                                        scratch, traversal),
+                                shapeWorld,
                                 scratch, range.first,
                                 range.count);
                     } else {
@@ -1654,8 +2579,7 @@ __device__ inline Status Detect(
                                 hit.surfaceIndex,
                                 surface.actorIndex,
                                 shape, shapeIndex,
-                                detail::ShapeWorldAt(
-                                        scratch, traversal),
+                                shapeWorld,
                                 scratch);
                     }
                     if (scratch.overflow) {
@@ -1674,20 +2598,28 @@ __device__ inline Status Detect(
         }
     }
 
+    const std::uint32_t collisionShapeCount =
+            EightOrderedEllipsoids
+            ? 8u
+            : configuration->collisionShapes.count;
     for (std::uint32_t traversal = 0u;
-         traversal < configuration->collisionShapes.count;
+         traversal < collisionShapeCount;
          ++traversal) {
         const std::uint32_t shapeIndex = traversal;
-        if (shapes[shapeIndex].traversalOrder != traversal) {
-            return Status::InvalidScene;
+        if constexpr (!EightOrderedEllipsoids) {
+            if (shapes[shapeIndex].traversalOrder != traversal) {
+                return Status::InvalidScene;
+            }
         }
         const CudaVehicleCollisionShape &shape =
                 shapes[shapeIndex];
-        if (shape.surfaceType != static_cast<std::uint32_t>(
-                    GmSurf::EGmSurfType::Ellipsoid) &&
-            shape.surfaceType != static_cast<std::uint32_t>(
-                    GmSurf::EGmSurfType::Sphere)) {
-            return Status::UnsupportedGeometry;
+        if constexpr (!EightOrderedEllipsoids) {
+            if (shape.surfaceType != static_cast<std::uint32_t>(
+                        GmSurf::EGmSurfType::Ellipsoid) &&
+                shape.surfaceType != static_cast<std::uint32_t>(
+                        GmSurf::EGmSurfType::Sphere)) {
+                return Status::UnsupportedGeometry;
+            }
         }
         const GmIso4 shapeWorld =
                 detail::ShapeWorldPose(
@@ -1727,9 +2659,15 @@ __device__ inline Status Detect(
                             GmSurf::EGmSurfType::Mesh)) {
                     return Status::UnsupportedGeometry;
                 }
-                if (shape.surfaceType ==
-                    static_cast<std::uint32_t>(
-                            GmSurf::EGmSurfType::Sphere)) {
+                if constexpr (EightOrderedEllipsoids) {
+                    detail::EllipsoidMesh<TrackDiagnostics>(
+                            scene, configuration, surface,
+                            cell.surfaceIndex,
+                            surface.actorIndex, shape, shapeIndex,
+                            shapeWorld, scratch);
+                } else if (shape.surfaceType ==
+                           static_cast<std::uint32_t>(
+                                   GmSurf::EGmSurfType::Sphere)) {
                     detail::SphereMesh<TrackDiagnostics>(
                             scene, configuration, surface,
                             cell.surfaceIndex,

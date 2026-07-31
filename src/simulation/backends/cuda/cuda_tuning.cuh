@@ -1,6 +1,8 @@
 #ifndef FOREVERVALIDATOR_CUDA_TUNING_CUH
 #define FOREVERVALIDATOR_CUDA_TUNING_CUH
 
+#include <type_traits>
+
 #include "simulation/backends/cuda/cuda_exact_math.cuh"
 #include "simulation/backends/cuda/cuda_static_configuration.h"
 
@@ -10,9 +12,30 @@ template<typename T>
 __device__ inline const T *Section(
         const CudaPackedStaticConfigurationHeader *configuration,
         const CudaStaticConfigurationSection &section) {
-    return reinterpret_cast<const T *>(
-            reinterpret_cast<const unsigned char *>(configuration) +
-            section.offset);
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_SESSION_LTO)
+    if constexpr (std::is_same_v<T, CudaTuningCurveKey>) {
+        return reinterpret_cast<const T *>(
+                research::ForeverValidatorSessionCurveKeyBytes());
+    }
+#endif
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_CONSTANT_CURVE_KEYS)
+    if constexpr (std::is_same_v<T, CudaTuningCurveKey>) {
+        return research::StaticCurveKeys;
+    }
+#endif
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_SESSION_LTO)
+    const auto *base =
+            reinterpret_cast<const unsigned char *>(
+                    research::SessionConfigurationBase());
+#elif defined(FOREVERVALIDATOR_CUDA_RESEARCH_CONSTANT_CONFIGURATION)
+    const auto *base =
+            reinterpret_cast<const unsigned char *>(
+                    research::StaticConfigurationBase);
+#else
+    const auto *base =
+            reinterpret_cast<const unsigned char *>(configuration);
+#endif
+    return reinterpret_cast<const T *>(base + section.offset);
 }
 
 __device__ inline float Evaluate(
@@ -36,15 +59,13 @@ __device__ inline float Evaluate(
         return keys[0].value;
     }
     constexpr float KeyEpsilon = 1.0e-5f;
+    // One operation on two binary32 values is exact in binary64 before the
+    // final binary32 rounding, so this preserves the former wide result.
     const auto lowerBound = [](float value) {
-        return exact::FromDouble(
-                static_cast<double>(value) -
-                static_cast<double>(KeyEpsilon));
+        return value - KeyEpsilon;
     };
     const auto upperBound = [](float value) {
-        return exact::FromDouble(
-                static_cast<double>(value) +
-                static_cast<double>(KeyEpsilon));
+        return value + KeyEpsilon;
     };
     std::uint32_t keyIndex = 0u;
     std::uint32_t nextKeyIndex = 0u;
@@ -55,6 +76,23 @@ __device__ inline float Evaluate(
                upperBound(keys[curve.keyCount - 1u].position)) {
         keyIndex = curve.keyCount - 1u;
         nextKeyIndex = keyIndex;
+    } else if ((curve.reserved &
+                CudaTuningCurvePositionsNondecreasing) != 0u &&
+               !isnan(input)) {
+        std::uint32_t first = 1u;
+        std::uint32_t last = curve.keyCount;
+        while (first < last) {
+            const std::uint32_t middle =
+                    first + (last - first) / 2u;
+            if (input <=
+                upperBound(keys[middle].position)) {
+                last = middle;
+            } else {
+                first = middle + 1u;
+            }
+        }
+        keyIndex = first - 1u;
+        nextKeyIndex = first;
     } else {
         std::uint32_t current = 0u;
         for (std::uint32_t scanned = 0u;
@@ -106,9 +144,7 @@ __device__ inline float Evaluate(
 }
 
 __device__ inline float SpeedInput(float speed) {
-    return exact::FromDouble(
-            static_cast<double>(speed) *
-            static_cast<double>(3.6f));
+    return speed * 3.6f;
 }
 
 __device__ inline float EvaluateSpeed(

@@ -17,6 +17,43 @@ constexpr float DefaultMaxSteerDegrees = 30.0f;
 constexpr float Pi = 3.1415927f;
 constexpr float DegreesDivisor = 180.0f;
 
+__device__ inline bool UpdateWheelVisuals(
+        const CudaVehicleState &vehicle) {
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_STEADY_INTEGRATION)
+    return true;
+#else
+    return vehicle.integration.updateWheelVisuals;
+#endif
+}
+
+__device__ inline bool IntegrateWheels(
+        const CudaVehicleState &vehicle) {
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_STEADY_INTEGRATION)
+    return true;
+#else
+    return vehicle.integration.integrateWheels;
+#endif
+}
+
+__device__ inline bool IntegrateEngine(
+        const CudaVehicleState &vehicle) {
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_STEADY_INTEGRATION)
+    return true;
+#else
+    return vehicle.integration.integrateEngine;
+#endif
+}
+
+__device__ inline bool SpeedBlocked(
+        const CudaVehicleState &vehicle) {
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_STEADY_INTEGRATION)
+    return false;
+#else
+    return vehicle.integration.speedBlocked ||
+            vehicle.integration.speedBlockedSecondary;
+#endif
+}
+
 __device__ inline float Mod(float value,
                             float minimum,
                             float maximum) {
@@ -113,6 +150,7 @@ __device__ inline void UpdateSpeed(
         CudaVehicleState &vehicle,
         CudaWheelState &wheel,
         const CudaPackedStaticConfigurationHeader *configuration,
+        std::uint32_t wheelIndex,
         float vehicleForwardSpeed,
         float dt) {
     if (wheel.realTime.contactPresent) {
@@ -124,7 +162,9 @@ __device__ inline void UpdateSpeed(
             return;
         }
         wheel.realTime.wheelAngularSpeed =
-                vehicleForwardSpeed / wheel.rollingRadius;
+                vehicleForwardSpeed /
+                facts::WheelRollingRadius(
+                        configuration, wheelIndex);
         return;
     }
     float targetAngularSpeed = 0.0f;
@@ -142,17 +182,11 @@ __device__ inline void UpdateSpeed(
             vehicle.controls.lowSpeedGateA > ScalarEpsilon &&
             !vehicle.gearedDrive.wheelDriveSpeedInhibited &&
             !vehicle.controls.forcedLowSpeedFriction) {
-        targetAngularSpeed = exact::FromDouble(
-                static_cast<double>(
-                        vehicle.controls.lowSpeedGateA) *
-                200.0);
+        targetAngularSpeed =
+                vehicle.controls.lowSpeedGateA * 200.0f;
         acceleration = 100.0f;
     } else {
-        wheel.realTime.wheelAngularSpeed =
-                exact::FromDouble(
-                        static_cast<double>(
-                                wheel.realTime.wheelAngularSpeed) *
-                        static_cast<double>(0.995f));
+        wheel.realTime.wheelAngularSpeed *= 0.995f;
     }
     if (!(fabsf(acceleration) < ScalarEpsilon)) {
         const float next =
@@ -268,14 +302,27 @@ __device__ inline void UpdateWheelVisual(
         CudaVehicleState &vehicle,
         CudaWheelState &wheel,
         const CudaPackedStaticConfigurationHeader *configuration,
+        std::uint32_t wheelIndex,
         float vehicleForwardSpeed,
         float dt,
         float visualSpeedDenominator,
         const WheelVisualInvariants &invariants = {}) {
-    wheel.realTime.visualRotation = wheel.restPose.rotation;
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_CANONICAL_WHEEL_FACTS)
+    wheel.realTime.visualRotation = {
+            {1.0f, 0.0f, 0.0f},
+            {0.0f, 1.0f, 0.0f},
+            {0.0f, 0.0f, 1.0f},
+    };
+#else
+    const VehicleWheelDefinition &definition =
+            facts::Wheel(configuration, wheelIndex);
+    wheel.realTime.visualRotation =
+            definition.restSurfacePose.rotation;
+#endif
     float visualSteerAngle = 0.0f;
-    if (wheel.axle ==
-        static_cast<std::uint32_t>(VehicleWheelAxle::Front)) {
+    if (facts::WheelAxle(
+                configuration,
+                wheelIndex) == VehicleWheelAxle::Front) {
         if constexpr (ReuseFrontInvariants) {
             wheel_detail::RotateVisualY(
                     wheel.realTime.visualRotation,
@@ -317,23 +364,37 @@ __device__ inline void UpdateWheelVisual(
     wheel.realTime.targetVisualSteerAngle = visualSteerAngle;
     wheel_detail::UpdateSpeed(
             vehicle, wheel, configuration,
-            vehicleForwardSpeed, dt);
+            wheelIndex, vehicleForwardSpeed, dt);
     wheel_detail::IntegrateRealTime(wheel.realTime, dt);
 }
 
 __device__ inline void IntegrateWheelSuspension(
         CudaWheelState &wheel,
         const CudaPackedStaticConfigurationHeader *configuration,
+        std::uint32_t wheelIndex,
         float dt) {
     const ReplayVehicleTuningSuspension &tuning =
             configuration->tuning.suspension;
-    switch (configuration->tuning.wheelForceMode) {
+    const GmIso4 &restPose =
+            facts::Wheel(
+                    configuration,
+                    wheelIndex).restSurfacePose;
+    switch (facts::WheelForceMode(configuration)) {
     case CSceneVehicleCarWheelForceMode_DirectSpring: {
         wheel.realTime.damperAbsorb =
                 wheel.realTime.damperAbsorb -
                 wheel.realTime.maxReplacementY;
         wheel.realTime.maxReplacementY = 0.0f;
-        wheel.currentPose = wheel.restPose;
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_CANONICAL_WHEEL_FACTS)
+        wheel.currentPose = {
+                {{1.0f, 0.0f, 0.0f},
+                 {0.0f, 1.0f, 0.0f},
+                 {0.0f, 0.0f, 1.0f}},
+                restPose.translation,
+        };
+#else
+        wheel.currentPose = restPose;
+#endif
         const float acceleration =
                 (tuning.wheelRestDamperAbsorb -
                  wheel.realTime.damperAbsorb) *
@@ -355,7 +416,16 @@ __device__ inline void IntegrateWheelSuspension(
         const float baseAbsorb =
                 wheel.realTime.damperAbsorb -
                 wheel.realTime.maxReplacementY;
-        wheel.currentPose = wheel.restPose;
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_CANONICAL_WHEEL_FACTS)
+        wheel.currentPose = {
+                {{1.0f, 0.0f, 0.0f},
+                 {0.0f, 1.0f, 0.0f},
+                 {0.0f, 0.0f, 1.0f}},
+                restPose.translation,
+        };
+#else
+        wheel.currentPose = restPose;
+#endif
         const float displacement =
                 tuning.wheelRestDamperAbsorb - baseAbsorb;
         const float target =
@@ -375,7 +445,10 @@ __device__ inline void IntegrateWheelSuspension(
     wheel.surfaceMovedByUpdate = true;
 }
 
-template <bool ReuseWheelPassInvariants = false>
+template <
+        bool ReuseWheelPassInvariants = false,
+        CudaHandlingSpecialization Handling =
+                CudaHandlingSpecialization::Generic>
 __device__ inline void IntegrateVehiclePrefix(
     CudaCandidatePhysicsState &candidate,
     const CudaPackedStaticConfigurationHeader *configuration,
@@ -389,7 +462,7 @@ __device__ inline void IntegrateVehiclePrefix(
             dynamics::detail::Dot(rotation.basisZ, worldSpeed),
     };
     const float forwardSpeed = localSpeed.z;
-    if (vehicle.integration.updateWheelVisuals) {
+    if (wheel_detail::UpdateWheelVisuals(vehicle)) {
         const float denominator =
                 fabsf(forwardSpeed) *
                         configuration->tuning.visual.wheelSpeedScale +
@@ -401,28 +474,30 @@ __device__ inline void IntegrateVehiclePrefix(
                     forwardSpeed, denominator);
         }
         for (std::uint32_t index = 0u;
-             index < vehicle.wheels.count; ++index) {
+             index < facts::WheelCount(vehicle); ++index) {
             UpdateWheelVisual<ReuseWheelPassInvariants>(
                     vehicle, vehicle.wheels.values[index],
-                    configuration, forwardSpeed, dt, denominator,
+                    configuration, index,
+                    forwardSpeed, dt, denominator,
                     invariants);
         }
     }
-    if (vehicle.integration.integrateWheels) {
+    if (wheel_detail::IntegrateWheels(vehicle)) {
         for (std::uint32_t index = 0u;
-             index < vehicle.wheels.count; ++index) {
+             index < facts::WheelCount(vehicle); ++index) {
             IntegrateWheelSuspension(
                     vehicle.wheels.values[index],
-                    configuration, dt);
+                    configuration, index, dt);
         }
     }
-    if (vehicle.integration.integrateEngine) {
+    if (wheel_detail::IntegrateEngine(vehicle)) {
         if (!vehicle.controls.forcedLowSpeedFriction) {
             const float input =
                     !vehicle.engine.useLowSpeedGateB
                     ? vehicle.controls.lowSpeedGateA
                     : vehicle.controls.lowSpeedGateB;
-            IntegrateEngine(vehicle, configuration, input, dt);
+            IntegrateEngine<Handling>(
+                    vehicle, configuration, input, dt);
         } else {
             vehicle.engine.engineInputMemory = 0.0f;
         }

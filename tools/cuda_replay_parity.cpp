@@ -106,7 +106,6 @@ bool Run(
                 });
         if (!sandbox.ReplaceInputs(std::move(events))) return false;
     }
-
     const std::size_t end = Access::TimelineSize(sandbox);
     const std::size_t begin = Access::Cursor(sandbox);
     const std::uint32_t batchTicks =

@@ -1,6 +1,7 @@
 #include "simulation/backends/cuda/cuda_static_configuration.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <new>
@@ -155,6 +156,7 @@ CudaStaticConfigurationBuildResult AddCurve(
     curve.interpolation = source.has_value()
             ? static_cast<std::uint32_t>(source->interpolation)
             : 0u;
+    curve.reserved = 0u;
     if (!source.has_value()) {
         return CudaStaticConfigurationBuildResult::Success;
     }
@@ -163,8 +165,22 @@ CudaStaticConfigurationBuildResult AddCurve(
         return CudaStaticConfigurationBuildResult::CurveOverflow;
     }
     curve.keyCount = static_cast<std::uint32_t>(source->keys.size());
+    bool positionsNondecreasing = true;
+    float previousPosition = 0.0f;
+    bool hasPreviousPosition = false;
     for (const ReplayTuningCurveKey &key : source->keys) {
+        if (!std::isfinite(key.position) ||
+            (hasPreviousPosition &&
+             previousPosition > key.position)) {
+            positionsNondecreasing = false;
+        }
+        previousPosition = key.position;
+        hasPreviousPosition = true;
         target.curveKeys.push_back({key.position, key.value});
+    }
+    if (positionsNondecreasing) {
+        curve.reserved |=
+                CudaTuningCurvePositionsNondecreasing;
     }
     return CudaStaticConfigurationBuildResult::Success;
 }
@@ -294,7 +310,9 @@ bool CudaHostStaticConfiguration::Valid(
                         curveKeys.size()) ||
             curve.interpolation >
                     static_cast<std::uint32_t>(
-                            ReplayTuningCurveInterpolation::Linear)) {
+                            ReplayTuningCurveInterpolation::Linear) ||
+            (curve.reserved &
+             ~CudaTuningCurvePositionsNondecreasing) != 0u) {
             return false;
         }
     }

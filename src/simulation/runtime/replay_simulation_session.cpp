@@ -2003,7 +2003,54 @@ ReplaySimulationSession::
                 result.diagnostic =
                         "CUDA candidate batch final state diverged for candidate " +
                         std::to_string(candidate) + " at byte " +
-                        std::to_string(mismatch);
+                        std::to_string(mismatch) +
+                        " cpu_replacements=" +
+                        std::to_string(
+                                cpuOutput.finalState.body.
+                                        collisionReplacements.count) +
+                        "+" +
+                        std::to_string(
+                                cpuOutput.finalState.
+                                        collisionReplacementOverflow.count) +
+                        " gpu_replacements=" +
+                        std::to_string(
+                                gpuOutput.finalState.body.
+                                        collisionReplacements.count) +
+                        "+" +
+                        std::to_string(
+                                gpuOutput.finalState.
+                                        collisionReplacementOverflow.count) +
+                        " cpu_overflow0=(" +
+                        std::to_string(
+                                cpuOutput.finalState.
+                                        collisionReplacementOverflow.
+                                        values[0].x) +
+                        "," +
+                        std::to_string(
+                                cpuOutput.finalState.
+                                        collisionReplacementOverflow.
+                                        values[0].y) +
+                        "," +
+                        std::to_string(
+                                cpuOutput.finalState.
+                                        collisionReplacementOverflow.
+                                        values[0].z) +
+                        ") gpu_overflow0=(" +
+                        std::to_string(
+                                gpuOutput.finalState.
+                                        collisionReplacementOverflow.
+                                        values[0].x) +
+                        "," +
+                        std::to_string(
+                                gpuOutput.finalState.
+                                        collisionReplacementOverflow.
+                                        values[0].y) +
+                        "," +
+                        std::to_string(
+                                gpuOutput.finalState.
+                                        collisionReplacementOverflow.
+                                        values[0].z) +
+                        ")";
                 return result;
             }
             if (cpuOutput.observations.size() !=
@@ -2765,7 +2812,21 @@ ReplaySimulationSession::RunCudaCollisionDifferentialForTesting(void) {
     result.firstMismatchByte = SIZE_MAX;
     result.diagnostic =
             "CUDA collision sequence and response are bit-exact count=" +
-            std::to_string(cpu->size());
+            std::to_string(cpu->size()) +
+            " accel_cells=" +
+            std::to_string(gpu.accelerationCellVisits) +
+            " accel_surfaces=" +
+            std::to_string(gpu.accelerationSurfaceVisits) +
+            " mesh_cells=" +
+            std::to_string(gpu.meshCellVisits) +
+            " mesh_intersections=" +
+            std::to_string(gpu.meshCellIntersections) +
+            " triangle_cells=" +
+            std::to_string(gpu.meshTriangleCells) +
+            " triangles=" +
+            std::to_string(gpu.triangleTests) +
+            " hits=" +
+            std::to_string(gpu.triangleHits);
     return result;
 #endif
 }
@@ -3514,10 +3575,10 @@ ReplaySimulationSession::RunCudaTimelineTickDifferentialForTesting(
                         cpuEncoded.vehicle.frameHistory.physicsCurrent.
                                 waterSplashEventCounter) + "," +
                 std::to_string(
-                        cpuEncoded.vehicle.frameHistory.asyncCurrent.
+                        cpuEncoded.vehiclePassthrough.asyncCurrent.
                                 waterSplashEventCounter) + "," +
                 std::to_string(
-                        cpuEncoded.vehicle.frameHistory.asyncPrevious.
+                        cpuEncoded.vehiclePassthrough.asyncPrevious.
                                 waterSplashEventCounter) + ")" +
                 " gpu_splash=(" +
                 std::to_string(
@@ -3527,10 +3588,10 @@ ReplaySimulationSession::RunCudaTimelineTickDifferentialForTesting(
                         gpuState.vehicle.frameHistory.physicsCurrent.
                                 waterSplashEventCounter) + "," +
                 std::to_string(
-                        gpuState.vehicle.frameHistory.asyncCurrent.
+                        gpuState.vehiclePassthrough.asyncCurrent.
                                 waterSplashEventCounter) + "," +
                 std::to_string(
-                        gpuState.vehicle.frameHistory.asyncPrevious.
+                        gpuState.vehiclePassthrough.asyncPrevious.
                                 waterSplashEventCounter) + ")";
         return result;
     }
