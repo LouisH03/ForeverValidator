@@ -5,12 +5,15 @@
 #include <vector>
 
 #include "simulation/backends/cuda/cuda_candidate_events.cuh"
+#include "simulation/backends/cuda/cuda_sparse_candidate_events.cuh"
 
 namespace {
 
 using forevervalidator::simulation::CudaSearchInputEvent;
 namespace candidate_events =
         forevervalidator::simulation::cuda::candidate_events;
+namespace sparse_candidate_events =
+        forevervalidator::simulation::cuda::sparse_candidate_events;
 
 bool Same(const CudaSearchInputEvent &left,
           const CudaSearchInputEvent &right) {
@@ -308,6 +311,282 @@ bool EqualTimeStableLastWrite() {
             Same(events[2], {20, 3u, 1u, 0});
 }
 
+bool SparseShiftedCursor() {
+    constexpr std::uint32_t capacity = 8u;
+    const CudaSearchInputEvent baseline[]{
+            {10, 4u, 2u, 10},
+            {20, 1u, 1u, 1},
+            {30, 4u, 2u, 30},
+            {40, 3u, 1u, 0}};
+    std::uint32_t references[capacity]{};
+    std::uint32_t snapshotReferences[capacity]{};
+    CudaSearchInputEvent edits[capacity]{};
+    CudaSearchInputEvent scratch[capacity]{};
+    sparse_candidate_events::Storage storage{
+            references, snapshotReferences, edits, scratch,
+            1u, capacity};
+    sparse_candidate_events::Candidate candidate(
+            baseline, 4u, storage, 0u);
+    candidate.Initialize();
+    if (!candidate.SetAt(2u, {35, 4u, 2u, 99}) ||
+        !candidate.SetAt(0u, {35, 4u, 2u, 11})) {
+        return false;
+    }
+    candidate.Canonicalize();
+    if (candidate.Count() != 3u) {
+        return false;
+    }
+    sparse_candidate_events::Cursor cursor(
+            baseline, storage, 0u, candidate.Count());
+    CudaSearchInputEvent result[3]{};
+    if (!cursor.Next(result) ||
+        !cursor.Next(result + 1u) ||
+        !cursor.Next(result + 2u) ||
+        !Same(result[0], baseline[1]) ||
+        !Same(result[1], {35, 4u, 2u, 99}) ||
+        !Same(result[2], baseline[3])) {
+        return false;
+    }
+
+    const std::uint32_t snapshotCount = candidate.Snapshot();
+    if (!candidate.UpsertCanonical({35, 4u, 2u, -7}) ||
+        candidate.SnapshotChannelStateAt(
+                snapshotCount, 4u, 2u, 35, 0) != 99 ||
+        candidate.ChannelStateAt(4u, 2u, 35, 0) != -7) {
+        return false;
+    }
+    candidate.CompactEdits();
+    return candidate.EditCount() == 1u;
+}
+
+bool SparseSmoothRun() {
+    constexpr std::uint32_t capacity = 16u;
+    const CudaSearchInputEvent baseline[]{
+            {0, 4u, 2u, 100},
+            {10, 1u, 1u, 1},
+            {15, 4u, 2u, 200},
+            {20, 3u, 1u, 1},
+            {30, 4u, 2u, -100}};
+    std::uint32_t references[capacity]{};
+    std::uint32_t snapshotReferences[capacity]{};
+    CudaSearchInputEvent edits[capacity]{};
+    CudaSearchInputEvent scratch[capacity]{};
+    sparse_candidate_events::Storage storage{
+            references, snapshotReferences, edits, scratch,
+            1u, capacity};
+    sparse_candidate_events::Candidate candidate(
+            baseline, 5u, storage, 0u);
+    candidate.Initialize();
+    const double weights[]{1.0, 0.5};
+    if (!candidate.ApplySmoothSteeringRun(
+                10, 30, 10u, 20, 1000, weights, 0u, 0) ||
+        candidate.Count() != 7u) {
+        return false;
+    }
+    const CudaSearchInputEvent expected[]{
+            {0, 4u, 2u, 100},
+            {10, 1u, 1u, 1},
+            {10, 4u, 2u, 600},
+            {15, 4u, 2u, 200},
+            {20, 3u, 1u, 1},
+            {20, 4u, 2u, 1200},
+            {30, 4u, 2u, 400}};
+    sparse_candidate_events::Cursor cursor(
+            baseline, storage, 0u, candidate.Count());
+    for (const CudaSearchInputEvent &event : expected) {
+        CudaSearchInputEvent actual{};
+        if (!cursor.Next(&actual) || !Same(actual, event)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool SparseFusedInitialize() {
+    constexpr std::uint32_t capacity = 8u;
+    const CudaSearchInputEvent baseline[]{
+            {0, 4u, 2u, 100},
+            {10, 1u, 1u, 1},
+            {20, 4u, 2u, 200},
+            {30, 3u, 1u, 0}};
+    std::uint32_t references[capacity]{};
+    std::uint32_t snapshotReferences[capacity]{};
+    CudaSearchInputEvent edits[capacity]{};
+    CudaSearchInputEvent scratch[capacity]{};
+    sparse_candidate_events::Storage storage{
+            references, snapshotReferences, edits, scratch,
+            1u, capacity};
+    sparse_candidate_events::Candidate candidate(
+            baseline, 4u, storage, 0u);
+    candidate.BeginInitialize();
+    candidate.InitializeBaselineAt(0u);
+    candidate.InitializeBaselineAt(1u);
+    if (!candidate.InitializeEditAt(
+                2u, {20, 4u, 2u, -200})) {
+        return false;
+    }
+    candidate.InitializeBaselineAt(3u);
+    sparse_candidate_events::Cursor cursor(
+            baseline, storage, 0u, candidate.Count());
+    const CudaSearchInputEvent expected[]{
+            baseline[0], baseline[1],
+            {20, 4u, 2u, -200}, baseline[3]};
+    for (const CudaSearchInputEvent &event : expected) {
+        CudaSearchInputEvent actual{};
+        if (!cursor.Next(&actual) || !Same(actual, event)) {
+            return false;
+        }
+    }
+    return candidate.EditCount() == 1u;
+}
+
+bool SparseInsertionBatch() {
+    constexpr std::uint32_t capacity = 64u;
+    const CudaSearchInputEvent baseline[]{
+            {0, 4u, 2u, 100},
+            {0, 1u, 1u, 0},
+            {0, 3u, 1u, 0},
+            {10, 4u, 2u, 200},
+            {10, 1u, 1u, 1},
+            {15, 3u, 1u, 1},
+            {20, 4u, 2u, 300},
+            {20, 1u, 1u, 0},
+            {25, 3u, 1u, 0},
+            {30, 4u, 2u, 400},
+            {40, 4u, 2u, 500}};
+    std::uint32_t sequentialReferences[capacity]{};
+    std::uint32_t sequentialSnapshotReferences[capacity]{};
+    CudaSearchInputEvent sequentialEdits[capacity]{};
+    CudaSearchInputEvent sequentialScratch[capacity]{};
+    sparse_candidate_events::Storage sequentialStorage{
+            sequentialReferences, sequentialSnapshotReferences,
+            sequentialEdits, sequentialScratch, 1u, capacity};
+    sparse_candidate_events::Candidate sequential(
+            baseline, 11u, sequentialStorage, 0u);
+    sequential.Initialize();
+
+    std::uint32_t batchedReferences[capacity]{};
+    std::uint32_t batchedSnapshotReferences[capacity]{};
+    CudaSearchInputEvent batchedEdits[capacity]{};
+    CudaSearchInputEvent batchedScratch[capacity]{};
+    sparse_candidate_events::Storage batchedStorage{
+            batchedReferences, batchedSnapshotReferences,
+            batchedEdits, batchedScratch, 1u, capacity};
+    sparse_candidate_events::Candidate batched(
+            baseline, 11u, batchedStorage, 0u);
+    batched.Initialize();
+
+    // Exercise copying a sparse event from the pass-start snapshot.
+    if (!sequential.SetAt(9u, {30, 4u, 2u, 450}) ||
+        !batched.SetAt(9u, {30, 4u, 2u, 450})) {
+        return false;
+    }
+    const std::uint32_t sequentialSnapshot = sequential.Snapshot();
+    const std::uint32_t batchedSnapshot = batched.BeginInsertionBatch();
+    std::int32_t operationTimes[capacity]{};
+    std::uint32_t operation = 0u;
+
+    const auto insertAnalog = [&](std::uint32_t firstOperation,
+                                  std::uint32_t relativeOperation,
+                                  std::int32_t start,
+                                  std::int32_t end,
+                                  std::int32_t delta) {
+        const std::int32_t sequentialPrevious =
+                sequential.RemoveActionRangeAndReadState(
+                        4u, 2u, start, end, 0);
+        const std::int32_t batchedPrevious =
+                batched.InsertionBatchChannelStateAt(
+                        batchedSnapshot, operationTimes,
+                        firstOperation, relativeOperation,
+                        4u, 2u, start, 0);
+        const std::int32_t sequentialRestore =
+                sequential.SnapshotChannelStateAt(
+                        sequentialSnapshot, 4u, 2u, end, 0);
+        const std::int32_t batchedRestore =
+                batched.SnapshotChannelStateAt(
+                        batchedSnapshot, 4u, 2u, end, 0);
+        const CudaSearchInputEvent startEvent{
+                start, 4u, 2u, sequentialPrevious + delta};
+        const CudaSearchInputEvent endEvent{
+                end, 4u, 2u, sequentialRestore};
+        return sequentialPrevious == batchedPrevious &&
+                sequentialRestore == batchedRestore &&
+                sequential.UpsertCanonical(startEvent) &&
+                (end == start || sequential.UpsertCanonical(endEvent)) &&
+                batched.AppendInsertionBatchOperation(
+                        operationTimes, operation++,
+                        startEvent, endEvent, end > start);
+    };
+    if (!insertAnalog(0u, 0u, 10, 30, 1000) ||
+        !insertAnalog(0u, 1u, 20, 40, -250)) {
+        return false;
+    }
+    constexpr std::uint32_t steeringOperations = 2u;
+
+    const auto insertSwitch = [&](std::uint32_t action,
+                                  std::uint32_t firstOperation,
+                                  std::uint32_t relativeOperation,
+                                  std::int32_t start,
+                                  std::int32_t end) {
+        const std::int32_t sequentialPrevious =
+                sequential.RemoveActionRangeAndReadState(
+                        action, 1u, start, end, 0);
+        const std::int32_t batchedPrevious =
+                batched.InsertionBatchChannelStateAt(
+                        batchedSnapshot, operationTimes,
+                        firstOperation, relativeOperation,
+                        action, 1u, start, 0);
+        const std::int32_t sequentialRestore =
+                sequential.SnapshotChannelStateAt(
+                        sequentialSnapshot, action, 1u, end, 0);
+        const std::int32_t batchedRestore =
+                batched.SnapshotChannelStateAt(
+                        batchedSnapshot, action, 1u, end, 0);
+        const CudaSearchInputEvent startEvent{
+                start, action, 1u,
+                sequentialPrevious == 0 ? 1 : 0};
+        const CudaSearchInputEvent endEvent{
+                end, action, 1u, sequentialRestore};
+        return sequentialPrevious == batchedPrevious &&
+                sequentialRestore == batchedRestore &&
+                sequential.UpsertCanonical(startEvent) &&
+                (end == start || sequential.UpsertCanonical(endEvent)) &&
+                batched.AppendInsertionBatchOperation(
+                        operationTimes, operation++,
+                        startEvent, endEvent, end > start);
+    };
+    if (!insertSwitch(1u, steeringOperations, 0u, 10, 20) ||
+        !insertSwitch(1u, steeringOperations, 1u, 20, 30)) {
+        return false;
+    }
+    constexpr std::uint32_t accelerateOperations = 2u;
+    if (!insertSwitch(
+                3u, steeringOperations + accelerateOperations,
+                0u, 15, 35) ||
+        !batched.FinishInsertionBatch(
+                batchedSnapshot, operationTimes,
+                steeringOperations, accelerateOperations, 1u) ||
+        sequential.Count() != batched.Count()) {
+        return false;
+    }
+
+    sparse_candidate_events::Cursor sequentialCursor(
+            baseline, sequentialStorage, 0u, sequential.Count());
+    sparse_candidate_events::Cursor batchedCursor(
+            baseline, batchedStorage, 0u, batched.Count());
+    for (std::uint32_t index = 0u;
+         index < sequential.Count(); ++index) {
+        CudaSearchInputEvent sequentialEvent{};
+        CudaSearchInputEvent batchedEvent{};
+        if (!sequentialCursor.Next(&sequentialEvent) ||
+            !batchedCursor.Next(&batchedEvent) ||
+            !Same(sequentialEvent, batchedEvent)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -316,7 +595,11 @@ int main() {
         !ReorderedReplacement() ||
         !PackedEdits() ||
         !SortedDirectEdits() ||
-        !EqualTimeStableLastWrite()) {
+        !EqualTimeStableLastWrite() ||
+        !SparseShiftedCursor() ||
+        !SparseSmoothRun() ||
+        !SparseFusedInitialize() ||
+        !SparseInsertionBatch()) {
         return 1;
     }
     std::cout << "CUDA candidate event tests passed\n";
