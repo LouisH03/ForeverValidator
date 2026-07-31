@@ -2491,6 +2491,11 @@ __global__ __launch_bounds__(
             eventCount != 0u && inputCursor.Next(&nextEvent);
     const CudaSearchEvaluatorConfiguration configuredEvaluator =
             *evaluator;
+    const DeviceSample incumbent = candidateBestSamples[0];
+    const bool pruneFinishTime =
+            configuredEvaluator.kind ==
+                    CudaSearchEvaluatorKind::FinishTime &&
+            incumbent.preciseFinish;
     if (!ValidPackedInputs(sceneData, configurationData) ||
         branchState->schemaVersion != CudaCandidateState::SchemaVersion) {
         statuses[slot] =
@@ -2646,6 +2651,18 @@ __global__ __launch_bounds__(
             localBest = sample;
         }
         ++evaluationIndex;
+        if (configuredEvaluator.kind ==
+            CudaSearchEvaluatorKind::FinishTime) {
+            if (evaluatorReported) {
+                candidateBestSamples[slot + 1u] = localBest;
+                return;
+            }
+            if (pruneFinishTime &&
+                static_cast<double>(publicTime) >= incumbent.timeMs) {
+                candidateBestSamples[slot + 1u] = DeviceSample{};
+                return;
+            }
+        }
     }
     candidateBestSamples[slot + 1u] = localBest;
 }
@@ -2706,6 +2723,24 @@ __global__ void RefineSearchFinishTimesKernel(
     cuda::finish::Refinement &refinement =
             finishRefinements[slot];
     refinement = {};
+    const DeviceSample incumbent = candidateBestSamples[0];
+    const std::uint64_t prestartNs =
+            static_cast<std::uint64_t>(prestartDurationMs) *
+            1000000u;
+    std::uint64_t incumbentUpperNs =
+            ~std::uint64_t{0};
+    if (incumbent.preciseFinish) {
+        incumbentUpperNs = prestartNs +
+                static_cast<std::uint64_t>(incumbent.score);
+        const double coarseLowerMs =
+                sample.timeMs -
+                static_cast<double>(prestartDurationMs) -
+                static_cast<double>(tickDurationMs);
+        if (coarseLowerMs >= incumbent.timeMs) {
+            sample = {};
+            return;
+        }
+    }
     const CudaSearchInputEvent *events =
             candidateEvents == nullptr
             ? nullptr
@@ -2799,18 +2834,19 @@ __global__ void RefineSearchFinishTimesKernel(
                         static_cast<const
                                 CudaPackedStaticConfigurationHeader *>(
                                 configurationData),
-                        state, tick, candidateScratch, refinement);
+                        state, tick, candidateScratch, refinement,
+                        incumbentUpperNs);
         if (physicsStatus != cuda::physics::Status::Success ||
             refinement.failed) {
             statuses[slot] =
                     DeviceCandidateStatus::UnsupportedPhysicsTransition;
             return;
         }
+        if (refinement.rejected) {
+            sample = {};
+            return;
+        }
         if (refinement.present) {
-            const std::uint64_t prestartNs =
-                    static_cast<std::uint64_t>(
-                            prestartDurationMs) *
-                    1000000u;
             if (refinement.estimate.lowerBoundNs < prestartNs ||
                 refinement.estimate.upperBoundNs < prestartNs) {
                 statuses[slot] =
@@ -2821,6 +2857,7 @@ __global__ void RefineSearchFinishTimesKernel(
             sample.score = static_cast<double>(
                     refinement.estimate.upperBoundNs - prestartNs);
             sample.timeMs = sample.score / 1000000.0;
+            sample.preciseFinish = true;
             return;
         }
         if constexpr (SimulateStunts) {

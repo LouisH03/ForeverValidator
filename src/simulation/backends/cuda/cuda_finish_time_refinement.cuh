@@ -14,6 +14,7 @@ namespace forevervalidator::simulation::cuda::finish {
 struct Refinement {
     bool present = false;
     bool failed = false;
+    bool rejected = false;
     forevervalidator::FinishTimeEstimate estimate{};
 };
 
@@ -29,10 +30,22 @@ __device__ inline bool RefineTransition(
         float fullDt,
         double substepStartNs,
         Scratch &scratch,
-        forevervalidator::FinishTimeEstimate *estimate) {
+        forevervalidator::FinishTimeEstimate *estimate,
+        std::uint64_t incumbentUpperNs =
+                ~std::uint64_t{0},
+        bool *rejected = nullptr) {
     double lower = substepStartNs;
     double upper =
             lower + static_cast<double>(fullDt) * 1000000000.0;
+    const auto reject = [&]() {
+        if (rejected != nullptr) {
+            *rejected = true;
+        }
+        return true;
+    };
+    if (lower >= static_cast<double>(incumbentUpperNs)) {
+        return reject();
+    }
     for (;;) {
         const std::uint64_t firstInterior =
                 static_cast<std::uint64_t>(floor(lower)) + 1u;
@@ -51,6 +64,9 @@ __device__ inline bool RefineTransition(
                 1000000000.0);
         if (!(partialDt > 0.0f)) {
             lower = static_cast<double>(candidateNs);
+            if (lower >= static_cast<double>(incumbentUpperNs)) {
+                return reject();
+            }
             continue;
         }
         CudaCandidatePhysicsState probe = preSubstep;
@@ -68,7 +84,13 @@ __device__ inline bool RefineTransition(
             upper = static_cast<double>(candidateNs);
         } else {
             lower = static_cast<double>(candidateNs);
+            if (lower >= static_cast<double>(incumbentUpperNs)) {
+                return reject();
+            }
         }
+    }
+    if (upper >= static_cast<double>(incumbentUpperNs)) {
+        return reject();
     }
     estimate->lowerBoundNs =
             static_cast<std::uint64_t>(floor(lower));
@@ -90,7 +112,9 @@ __device__ inline physics::Status StepAndRefine(
         CudaCandidatePhysicsState &candidate,
         const CudaControlTick &tick,
         Scratch &scratch,
-        Refinement &output) {
+        Refinement &output,
+        std::uint64_t incumbentUpperNs =
+                ~std::uint64_t{0}) {
     const float dt =
             __int2float_rn(static_cast<std::int32_t>(
                     candidate.world.schemePeriodMs)) *
@@ -139,14 +163,17 @@ __device__ inline physics::Status StepAndRefine(
                 const double substepStartNs =
                         static_cast<double>(tickStartNs) +
                         elapsed * 1000000000.0;
+                bool rejected = false;
                 output.present = RefineTransition<
                         TrackCollisionDiagnostics,
                         ReuseWheelPassInvariants,
                         TrustedInputs>(
                         scene, configuration, preSubstep,
                         substepDt, substepStartNs, scratch,
-                        &output.estimate);
-                output.failed = !output.present;
+                        &output.estimate, incumbentUpperNs,
+                        &rejected);
+                output.rejected = rejected;
+                output.failed = !output.present && !output.rejected;
                 return status;
             }
             elapsed += static_cast<double>(substepDt);

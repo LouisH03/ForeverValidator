@@ -18,6 +18,7 @@ struct DeviceSample {
     std::uint32_t evaluationTick = 0u;
     bool valid = false;
     bool mutation = false;
+    bool preciseFinish = false;
 };
 
 struct BetterSample {
