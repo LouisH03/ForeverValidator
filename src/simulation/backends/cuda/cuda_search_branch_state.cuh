@@ -156,6 +156,39 @@ struct SearchInputPartition {
     std::int64_t mutableFromTimeMs = 0;
 };
 
+struct SearchInputWindow {
+    std::vector<CudaSearchInputEvent> materialized;
+    std::vector<CudaSearchInputEvent> immutableTail;
+};
+
+inline bool PartitionSearchInputWindow(
+        const std::vector<CudaSearchInputEvent> &inputs,
+        std::int64_t inclusiveEndTimeMs,
+        SearchInputWindow *partition) {
+    if (partition == nullptr || inclusiveEndTimeMs < 0) {
+        return false;
+    }
+    std::size_t split = inputs.size();
+    std::int32_t previousTime = INT32_MIN;
+    for (std::size_t index = 0u; index < inputs.size(); ++index) {
+        const CudaSearchInputEvent &input = inputs[index];
+        if (input.timeMs < 0 || input.timeMs < previousTime) {
+            return false;
+        }
+        previousTime = input.timeMs;
+        if (split == inputs.size() &&
+            static_cast<std::int64_t>(input.timeMs) >
+                    inclusiveEndTimeMs) {
+            split = index;
+        }
+    }
+    SearchInputWindow result;
+    result.materialized.assign(inputs.begin(), inputs.begin() + split);
+    result.immutableTail.assign(inputs.begin() + split, inputs.end());
+    *partition = std::move(result);
+    return true;
+}
+
 inline bool PartitionSearchInputs(
         const std::vector<CudaSearchInputEvent> &inputs,
         std::int64_t branchTimeMs,

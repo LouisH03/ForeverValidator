@@ -14,7 +14,10 @@ using forevervalidator::simulation::cuda_search_detail::ApplyControlEvent;
 using forevervalidator::simulation::cuda_search_detail::ControlsFromState;
 using forevervalidator::simulation::cuda_search_detail::DeviceControlState;
 using forevervalidator::simulation::cuda_search_detail::PartitionSearchInputs;
+using forevervalidator::simulation::cuda_search_detail::
+        PartitionSearchInputWindow;
 using forevervalidator::simulation::cuda_search_detail::SearchInputPartition;
+using forevervalidator::simulation::cuda_search_detail::SearchInputWindow;
 using forevervalidator::simulation::cuda_search_detail::StuntsFromState;
 
 CudaSearchInputEvent Switch(
@@ -132,6 +135,42 @@ bool CheckPartitionAndCachedStates() {
     return true;
 }
 
+bool CheckWindowPartition() {
+    const std::vector<CudaSearchInputEvent> events{
+            Switch(0, 1u, true),
+            Analog(10, 4u, 12000),
+            Analog(20, 4u, -8000),
+            Switch(30, 3u, true),
+            Switch(50, 1u, false)};
+    SearchInputWindow partition;
+    if (!PartitionSearchInputWindow(events, 20, &partition) ||
+        partition.materialized.size() != 3u ||
+        partition.immutableTail.size() != 2u ||
+        partition.materialized.back().timeMs != 20 ||
+        partition.immutableTail.front().timeMs != 30) {
+        std::cerr << "window-local input partition mismatch\n";
+        return false;
+    }
+    std::vector<CudaSearchInputEvent> rebuilt = partition.materialized;
+    rebuilt.insert(
+            rebuilt.end(),
+            partition.immutableTail.begin(),
+            partition.immutableTail.end());
+    if (rebuilt.size() != events.size()) {
+        return false;
+    }
+    for (std::size_t index = 0u; index < events.size(); ++index) {
+        if (rebuilt[index].timeMs != events[index].timeMs ||
+            rebuilt[index].action != events[index].action ||
+            rebuilt[index].valueKind != events[index].valueKind ||
+            rebuilt[index].value != events[index].value) {
+            std::cerr << "window partition did not preserve the input stream\n";
+            return false;
+        }
+    }
+    return true;
+}
+
 struct DeviceResult {
     DeviceControlState state{};
     ReplayVehicleControlState controls{};
@@ -238,6 +277,7 @@ bool CheckHostDeviceSuffixParity() {
 
 int main() {
     return CheckPartitionAndCachedStates() &&
+                   CheckWindowPartition() &&
                    CheckHostDeviceSuffixParity()
             ? 0
             : 1;
