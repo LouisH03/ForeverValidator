@@ -63,6 +63,7 @@ constexpr std::uint32_t SimulationBlockSize = 32u;
 constexpr std::uint32_t ThroughputKernelMinimumBlocksPerSm = 16u;
 constexpr std::uint32_t TailKernelMinimumBlocksPerSm = 17u;
 constexpr std::uint32_t DenseTailKernelMinimumBlocksPerSm = 24u;
+constexpr std::uint32_t FinishCheckpointLeadTicks = 128u;
 
 template<typename... Arguments, std::size_t... Indices>
 CUresult LaunchDriverKernelImpl(
@@ -2426,6 +2427,8 @@ __global__ __launch_bounds__(
         bool baseline,
         std::uint32_t eventCapacity,
         DeviceSample *__restrict__ candidateBestSamples,
+        CudaCandidatePhysicsState *__restrict__ finishCheckpointStates,
+        std::uint32_t finishCheckpointStartTick,
         const CudaSearchInputEvent *__restrict__ baselineInputs,
         std::uint32_t baselineInputCount,
         const CudaSearchInputEvent *__restrict__ candidateEvents,
@@ -2625,6 +2628,12 @@ __global__ __launch_bounds__(
         }
         state.firstStep = false;
         ++state.controlCursor;
+        if constexpr (!SimulateStunts) {
+            if (finishCheckpointStates != nullptr &&
+                tickIndex + 1u == finishCheckpointStartTick) {
+                finishCheckpointStates[slot] = state;
+            }
+        }
         if (publicTime < evaluationStartTimeMs) {
             continue;
         }
@@ -2679,9 +2688,12 @@ __global__ void RefineSearchFinishTimesKernel(
         std::uint32_t prestartDurationMs,
         std::int64_t branchTimeMs,
         std::int64_t mutableFromTimeMs,
+        std::int64_t evaluationStartTimeMs,
         std::uint32_t eventCapacity,
         DeviceSample *candidateBestSamples,
         cuda::finish::Refinement *finishRefinements,
+        const CudaCandidatePhysicsState *finishCheckpointStates,
+        std::uint32_t finishCheckpointStartTick,
         const CudaSearchInputEvent *baselineInputs,
         std::uint32_t baselineInputCount,
         const CudaSearchInputEvent *candidateEvents,
@@ -2779,7 +2791,37 @@ __global__ void RefineSearchFinishTimesKernel(
     candidateScratch.responseOrderStorage =
             responseOrderScratch;
     DeviceControlState controlState = *mutableBoundaryControls;
-    for (std::uint32_t tickIndex = 0u;
+    std::uint32_t firstTickIndex = 0u;
+    if constexpr (!SimulateStunts) {
+        const std::uint32_t firstEvaluationTick =
+                evaluationStartTimeMs <= branchTimeMs
+                ? 0u
+                : static_cast<std::uint32_t>(
+                          (evaluationStartTimeMs - branchTimeMs) /
+                                  tickDurationMs -
+                          1u);
+        const std::uint32_t targetTickIndex =
+                firstEvaluationTick + sample.evaluationTick;
+        if (finishCheckpointStates != nullptr &&
+            finishCheckpointStartTick != 0u &&
+            targetTickIndex >= finishCheckpointStartTick) {
+            state = finishCheckpointStates[slot];
+            firstTickIndex = finishCheckpointStartTick;
+            const std::int64_t checkpointPublicTime =
+                    branchTimeMs +
+                    static_cast<std::int64_t>(firstTickIndex) *
+                            tickDurationMs;
+            const std::int64_t checkpointSuffixTime =
+                    checkpointPublicTime - mutableFromTimeMs;
+            while (hasNextEvent &&
+                   nextEvent.timeMs <= checkpointSuffixTime) {
+                ApplyControlEvent(
+                        controlState, nextEvent, mutableFromTimeMs);
+                hasNextEvent = inputCursor.Next(&nextEvent);
+            }
+        }
+    }
+    for (std::uint32_t tickIndex = firstTickIndex;
          tickIndex < timelineTickCount; ++tickIndex) {
         if ((tickIndex & 63u) == 0u &&
             *reinterpret_cast<volatile const std::uint32_t *>(
@@ -3219,6 +3261,7 @@ struct CudaSearchExecutor::Impl {
     DeviceAllocation<CudaCandidateState> capturedWinnerState;
     DeviceAllocation<DeviceSample> candidateBestSamples;
     DeviceAllocation<cuda::finish::Refinement> finishRefinements;
+    DeviceAllocation<CudaCandidatePhysicsState> finishCheckpointStates;
     DeviceAllocation<std::uint32_t> randomStateWords;
     DeviceAllocation<CudaSearchInputEvent> candidateEvents;
     DeviceAllocation<std::uint32_t> compactInputIndices;
@@ -3272,6 +3315,7 @@ struct CudaSearchExecutor::Impl {
         ADD_BYTES(capturedWinnerState);
         ADD_BYTES(candidateBestSamples);
         ADD_BYTES(finishRefinements);
+        ADD_BYTES(finishCheckpointStates);
         ADD_BYTES(randomStateWords);
         ADD_BYTES(candidateEvents);
         ADD_BYTES(compactInputIndices);
@@ -3747,6 +3791,8 @@ struct CudaSearchExecutor::Impl {
         DeviceAllocation<DeviceSample> nextCandidateBestSamples;
         DeviceAllocation<cuda::finish::Refinement>
                 nextFinishRefinements;
+        DeviceAllocation<CudaCandidatePhysicsState>
+                nextFinishCheckpointStates;
         DeviceAllocation<std::uint32_t> nextRandomStateWords;
         DeviceAllocation<CudaSearchInputEvent> nextCandidateEvents;
         DeviceAllocation<std::int32_t> nextCandidateInputValues;
@@ -3785,6 +3831,13 @@ struct CudaSearchExecutor::Impl {
             !nextFinishRefinements.Allocate(
                     configuration.evaluator.kind ==
                                     CudaSearchEvaluatorKind::FinishTime
+                            ? candidates
+                            : 0u) ||
+            !nextFinishCheckpointStates.Allocate(
+                    configuration.evaluator.kind ==
+                                    CudaSearchEvaluatorKind::FinishTime &&
+                            !configuration.branchState.stuntsEnabled &&
+                            timelineTickCount > FinishCheckpointLeadTicks
                             ? candidates
                             : 0u) ||
             !nextRandomStateWords.Allocate(candidates * 624u) ||
@@ -3855,6 +3908,8 @@ struct CudaSearchExecutor::Impl {
 
         candidateBestSamples = std::move(nextCandidateBestSamples);
         finishRefinements = std::move(nextFinishRefinements);
+        finishCheckpointStates =
+                std::move(nextFinishCheckpointStates);
         randomStateWords = std::move(nextRandomStateWords);
         candidateEvents = std::move(nextCandidateEvents);
         candidateInputValues =
@@ -4049,6 +4104,11 @@ struct CudaSearchExecutor::Impl {
         cudaEventRecord(mutationsGenerated.Get());
         const std::uint32_t simulationBlocks =
                 (candidateCount - 1u) / SimulationBlockSize + 1u;
+        const std::uint32_t finishCheckpointStartTick =
+                finishCheckpointStates.Get() != nullptr &&
+                        timelineTickCount > FinishCheckpointLeadTicks
+                ? timelineTickCount - FinishCheckpointLeadTicks
+                : 0u;
         const auto residentWaves =
                 [&](const SimulationKernelMetrics &metrics) {
             const std::uint64_t residentBlocks =
@@ -4105,6 +4165,8 @@ struct CudaSearchExecutor::Impl {
                 static_cast<std::uint32_t>(
                         configuration.maximumEventCount),
                 candidateBestSamples.Get(),
+                finishCheckpointStates.Get(),
+                finishCheckpointStartTick,
                 baselineInputs.Get(),
                 static_cast<std::uint32_t>(
                         configuration.baselineInputs.size()),
@@ -4183,6 +4245,8 @@ struct CudaSearchExecutor::Impl {
                         static_cast<std::uint32_t>(
                                 configuration.maximumEventCount),
                         candidateBestSamples.Get(),
+                        finishCheckpointStates.Get(),
+                        finishCheckpointStartTick,
                         baselineInputs.Get(),
                         static_cast<std::uint32_t>(
                                 configuration.baselineInputs.size()),
@@ -4306,10 +4370,13 @@ struct CudaSearchExecutor::Impl {
                         configuration.prestartDurationMs,
                         configuration.branchTimeMs,
                         mutableFromTimeMs,
+                        configuration.evaluationStartTimeMs,
                         static_cast<std::uint32_t>(
                                 configuration.maximumEventCount),
                         candidateBestSamples.Get(),
                         finishRefinements.Get(),
+                        finishCheckpointStates.Get(),
+                        finishCheckpointStartTick,
                         baselineInputs.Get(),
                         static_cast<std::uint32_t>(
                                 configuration.baselineInputs.size()),
@@ -5392,6 +5459,14 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
             !impl->finishRefinements.Allocate(
                     preparedConfiguration.evaluator.kind ==
                                     CudaSearchEvaluatorKind::FinishTime
+                            ? candidates
+                            : 0u) ||
+            !impl->finishCheckpointStates.Allocate(
+                    preparedConfiguration.evaluator.kind ==
+                                    CudaSearchEvaluatorKind::FinishTime &&
+                            !preparedConfiguration.branchState.stuntsEnabled &&
+                            impl->timelineTickCount >
+                                    FinishCheckpointLeadTicks
                             ? candidates
                             : 0u) ||
             !impl->randomStateWords.Allocate(candidates * 624u) ||
