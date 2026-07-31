@@ -840,6 +840,7 @@ bool SeekChallengeBlocks(
 }
 
 struct ChallengeBlockHeader {
+    std::string mapName;
     ArchiveIdentifier mapIdentifiers[3];
     ArchiveIdentifier decorationIdentifiers[3];
     GmNat3 size{};
@@ -851,10 +852,9 @@ std::optional<ChallengeBlockHeader> ReadChallengeBlockHeader(
         ArchiveCursor &cursor,
         ArchiveIdentifierTable &identifiers) {
     ChallengeBlockHeader header;
-    std::string ignoredMapName;
     Nat32 ignoredSerializedLightmap = 0u;
     if (!identifiers.ReadTriple(&cursor, header.mapIdentifiers) ||
-        !cursor.ReadString(&ignoredMapName) ||
+        !cursor.ReadString(&header.mapName) ||
         !identifiers.ReadTriple(&cursor, header.decorationIdentifiers) ||
         !cursor.ReadU32(&header.size.x) ||
         !cursor.ReadU32(&header.size.y) ||
@@ -976,8 +976,11 @@ ReplayFileReadError ParseChallengeBody(
             ToMapIdentifier(std::move(header->decorationIdentifiers[2])),
             std::move(*blocks),
             outMap);
-    return created ? ReplayFileReadError::Success
-                   : ReplayFileReadError::InvalidMap;
+    if (!created) {
+        return ReplayFileReadError::InvalidMap;
+    }
+    outMetadata->mapName = std::move(header->mapName);
+    return ReplayFileReadError::Success;
 }
 
 ReplayFileReadError ReadEmbeddedChallenge(

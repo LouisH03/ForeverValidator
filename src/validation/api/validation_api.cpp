@@ -1294,10 +1294,160 @@ std::uint64_t Fingerprint(ByteView bytes) {
 
 }  // namespace
 
+namespace {
+
+struct SandboxInputWindow {
+    std::int64_t minimumTimeMs = 0;
+    std::int64_t maximumTimeMs = 0;
+    std::vector<PhysicsSandboxInputEvent> events;
+};
+
+struct SandboxInputStorage {
+    std::shared_ptr<const std::vector<PhysicsSandboxInputEvent>> base;
+    std::optional<SandboxInputWindow> window;
+
+    static std::shared_ptr<const SandboxInputStorage> Full(
+            std::vector<PhysicsSandboxInputEvent> events) {
+        auto storage = std::make_shared<SandboxInputStorage>();
+        storage->base = std::make_shared<const std::vector<
+                PhysicsSandboxInputEvent>>(std::move(events));
+        return storage;
+    }
+
+    std::size_t Size() const noexcept {
+        if (!base) return 0u;
+        if (!window) return base->size();
+        const auto first = std::lower_bound(
+                base->begin(), base->end(), window->minimumTimeMs,
+                [](const PhysicsSandboxInputEvent &event,
+                   std::int64_t timeMs) {
+                    return event.timeMs < timeMs;
+                });
+        const auto last = std::upper_bound(
+                first, base->end(), window->maximumTimeMs,
+                [](std::int64_t timeMs,
+                   const PhysicsSandboxInputEvent &event) {
+                    return timeMs < event.timeMs;
+                });
+        return base->size() - static_cast<std::size_t>(last - first) +
+                window->events.size();
+    }
+
+    std::vector<PhysicsSandboxInputEvent> Materialize() const {
+        if (!base) return {};
+        if (!window) return *base;
+        const auto first = std::lower_bound(
+                base->begin(), base->end(), window->minimumTimeMs,
+                [](const PhysicsSandboxInputEvent &event,
+                   std::int64_t timeMs) {
+                    return event.timeMs < timeMs;
+                });
+        const auto last = std::upper_bound(
+                first, base->end(), window->maximumTimeMs,
+                [](std::int64_t timeMs,
+                   const PhysicsSandboxInputEvent &event) {
+                    return timeMs < event.timeMs;
+                });
+        std::vector<PhysicsSandboxInputEvent> result;
+        result.reserve(Size());
+        result.insert(result.end(), base->begin(), first);
+        result.insert(result.end(), window->events.begin(),
+                      window->events.end());
+        result.insert(result.end(), last, base->end());
+        return result;
+    }
+
+    std::vector<PhysicsSandboxInputEvent> MaterializeThrough(
+            std::int64_t maximumTimeMs) const {
+        std::vector<PhysicsSandboxInputEvent> result;
+        if (!base) return result;
+        const auto baseEnd = std::upper_bound(
+                base->begin(), base->end(), maximumTimeMs,
+                [](std::int64_t timeMs,
+                   const PhysicsSandboxInputEvent &event) {
+                    return timeMs < event.timeMs;
+                });
+        if (!window || window->minimumTimeMs > maximumTimeMs) {
+            result.assign(base->begin(), baseEnd);
+            return result;
+        }
+        const auto first = std::lower_bound(
+                base->begin(), baseEnd, window->minimumTimeMs,
+                [](const PhysicsSandboxInputEvent &event,
+                   std::int64_t timeMs) {
+                    return event.timeMs < timeMs;
+                });
+        const auto last = std::upper_bound(
+                first, baseEnd,
+                std::min(window->maximumTimeMs, maximumTimeMs),
+                [](std::int64_t timeMs,
+                   const PhysicsSandboxInputEvent &event) {
+                    return timeMs < event.timeMs;
+                });
+        result.reserve(static_cast<std::size_t>(first - base->begin()) +
+                       window->events.size() +
+                       static_cast<std::size_t>(baseEnd - last));
+        result.insert(result.end(), base->begin(), first);
+        for (const PhysicsSandboxInputEvent &event : window->events) {
+            if (event.timeMs <= maximumTimeMs) result.push_back(event);
+        }
+        result.insert(result.end(), last, baseEnd);
+        return result;
+    }
+};
+
+struct SandboxControlPlanStorage {
+    std::shared_ptr<const ReplayControlPlan> base;
+    std::size_t replacementBegin = 0u;
+    std::vector<ReplayControlTick> replacement;
+
+    static std::shared_ptr<const SandboxControlPlanStorage> Full(
+            ReplayControlPlan plan) {
+        auto storage = std::make_shared<SandboxControlPlanStorage>();
+        storage->base =
+                std::make_shared<const ReplayControlPlan>(std::move(plan));
+        return storage;
+    }
+
+    std::size_t Size() const noexcept {
+        return base ? base->ticks.size() : 0u;
+    }
+
+    const ReplayControlTick &Tick(std::size_t index) const {
+        if (!replacement.empty() && index >= replacementBegin &&
+            index - replacementBegin < replacement.size()) {
+            return replacement[index - replacementBegin];
+        }
+        return base->ticks[index];
+    }
+
+    ReplayControlPlan Materialize() const {
+        ReplayControlPlan result = base ? *base : ReplayControlPlan{};
+        if (!replacement.empty()) {
+            std::copy(replacement.begin(), replacement.end(),
+                      result.ticks.begin() + replacementBegin);
+        }
+        return result;
+    }
+
+    std::vector<ReplayControlTick> CopyRange(
+            std::size_t begin, std::size_t count) const {
+        std::vector<ReplayControlTick> result;
+        result.reserve(count);
+        for (std::size_t index = begin; index < begin + count; ++index) {
+            result.push_back(Tick(index));
+        }
+        return result;
+    }
+};
+
+}  // namespace
+
 struct PhysicsSandboxState::Impl {
     PhysicsSandboxStateView view{};
     std::shared_ptr<const ReplaySimulationInstanceClone> runtimeClone;
-    std::vector<PhysicsSandboxInputEvent> inputs;
+    std::shared_ptr<const SandboxInputStorage> inputs;
+    std::shared_ptr<const SandboxControlPlanStorage> controlPlan;
     std::uint64_t scenarioFingerprint = 0u;
     std::uint32_t validationSeed = 0u;
     SimulationBackend backend = SimulationBackend::Reference;
@@ -1315,11 +1465,11 @@ struct PhysicsSandbox::Impl {
     PhysicsSandboxOptions options{};
     std::unique_ptr<ReplaySimulationSession> session;
     ReplaySimulationDefinition definition{};
-    ReplayControlPlan controlPlan{};
+    std::shared_ptr<const SandboxControlPlanStorage> controlPlan;
     ReplayInputMetadata inputMetadata{};
     std::vector<ReplayInputActionKind> definedActions;
     ReplayInputProvenance provenance = ReplayInputProvenance::Unmarked;
-    std::vector<PhysicsSandboxInputEvent> inputs;
+    std::shared_ptr<const SandboxInputStorage> inputs;
     ReplayChallengeMetadata challengeMetadata{};
     ReplayAssetRoute route{};
     ReplayIdentity identity{};
@@ -1331,7 +1481,9 @@ struct PhysicsSandbox::Impl {
     bool loaded = false;
 
     PhysicsSandboxResult<ReplayControlPlan> BuildControlPlan(
-            const std::vector<PhysicsSandboxInputEvent> &source) const {
+            const std::vector<PhysicsSandboxInputEvent> &source,
+            std::optional<std::int64_t> durationOverrideMs =
+                    std::nullopt) const {
         std::vector<ReplayInputEvent> events;
         try {
             events.reserve(source.size());
@@ -1374,8 +1526,16 @@ struct PhysicsSandbox::Impl {
 
         ReplayControlPlanRequest request(timeline);
         request.controlTickMs = options.tickDurationMs;
+        const std::int64_t durationMs = durationOverrideMs.value_or(
+                static_cast<std::int64_t>(inputMetadata.durationMs));
+        if (durationMs < 0 ||
+            durationMs > std::numeric_limits<std::int32_t>::max()) {
+            return PhysicsSandboxResult<ReplayControlPlan>::Failure(
+                    SandboxError(PhysicsSandboxErrorCode::InvalidRequest,
+                                 "sandbox control duration is out of range"));
+        }
         request.validationDurationMs =
-                static_cast<std::int32_t>(inputMetadata.durationMs);
+                static_cast<std::int32_t>(durationMs);
         request.validationPrestartMs = options.prestartDurationMs;
         request.inputTimeBaseMs = SandboxInputTimeBaseMs;
         request.enableRaceSimulationAfterMs =
@@ -1399,6 +1559,54 @@ struct PhysicsSandbox::Impl {
                 std::move(plan));
     }
 
+    ReplaySimulationTimelineResult AdvanceControlPlan(
+            std::size_t begin, std::size_t count) {
+        ReplaySimulationTimelineResult aggregate;
+        aggregate.result = ReplaySimulationRunResult::Success;
+        if (!controlPlan || !session || begin > controlPlan->Size() ||
+            count > controlPlan->Size() - begin) {
+            aggregate.result = ReplaySimulationRunResult::InvalidControlTimeline;
+            return aggregate;
+        }
+        std::size_t cursor = begin;
+        std::size_t remaining = count;
+        while (remaining != 0u) {
+            const bool inReplacement =
+                    !controlPlan->replacement.empty() &&
+                    cursor >= controlPlan->replacementBegin &&
+                    cursor - controlPlan->replacementBegin <
+                            controlPlan->replacement.size();
+            const std::vector<ReplayControlTick> *ticks = nullptr;
+            std::size_t localBegin = 0u;
+            std::size_t chunk = remaining;
+            if (inReplacement) {
+                ticks = &controlPlan->replacement;
+                localBegin = cursor - controlPlan->replacementBegin;
+                chunk = std::min(
+                        chunk,
+                        controlPlan->replacement.size() - localBegin);
+            } else {
+                ticks = &controlPlan->base->ticks;
+                localBegin = cursor;
+                if (!controlPlan->replacement.empty() &&
+                    cursor < controlPlan->replacementBegin) {
+                    chunk = std::min(
+                            chunk,
+                            controlPlan->replacementBegin - cursor);
+                }
+            }
+            const ReplaySimulationTimelineResult advanced =
+                    session->AdvanceIncremental(*ticks, localBegin, chunk);
+            if (advanced.result != ReplaySimulationRunResult::Success) {
+                return advanced;
+            }
+            aggregate = advanced;
+            cursor += chunk;
+            remaining -= chunk;
+        }
+        return aggregate;
+    }
+
     PhysicsSandboxResult<PhysicsSandboxStateView> Restart(
             std::uint64_t raceTick) {
         if (!loaded || !session || raceTick >
@@ -1409,7 +1617,7 @@ struct PhysicsSandbox::Impl {
         }
         const std::size_t targetCursor = prestartTicks +
                 static_cast<std::size_t>(raceTick);
-        if (targetCursor > controlPlan.ticks.size()) {
+        if (!controlPlan || targetCursor > controlPlan->Size()) {
             return PhysicsSandboxResult<PhysicsSandboxStateView>::Failure(
                     SandboxError(PhysicsSandboxErrorCode::InvalidRequest,
                                  "sandbox state exceeds the input timeline"));
@@ -1428,7 +1636,7 @@ struct PhysicsSandbox::Impl {
         }
         ReplaySimulationRunResult start = session->StartIncremental(
                 definition,
-                controlPlan.ticks.front(),
+                controlPlan->Tick(0u),
                 inputMetadata.validationSeed);
         if (start != ReplaySimulationRunResult::Success) {
             deterministicScope.Restore();
@@ -1437,8 +1645,7 @@ struct PhysicsSandbox::Impl {
                                  "sandbox simulation could not start"));
         }
         const ReplaySimulationTimelineResult advanced =
-                session->AdvanceIncremental(
-                        controlPlan.ticks, 0u, targetCursor);
+                AdvanceControlPlan(0u, targetCursor);
         if (advanced.result != ReplaySimulationRunResult::Success ||
             !deterministicScope.Restore()) {
             return PhysicsSandboxResult<PhysicsSandboxStateView>::Failure(
@@ -1522,6 +1729,8 @@ struct PhysicsSandbox::Impl {
 
 struct PhysicsSandboxCudaSearchSession::Impl {
     std::unique_ptr<simulation::CudaSearchExecutor> executor;
+    std::shared_ptr<const SandboxInputStorage> inputs;
+    std::shared_ptr<const SandboxControlPlanStorage> controlPlan;
     std::uint64_t scenarioFingerprint = 0u;
     std::uint32_t validationSeed = 0u;
     std::uint32_t tickDurationMs = 0u;
@@ -1680,6 +1889,11 @@ simulation::CudaSearchEvaluatorConfiguration CudaEvaluator(
                     result.values[3] = evaluator.maximum.x;
                     result.values[4] = evaluator.maximum.y;
                     result.values[5] = evaluator.maximum.z;
+                } else if constexpr (std::is_same_v<
+                                             T,
+                                             PhysicsSandboxCudaStuntPointsEvaluator>) {
+                    result.kind =
+                            simulation::CudaSearchEvaluatorKind::StuntPoints;
                 } else {
                     result.kind =
                             simulation::CudaSearchEvaluatorKind::FinishTime;
@@ -1967,17 +2181,18 @@ PhysicsSandboxResult<PhysicsSandboxStateView> PhysicsSandbox::LoadReplay(
         impl_->scenarioFingerprint = Fingerprint(replayBytes);
         impl_->scene = std::move(scene);
         impl_->renderScene = std::move(renderScene);
-        impl_->inputs = std::move(inputs);
+        impl_->inputs = SandboxInputStorage::Full(std::move(inputs));
         impl_->prestartTicks =
                 impl_->options.prestartDurationMs /
                 impl_->options.tickDurationMs;
         PhysicsSandboxResult<ReplayControlPlan> plan =
-                impl_->BuildControlPlan(impl_->inputs);
+                impl_->BuildControlPlan(*impl_->inputs->base);
         if (!plan) {
             return PhysicsSandboxResult<PhysicsSandboxStateView>::Failure(
                     std::move(plan).Error());
         }
-        impl_->controlPlan = std::move(plan).Value();
+        impl_->controlPlan = SandboxControlPlanStorage::Full(
+                std::move(plan).Value());
         impl_->loaded = true;
         return impl_->Restart(0u);
     } catch (const std::bad_alloc &) {
@@ -1991,6 +2206,27 @@ PhysicsSandboxResult<PhysicsSandboxStateView> PhysicsSandbox::LoadReplay(
     }
 }
 
+PhysicsSandboxResult<std::string> PhysicsSandbox::ReadMapName()
+        const noexcept {
+    try {
+        if (!impl_ || !impl_->loaded) {
+            return PhysicsSandboxResult<std::string>::Failure(
+                    SandboxError(PhysicsSandboxErrorCode::InvalidSandbox,
+                                 "sandbox has no loaded map name"));
+        }
+        return PhysicsSandboxResult<std::string>::Success(
+                impl_->challengeMetadata.mapName);
+    } catch (const std::bad_alloc &) {
+        return PhysicsSandboxResult<std::string>::Failure(
+                SandboxError(PhysicsSandboxErrorCode::AllocationFailed,
+                             "could not copy sandbox map name"));
+    } catch (...) {
+        return PhysicsSandboxResult<std::string>::Failure(
+                SandboxError(PhysicsSandboxErrorCode::UnexpectedFailure,
+                             "unexpected sandbox map name read failure"));
+    }
+}
+
 PhysicsSandboxResult<std::vector<PhysicsSandboxInputEvent>>
 PhysicsSandbox::ReadInputs() const noexcept {
     try {
@@ -2001,7 +2237,8 @@ PhysicsSandbox::ReadInputs() const noexcept {
                                  "sandbox has no loaded inputs"));
         }
         return PhysicsSandboxResult<
-                std::vector<PhysicsSandboxInputEvent>>::Success(impl_->inputs);
+                std::vector<PhysicsSandboxInputEvent>>::Success(
+                        impl_->inputs->Materialize());
     } catch (const std::bad_alloc &) {
         return PhysicsSandboxResult<
                 std::vector<PhysicsSandboxInputEvent>>::Failure(
@@ -2026,9 +2263,11 @@ PhysicsSandboxResult<std::size_t> PhysicsSandbox::ReplaceInputs(
         const std::int64_t currentTime = static_cast<std::int64_t>(
                 impl_->cursor - impl_->prestartTicks) *
                 impl_->options.tickDurationMs;
+        const std::vector<PhysicsSandboxInputEvent> currentInputs =
+                impl_->inputs->Materialize();
         std::vector<PhysicsSandboxInputEvent> oldPast;
         std::vector<PhysicsSandboxInputEvent> newPast;
-        for (const PhysicsSandboxInputEvent &event : impl_->inputs) {
+        for (const PhysicsSandboxInputEvent &event : currentInputs) {
             if (event.timeMs < currentTime) oldPast.push_back(event);
         }
         for (const PhysicsSandboxInputEvent &event : events) {
@@ -2052,10 +2291,11 @@ PhysicsSandboxResult<std::size_t> PhysicsSandbox::ReplaceInputs(
                     SandboxError(PhysicsSandboxErrorCode::InvalidRequest,
                                  "input replacement ends before current tick"));
         }
-        impl_->inputs = std::move(events);
-        impl_->controlPlan = std::move(plan).Value();
+        impl_->inputs = SandboxInputStorage::Full(std::move(events));
+        impl_->controlPlan = SandboxControlPlanStorage::Full(
+                std::move(plan).Value());
         return PhysicsSandboxResult<std::size_t>::Success(
-                impl_->inputs.size());
+                impl_->inputs->Size());
     } catch (const std::bad_alloc &) {
         return PhysicsSandboxResult<std::size_t>::Failure(
                 SandboxError(PhysicsSandboxErrorCode::AllocationFailed,
@@ -2067,12 +2307,203 @@ PhysicsSandboxResult<std::size_t> PhysicsSandbox::ReplaceInputs(
     }
 }
 
+PhysicsSandboxResult<std::size_t> PhysicsSandbox::ReplaceInputWindow(
+        std::int64_t minimumTimeMs,
+        std::int64_t maximumTimeMs,
+        std::vector<PhysicsSandboxInputEvent> events) noexcept {
+    try {
+        if (!impl_ || !impl_->loaded || !impl_->inputs ||
+            !impl_->controlPlan || minimumTimeMs < 0 ||
+            maximumTimeMs < minimumTimeMs ||
+            minimumTimeMs % impl_->options.tickDurationMs != 0 ||
+            maximumTimeMs % impl_->options.tickDurationMs != 0 ||
+            maximumTimeMs >
+                    static_cast<std::int64_t>(
+                            impl_->inputMetadata.durationMs)) {
+            return PhysicsSandboxResult<std::size_t>::Failure(
+                    SandboxError(PhysicsSandboxErrorCode::InvalidRequest,
+                                 "invalid sandbox input window"));
+        }
+        const std::int64_t currentTimeMs =
+                static_cast<std::int64_t>(
+                        impl_->cursor - impl_->prestartTicks) *
+                impl_->options.tickDurationMs;
+        if (minimumTimeMs < currentTimeMs) {
+            return PhysicsSandboxResult<std::size_t>::Failure(
+                    SandboxError(PhysicsSandboxErrorCode::InvalidRequest,
+                                 "past sandbox inputs are immutable"));
+        }
+
+        std::int32_t previousTimeMs = std::numeric_limits<std::int32_t>::min();
+        for (const PhysicsSandboxInputEvent &event : events) {
+            if (event.timeMs < minimumTimeMs ||
+                event.timeMs > maximumTimeMs) {
+                return PhysicsSandboxResult<std::size_t>::Failure(
+                        SandboxError(PhysicsSandboxErrorCode::InvalidRequest,
+                                     "sandbox input window contains an event outside its bounds"));
+            }
+            if (event.timeMs < previousTimeMs) {
+                return PhysicsSandboxResult<std::size_t>::Failure(
+                        SandboxError(PhysicsSandboxErrorCode::InvalidRequest,
+                                     "sandbox input window is not time ordered"));
+            }
+            if (event.value.kind == PhysicsSandboxInputValueKind::Analog &&
+                !IsAnalogInputStateValid(event.value.analog)) {
+                return PhysicsSandboxResult<std::size_t>::Failure(
+                        SandboxError(PhysicsSandboxErrorCode::InvalidRequest,
+                                     "sandbox input window contains an invalid analog value"));
+            }
+            previousTimeMs = event.timeMs;
+        }
+
+        std::shared_ptr<const std::vector<PhysicsSandboxInputEvent>> baseInputs;
+        if (impl_->inputs->window) {
+            baseInputs = std::make_shared<const std::vector<
+                    PhysicsSandboxInputEvent>>(
+                    impl_->inputs->Materialize());
+        } else {
+            baseInputs = impl_->inputs->base;
+        }
+        if (!baseInputs) {
+            return PhysicsSandboxResult<std::size_t>::Failure(
+                    SandboxError(PhysicsSandboxErrorCode::InvalidSandbox,
+                                 "sandbox inputs are unavailable"));
+        }
+
+        bool affectsSteer = false;
+        bool affectsAccelerate = false;
+        bool affectsBrake = false;
+        const auto markAffected = [&](PhysicsSandboxInputAction action) {
+            affectsSteer |= action == PhysicsSandboxInputAction::Steer;
+            affectsAccelerate |=
+                    action == PhysicsSandboxInputAction::Accelerate ||
+                    action == PhysicsSandboxInputAction::Gas;
+            affectsBrake |= action == PhysicsSandboxInputAction::Brake;
+        };
+        const auto baselineFirst = std::lower_bound(
+                baseInputs->begin(), baseInputs->end(), minimumTimeMs,
+                [](const PhysicsSandboxInputEvent &event,
+                   std::int64_t timeMs) {
+                    return event.timeMs < timeMs;
+                });
+        const auto baselineLast = std::upper_bound(
+                baselineFirst, baseInputs->end(), maximumTimeMs,
+                [](std::int64_t timeMs,
+                   const PhysicsSandboxInputEvent &event) {
+                    return timeMs < event.timeMs;
+                });
+        for (auto it = baselineFirst; it != baselineLast; ++it) {
+            markAffected(it->action);
+        }
+        for (const PhysicsSandboxInputEvent &event : events) {
+            markAffected(event.action);
+        }
+
+        std::int64_t replacementEndTimeMs = maximumTimeMs;
+        const auto extendToReset = [&](PhysicsSandboxInputAction action,
+                                       bool affected) {
+            if (!affected || replacementEndTimeMs >=
+                                     static_cast<std::int64_t>(
+                                             impl_->inputMetadata.durationMs)) {
+                return;
+            }
+            const auto next = std::find_if(
+                    baselineLast, baseInputs->end(),
+                    [action](const PhysicsSandboxInputEvent &event) {
+                        if (action == PhysicsSandboxInputAction::Accelerate) {
+                            return event.action ==
+                                           PhysicsSandboxInputAction::Accelerate ||
+                                    event.action ==
+                                           PhysicsSandboxInputAction::Gas;
+                        }
+                        return event.action == action;
+                    });
+            replacementEndTimeMs = std::max(
+                    replacementEndTimeMs,
+                    next == baseInputs->end()
+                            ? static_cast<std::int64_t>(
+                                      impl_->inputMetadata.durationMs)
+                            : static_cast<std::int64_t>(next->timeMs));
+        };
+        extendToReset(PhysicsSandboxInputAction::Steer, affectsSteer);
+        extendToReset(
+                PhysicsSandboxInputAction::Accelerate, affectsAccelerate);
+        extendToReset(PhysicsSandboxInputAction::Brake, affectsBrake);
+        replacementEndTimeMs =
+                (replacementEndTimeMs /
+                 impl_->options.tickDurationMs) *
+                impl_->options.tickDurationMs;
+
+        auto inputStorage = std::make_shared<SandboxInputStorage>();
+        inputStorage->base = std::move(baseInputs);
+        inputStorage->window = SandboxInputWindow{
+                minimumTimeMs, maximumTimeMs, std::move(events)};
+        const std::vector<PhysicsSandboxInputEvent> controlInputs =
+                inputStorage->MaterializeThrough(replacementEndTimeMs);
+        PhysicsSandboxResult<ReplayControlPlan> partial =
+                impl_->BuildControlPlan(
+                        controlInputs, replacementEndTimeMs);
+        if (!partial) {
+            return PhysicsSandboxResult<std::size_t>::Failure(
+                    std::move(partial).Error());
+        }
+
+        std::shared_ptr<const ReplayControlPlan> basePlan;
+        if (impl_->controlPlan->replacement.empty()) {
+            basePlan = impl_->controlPlan->base;
+        } else {
+            basePlan = std::make_shared<const ReplayControlPlan>(
+                    impl_->controlPlan->Materialize());
+        }
+        ReplayControlPlan partialPlan = std::move(partial).Value();
+        const std::uint64_t firstClockTimeMs =
+                static_cast<std::uint64_t>(
+                        impl_->options.prestartDurationMs) +
+                static_cast<std::uint64_t>(minimumTimeMs);
+        const auto firstTick = std::lower_bound(
+                partialPlan.ticks.begin(), partialPlan.ticks.end(),
+                firstClockTimeMs,
+                [](const ReplayControlTick &tick, std::uint64_t timeMs) {
+                    return tick.timeMs < timeMs;
+                });
+        const std::size_t replacementBegin =
+                static_cast<std::size_t>(
+                        firstTick - partialPlan.ticks.begin());
+        if (!basePlan || partialPlan.ticks.size() > basePlan->ticks.size() ||
+            replacementBegin > partialPlan.ticks.size()) {
+            return PhysicsSandboxResult<std::size_t>::Failure(
+                    SandboxError(PhysicsSandboxErrorCode::InvalidRequest,
+                                 "sandbox input window exceeds the control plan"));
+        }
+
+        auto controlStorage =
+                std::make_shared<SandboxControlPlanStorage>();
+        controlStorage->base = std::move(basePlan);
+        controlStorage->replacementBegin = replacementBegin;
+        controlStorage->replacement.assign(
+                firstTick, partialPlan.ticks.end());
+        impl_->inputs = std::move(inputStorage);
+        impl_->controlPlan = std::move(controlStorage);
+        return PhysicsSandboxResult<std::size_t>::Success(
+                impl_->inputs->Size());
+    } catch (const std::bad_alloc &) {
+        return PhysicsSandboxResult<std::size_t>::Failure(
+                SandboxError(PhysicsSandboxErrorCode::AllocationFailed,
+                             "allocation failed while replacing input window"));
+    } catch (...) {
+        return PhysicsSandboxResult<std::size_t>::Failure(
+                SandboxError(PhysicsSandboxErrorCode::UnexpectedFailure,
+                             "unexpected sandbox input window failure"));
+    }
+}
+
 PhysicsSandboxResult<PhysicsSandboxStateView> PhysicsSandbox::AdvanceTicks(
         std::uint32_t count) noexcept {
     try {
         if (!impl_ || !impl_->loaded || count == 0u ||
-            impl_->cursor > impl_->controlPlan.ticks.size() ||
-            count > impl_->controlPlan.ticks.size() - impl_->cursor) {
+            !impl_->controlPlan ||
+            impl_->cursor > impl_->controlPlan->Size() ||
+            count > impl_->controlPlan->Size() - impl_->cursor) {
             return PhysicsSandboxResult<PhysicsSandboxStateView>::Failure(
                     SandboxError(PhysicsSandboxErrorCode::InvalidRequest,
                                  "invalid sandbox tick advance"));
@@ -2084,8 +2515,7 @@ PhysicsSandboxResult<PhysicsSandboxStateView> PhysicsSandbox::AdvanceTicks(
                                  "deterministic execution mode is unavailable"));
         }
         const ReplaySimulationTimelineResult result =
-                impl_->session->AdvanceIncremental(
-                        impl_->controlPlan.ticks, impl_->cursor, count);
+                impl_->AdvanceControlPlan(impl_->cursor, count);
         if (result.result != ReplaySimulationRunResult::Success ||
             !deterministicScope.Restore()) {
             return PhysicsSandboxResult<PhysicsSandboxStateView>::Failure(
@@ -2127,6 +2557,7 @@ PhysicsSandboxResult<PhysicsSandboxState> PhysicsSandbox::CaptureState()
         }
         state->view = view.Value();
         state->inputs = impl_->inputs;
+        state->controlPlan = impl_->controlPlan;
         state->scenarioFingerprint = impl_->scenarioFingerprint;
         state->validationSeed = impl_->inputMetadata.validationSeed;
         state->backend = impl_->options.backend;
@@ -2167,21 +2598,30 @@ PhysicsSandboxResult<PhysicsSandboxStateView> PhysicsSandbox::RestoreState(
                     SandboxError(PhysicsSandboxErrorCode::IncompatibleState,
                                  "sandbox state has no runtime clone"));
         }
-        PhysicsSandboxResult<ReplayControlPlan> plan =
-                impl_->BuildControlPlan(state.impl_->inputs);
-        if (!plan) {
-            return PhysicsSandboxResult<PhysicsSandboxStateView>::Failure(
-                    std::move(plan).Error());
-        }
-        ReplayControlPlan restoredPlan = std::move(plan).Value();
-        if (state.impl_->cursor > restoredPlan.ticks.size() ||
+        if (!state.impl_->inputs ||
             state.impl_->cursor < impl_->prestartTicks) {
             return PhysicsSandboxResult<PhysicsSandboxStateView>::Failure(
                     SandboxError(PhysicsSandboxErrorCode::IncompatibleState,
                                  "sandbox state cursor is incompatible"));
         }
-        std::vector<PhysicsSandboxInputEvent> restoredInputs =
-                state.impl_->inputs;
+        std::shared_ptr<const SandboxControlPlanStorage> restoredControlPlan =
+                state.impl_->controlPlan;
+        if (!restoredControlPlan) {
+            PhysicsSandboxResult<ReplayControlPlan> rebuilt =
+                    impl_->BuildControlPlan(
+                            state.impl_->inputs->Materialize());
+            if (!rebuilt) {
+                return PhysicsSandboxResult<PhysicsSandboxStateView>::Failure(
+                        std::move(rebuilt).Error());
+            }
+            restoredControlPlan = SandboxControlPlanStorage::Full(
+                    std::move(rebuilt).Value());
+        }
+        if (state.impl_->cursor > restoredControlPlan->Size()) {
+            return PhysicsSandboxResult<PhysicsSandboxStateView>::Failure(
+                    SandboxError(PhysicsSandboxErrorCode::IncompatibleState,
+                                 "sandbox state cursor is incompatible"));
+        }
         ReplaySimulationInstanceClone runtimeClone =
                 *state.impl_->runtimeClone;
         if (!impl_->session->PrepareRuntimeCloneRestore(runtimeClone)) {
@@ -2191,8 +2631,8 @@ PhysicsSandboxResult<PhysicsSandboxStateView> PhysicsSandbox::RestoreState(
         }
 
         impl_->session->RestoreRuntimeClone(std::move(runtimeClone));
-        impl_->inputs.swap(restoredInputs);
-        impl_->controlPlan = std::move(restoredPlan);
+        impl_->inputs = state.impl_->inputs;
+        impl_->controlPlan = std::move(restoredControlPlan);
         impl_->cursor = state.impl_->cursor;
         return impl_->ReadView();
     } catch (const std::bad_alloc &) {
@@ -2289,6 +2729,81 @@ PhysicsSandboxResult<PhysicsSandbox> CreatePhysicsSandbox(
         return PhysicsSandboxResult<PhysicsSandbox>::Failure(
                 SandboxError(PhysicsSandboxErrorCode::UnexpectedFailure,
                              "unexpected sandbox creation failure"));
+    }
+}
+
+PhysicsSandboxResult<PhysicsSandbox> ClonePhysicsSandbox(
+        const PhysicsSandbox &source) noexcept {
+    try {
+        if (!source.impl_ || !source.impl_->loaded ||
+            !source.impl_->session) {
+            return PhysicsSandboxResult<PhysicsSandbox>::Failure(
+                    SandboxError(PhysicsSandboxErrorCode::InvalidSandbox,
+                                 "source sandbox is not loaded"));
+        }
+        if (source.impl_->options.backend !=
+                SimulationBackend::OptimizedCpu) {
+            return PhysicsSandboxResult<PhysicsSandbox>::Failure(
+                    SandboxError(PhysicsSandboxErrorCode::InvalidRequest,
+                                 "only optimized CPU sandboxes can be cloned"));
+        }
+        std::unique_ptr<ReplaySimulationSession> session =
+                source.impl_->session->ClonePrepared();
+        if (!session) {
+            return PhysicsSandboxResult<PhysicsSandbox>::Failure(
+                    SandboxError(PhysicsSandboxErrorCode::AllocationFailed,
+                                 "prepared sandbox scene could not be cloned"));
+        }
+
+        auto impl = std::make_unique<PhysicsSandbox::Impl>(
+                source.impl_->validationState.provider,
+                source.impl_->options);
+        impl->session = std::move(session);
+        impl->definition = source.impl_->definition;
+        impl->controlPlan = source.impl_->controlPlan;
+        impl->inputMetadata = source.impl_->inputMetadata;
+        impl->definedActions = source.impl_->definedActions;
+        impl->provenance = source.impl_->provenance;
+        impl->inputs = source.impl_->inputs;
+        impl->challengeMetadata = source.impl_->challengeMetadata;
+        impl->route = source.impl_->route;
+        impl->identity = source.impl_->identity;
+        impl->scenarioFingerprint = source.impl_->scenarioFingerprint;
+        impl->scene = source.impl_->scene;
+        impl->renderScene = source.impl_->renderScene;
+        impl->cursor = 0u;
+        impl->prestartTicks = source.impl_->prestartTicks;
+        impl->loaded = true;
+
+        PhysicsSandbox clone(std::move(impl));
+        PhysicsSandboxResult<PhysicsSandboxStateView> started =
+                clone.impl_->Restart(0u);
+        if (!started) {
+            return PhysicsSandboxResult<PhysicsSandbox>::Failure(
+                    std::move(started).Error());
+        }
+        PhysicsSandboxResult<PhysicsSandboxState> state =
+                source.CaptureState();
+        if (!state) {
+            return PhysicsSandboxResult<PhysicsSandbox>::Failure(
+                    std::move(state).Error());
+        }
+        PhysicsSandboxResult<PhysicsSandboxStateView> restored =
+                clone.RestoreState(state.Value());
+        if (!restored) {
+            return PhysicsSandboxResult<PhysicsSandbox>::Failure(
+                    std::move(restored).Error());
+        }
+        return PhysicsSandboxResult<PhysicsSandbox>::Success(
+                std::move(clone));
+    } catch (const std::bad_alloc &) {
+        return PhysicsSandboxResult<PhysicsSandbox>::Failure(
+                SandboxError(PhysicsSandboxErrorCode::AllocationFailed,
+                             "allocation failed while cloning sandbox"));
+    } catch (...) {
+        return PhysicsSandboxResult<PhysicsSandbox>::Failure(
+                SandboxError(PhysicsSandboxErrorCode::UnexpectedFailure,
+                             "unexpected sandbox clone failure"));
     }
 }
 
@@ -2481,7 +2996,8 @@ PhysicsSandboxCudaSearchSession::Impl::Convert(
     state->runtimeClone =
             std::make_shared<ReplaySimulationInstanceClone>(
                     std::move(clone));
-    state->inputs = result.bestInputs;
+    state->inputs = SandboxInputStorage::Full(result.bestInputs);
+    state->controlPlan.reset();
     state->scenarioFingerprint = scenarioFingerprint;
     state->validationSeed = validationSeed;
     state->backend = SimulationBackend::Cuda;
@@ -2673,7 +3189,7 @@ CreatePhysicsSandboxCudaSearchSession(
         const std::size_t endCursor =
                 source.prestartTicks +
                 static_cast<std::size_t>(endRaceTicks);
-        if (endCursor > source.controlPlan.ticks.size()) {
+        if (!source.controlPlan || endCursor > source.controlPlan->Size()) {
             return PhysicsSandboxResult<
                     PhysicsSandboxCudaSearchSession>::Failure(
                     SearchError(
@@ -2681,9 +3197,11 @@ CreatePhysicsSandboxCudaSearchSession(
                             "CUDA search timeline exceeds the replay"));
         }
 
+        const std::vector<PhysicsSandboxInputEvent> sourceInputs =
+                source.inputs->Materialize();
         std::size_t maximumEventCount = 0u;
         if (!MaximumEventCapacity(
-                    source.inputs.size(),
+                    sourceInputs.size(),
                     configuration.modifiers,
                     tickDurationMs,
                     &maximumEventCount)) {
@@ -2712,10 +3230,10 @@ CreatePhysicsSandboxCudaSearchSession(
              index < endCursor; ++index) {
             internal.baselineTicks.push_back(
                     simulation::FlattenCudaControlTick(
-                            source.controlPlan.ticks[index]));
+                            source.controlPlan->Tick(index)));
         }
-        internal.baselineInputs.reserve(source.inputs.size());
-        for (const PhysicsSandboxInputEvent &input : source.inputs) {
+        internal.baselineInputs.reserve(sourceInputs.size());
+        for (const PhysicsSandboxInputEvent &input : sourceInputs) {
             internal.baselineInputs.push_back(CudaInput(input));
         }
         internal.modifiers.reserve(configuration.modifiers.size());
@@ -2782,6 +3300,8 @@ CreatePhysicsSandboxCudaSearchSession(
         auto impl =
                 std::make_unique<PhysicsSandboxCudaSearchSession::Impl>();
         impl->executor = std::move(executor);
+        impl->inputs = source.inputs;
+        impl->controlPlan = source.controlPlan;
         impl->scenarioFingerprint = source.scenarioFingerprint;
         impl->validationSeed = source.inputMetadata.validationSeed;
         impl->tickDurationMs = tickDurationMs;
@@ -2851,9 +3371,10 @@ cuda_test::PhysicsSandboxCudaTestAccess::RunCandidateBatch(
     forevervalidator::simulation::CudaTimelineBatchResult result;
     if (!sandbox.impl_ || !sandbox.impl_->loaded ||
         !sandbox.impl_->session || tickCount == 0u ||
-        sandbox.impl_->cursor > sandbox.impl_->controlPlan.ticks.size() ||
+        !sandbox.impl_->controlPlan ||
+        sandbox.impl_->cursor > sandbox.impl_->controlPlan->Size() ||
         tickCount >
-                sandbox.impl_->controlPlan.ticks.size() -
+                sandbox.impl_->controlPlan->Size() -
                         sandbox.impl_->cursor) {
         result.status = forevervalidator::simulation::
                 CudaTimelineStatus::InvalidArgument;
@@ -2862,11 +3383,9 @@ cuda_test::PhysicsSandboxCudaTestAccess::RunCandidateBatch(
         return result;
     }
     try {
-        std::vector<ReplayControlTick> ticks(
-                sandbox.impl_->controlPlan.ticks.begin() +
-                        sandbox.impl_->cursor,
-                sandbox.impl_->controlPlan.ticks.begin() +
-                        sandbox.impl_->cursor + tickCount);
+        std::vector<ReplayControlTick> ticks =
+                sandbox.impl_->controlPlan->CopyRange(
+                        sandbox.impl_->cursor, tickCount);
         return sandbox.impl_->session->
                 ExecuteCudaCandidateBatchForTesting(
                         ticks, candidateCount, mutateControls,
@@ -2891,10 +3410,11 @@ cuda_test::PhysicsSandboxCudaTestAccess::
     ReplayCudaVehiclePrefixDifferential result;
     if (!sandbox.impl_ || !sandbox.impl_->loaded ||
         !sandbox.impl_->session || tickCount == 0u ||
+        !sandbox.impl_->controlPlan ||
         sandbox.impl_->cursor >
-                sandbox.impl_->controlPlan.ticks.size() ||
+                sandbox.impl_->controlPlan->Size() ||
         tickCount >
-                sandbox.impl_->controlPlan.ticks.size() -
+                sandbox.impl_->controlPlan->Size() -
                         sandbox.impl_->cursor) {
         result.diagnostic =
                 "sandbox CUDA candidate batch differential request is invalid";
@@ -2907,11 +3427,9 @@ cuda_test::PhysicsSandboxCudaTestAccess::
         return result;
     }
     try {
-        std::vector<ReplayControlTick> ticks(
-                sandbox.impl_->controlPlan.ticks.begin() +
-                        sandbox.impl_->cursor,
-                sandbox.impl_->controlPlan.ticks.begin() +
-                        sandbox.impl_->cursor + tickCount);
+        std::vector<ReplayControlTick> ticks =
+                sandbox.impl_->controlPlan->CopyRange(
+                        sandbox.impl_->cursor, tickCount);
         result = sandbox.impl_->session->
                 RunCudaCandidateBatchDifferentialForTesting(
                         ticks, candidateCount, mutateControls,
@@ -2974,7 +3492,7 @@ cuda_test::PhysicsSandboxCudaTestAccess::CaptureCandidateState(
 std::size_t cuda_test::PhysicsSandboxCudaTestAccess::TimelineSize(
         const PhysicsSandbox &sandbox) noexcept {
     return sandbox.impl_ && sandbox.impl_->loaded
-            ? sandbox.impl_->controlPlan.ticks.size()
+            ? sandbox.impl_->controlPlan->Size()
             : 0u;
 }
 
@@ -3182,8 +3700,9 @@ cuda_test::PhysicsSandboxCudaTestAccess::RunNextTimelineTick(
         PhysicsSandbox &sandbox) {
     if (!sandbox.impl_ || !sandbox.impl_->loaded ||
         !sandbox.impl_->session ||
+        !sandbox.impl_->controlPlan ||
         sandbox.impl_->cursor >=
-                sandbox.impl_->controlPlan.ticks.size()) {
+                sandbox.impl_->controlPlan->Size()) {
         ReplayCudaVehiclePrefixDifferential result;
         result.diagnostic =
                 "sandbox has no next CUDA timeline tick";
@@ -3199,8 +3718,8 @@ cuda_test::PhysicsSandboxCudaTestAccess::RunNextTimelineTick(
     ReplayCudaVehiclePrefixDifferential result =
             sandbox.impl_->session->
                     RunCudaTimelineTickDifferentialForTesting(
-                            sandbox.impl_->controlPlan.ticks[
-                                    sandbox.impl_->cursor]);
+                            sandbox.impl_->controlPlan->Tick(
+                                    sandbox.impl_->cursor));
     if (!scope.Restore()) {
         result.success = false;
         result.diagnostic =
@@ -3213,12 +3732,13 @@ bool cuda_test::PhysicsSandboxCudaTestAccess::StageNextTimelinePrefix(
         PhysicsSandbox &sandbox) {
     return sandbox.impl_ && sandbox.impl_->loaded &&
             sandbox.impl_->session &&
+            sandbox.impl_->controlPlan &&
             sandbox.impl_->cursor <
-                    sandbox.impl_->controlPlan.ticks.size() &&
+                    sandbox.impl_->controlPlan->Size() &&
             sandbox.impl_->session->
                     StageCudaTimelinePrefixForTesting(
-                            sandbox.impl_->controlPlan.ticks[
-                                    sandbox.impl_->cursor]);
+                            sandbox.impl_->controlPlan->Tick(
+                                    sandbox.impl_->cursor));
 }
 
 bool cuda_test::PhysicsSandboxCudaTestAccess::StageCollisionSubstep(

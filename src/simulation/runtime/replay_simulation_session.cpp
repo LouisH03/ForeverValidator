@@ -856,7 +856,8 @@ struct ReplaySimulationSession::Impl {
     forevervalidator::SimulationBackend backend;
     ReplayMapScene mapScene;
     ReplaySimulationInstance instance;
-    std::vector<ReplayStaticCollisionTriangle> staticCollisionTriangles;
+    std::shared_ptr<const std::vector<ReplayStaticCollisionTriangle>>
+            staticCollisionTriangles;
     sandbox::PhysicsSandboxRenderSceneHandle staticRenderScene;
     forevervalidator::simulation::CudaHostScene cudaHostScene;
     forevervalidator::simulation::CudaDeviceScene cudaDeviceScene;
@@ -1096,10 +1097,28 @@ ReplaySimulationSession::ReplaySimulationSession(
 
 ReplaySimulationSession::~ReplaySimulationSession() = default;
 
+std::unique_ptr<ReplaySimulationSession>
+ReplaySimulationSession::ClonePrepared() const {
+    try {
+        auto clone = std::make_unique<ReplaySimulationSession>(impl->backend);
+        if (!clone->impl->mapScene.ClonePreparedFrom(impl->mapScene)) {
+            return {};
+        }
+        clone->impl->staticCollisionTriangles =
+                impl->staticCollisionTriangles;
+        clone->impl->staticRenderScene = impl->staticRenderScene;
+        clone->impl->incrementalValidationSeed =
+                impl->incrementalValidationSeed;
+        return clone;
+    } catch (const std::bad_alloc &) {
+        return {};
+    }
+}
+
 void ReplaySimulationSession::Reset() {
     impl->ResetRuntime();
     impl->mapScene.Reset(impl->instance.race);
-    impl->staticCollisionTriangles.clear();
+    impl->staticCollisionTriangles.reset();
     impl->staticRenderScene.reset();
     impl->cudaHostScene.Clear();
     impl->cudaDeviceScene.Reset();
@@ -1143,7 +1162,14 @@ bool ReplaySimulationSession::InstallStaticScene(
                 ReplayMapSceneResult::Ready) {
         return false;
     }
-    impl->staticCollisionTriangles = std::move(triangles);
+    try {
+        impl->staticCollisionTriangles =
+                std::make_shared<const std::vector<
+                        ReplayStaticCollisionTriangle>>(
+                        std::move(triangles));
+    } catch (const std::bad_alloc &) {
+        return false;
+    }
     impl->staticRenderScene = std::move(renderScene);
     impl->cudaHostScene = std::move(cudaScene);
     return true;
@@ -1170,7 +1196,10 @@ void ReplaySimulationSession::ConfigureReplayRace(
 
 const std::vector<ReplayStaticCollisionTriangle> &
 ReplaySimulationSession::StaticCollisionTriangles() const noexcept {
-    return impl->staticCollisionTriangles;
+    static const std::vector<ReplayStaticCollisionTriangle> empty;
+    return impl->staticCollisionTriangles
+            ? *impl->staticCollisionTriangles
+            : empty;
 }
 
 sandbox::PhysicsSandboxRenderSceneHandle

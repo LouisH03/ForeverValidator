@@ -388,6 +388,8 @@ struct PhysicsSandboxCudaVolumeEntryEvaluator {
     PhysicsSandboxCudaVector3 maximum{};
 };
 
+struct PhysicsSandboxCudaStuntPointsEvaluator {};
+
 struct PhysicsSandboxCudaFinishTimeEvaluator {};
 
 using PhysicsSandboxCudaEvaluator = std::variant<
@@ -395,6 +397,7 @@ using PhysicsSandboxCudaEvaluator = std::variant<
         PhysicsSandboxCudaPointEvaluator,
         PhysicsSandboxCudaPoseEvaluator,
         PhysicsSandboxCudaVolumeEntryEvaluator,
+        PhysicsSandboxCudaStuntPointsEvaluator,
         PhysicsSandboxCudaFinishTimeEvaluator>;
 
 struct PhysicsSandboxCudaSearchConfiguration {
@@ -490,9 +493,15 @@ public:
     PhysicsSandboxResult<PhysicsSandboxStateView> LoadReplay(
             ByteView replayBytes,
             const ReplayIdentity &identity) noexcept;
+    PhysicsSandboxResult<std::string> ReadMapName()
+            const noexcept;
     PhysicsSandboxResult<std::vector<PhysicsSandboxInputEvent>> ReadInputs()
             const noexcept;
     PhysicsSandboxResult<std::size_t> ReplaceInputs(
+            std::vector<PhysicsSandboxInputEvent> events) noexcept;
+    PhysicsSandboxResult<std::size_t> ReplaceInputWindow(
+            std::int64_t minimumTimeMs,
+            std::int64_t maximumTimeMs,
             std::vector<PhysicsSandboxInputEvent> events) noexcept;
     PhysicsSandboxResult<PhysicsSandboxStateView> AdvanceTicks(
             std::uint32_t count) noexcept;
@@ -511,6 +520,8 @@ private:
     friend PhysicsSandboxResult<PhysicsSandbox> CreatePhysicsSandbox(
             AssetSource source,
             const PhysicsSandboxOptions &options) noexcept;
+    friend PhysicsSandboxResult<PhysicsSandbox> ClonePhysicsSandbox(
+            const PhysicsSandbox &source) noexcept;
     friend std::vector<PhysicsSandboxResult<PhysicsSandboxStateView>>
             AdvancePhysicsSandboxes(
                     const std::vector<PhysicsSandbox *> &sandboxes,
@@ -566,6 +577,9 @@ private:
 PhysicsSandboxResult<PhysicsSandbox> CreatePhysicsSandbox(
         AssetSource source,
         const PhysicsSandboxOptions &options = {}) noexcept;
+
+PhysicsSandboxResult<PhysicsSandbox> ClonePhysicsSandbox(
+        const PhysicsSandbox &source) noexcept;
 
 PhysicsSandboxResult<PhysicsSandboxCudaSearchSession>
 CreatePhysicsSandboxCudaSearchSession(

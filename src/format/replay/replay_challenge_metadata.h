@@ -47,6 +47,7 @@ struct ReplayPuzzleBlockStockEntry {
 };
 
 struct ReplayChallengeMetadata {
+    std::string mapName;
     ReplayArchiveIdentifier challengeVehicle;
     std::optional<EChallengePlayMode> playMode;
     std::optional<std::uint32_t> stuntsTimeLimitMs;

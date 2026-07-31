@@ -33,6 +33,7 @@ public:
     void Reset(CTrackManiaRace &race);
     ReplayMapSceneResult PreloadChallenge(
             CGameCtnChallengeConstruction &construction);
+    bool ClonePreparedFrom(const ReplayMapScene &source);
     ReplayMapSceneResult InstallModels(StaticSceneModelCollection models);
     void Activate();
     bool IsActive() const { return active_; }
@@ -55,7 +56,7 @@ private:
             CSceneVehicleCar *vehicle,
             CTrackManiaRace &race);
 
-    std::unique_ptr<CGameCtnChallenge> challenge_;
+    std::shared_ptr<CGameCtnChallenge> challenge_;
     ReplaySceneBlockPlacements blockPlacements_;
     StaticSceneModelCollection models_;
     ReplayStaticCorpusCollection staticCorpuses_;
