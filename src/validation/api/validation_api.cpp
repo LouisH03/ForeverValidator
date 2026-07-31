@@ -1680,6 +1680,11 @@ simulation::CudaSearchEvaluatorConfiguration CudaEvaluator(
                     result.values[3] = evaluator.maximum.x;
                     result.values[4] = evaluator.maximum.y;
                     result.values[5] = evaluator.maximum.z;
+                } else if constexpr (std::is_same_v<
+                                             T,
+                                             PhysicsSandboxCudaStuntPointsEvaluator>) {
+                    result.kind =
+                            simulation::CudaSearchEvaluatorKind::StuntPoints;
                 } else {
                     result.kind =
                             simulation::CudaSearchEvaluatorKind::FinishTime;

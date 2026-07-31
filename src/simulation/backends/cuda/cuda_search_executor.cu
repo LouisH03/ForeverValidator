@@ -1297,6 +1297,7 @@ __device__ DeviceSample EvaluateState(
         const GmVec3 &previousPosition,
         double previousTimeMs,
         double currentTimeMs,
+        std::uint32_t stuntsScore,
         bool *reported) {
     DeviceSample result;
     result.timeMs = currentTimeMs;
@@ -1383,6 +1384,10 @@ __device__ DeviceSample EvaluateState(
             result.valid = true;
         }
         break;
+    case CudaSearchEvaluatorKind::StuntPoints:
+        result.score = static_cast<double>(stuntsScore);
+        result.valid = true;
+        break;
     case CudaSearchEvaluatorKind::FinishTime:
         if (*reported || !state.race.progress.raceCompleted) {
             return result;
@@ -1397,9 +1402,10 @@ __device__ DeviceSample EvaluateState(
     return result;
 }
 
-__device__ bool MaximizeEvaluator(
-        const CudaSearchEvaluatorConfiguration &evaluator) {
-    return evaluator.kind == CudaSearchEvaluatorKind::Velocity;
+__host__ __device__ bool MaximizesScore(
+        CudaSearchEvaluatorKind kind) {
+    return kind == CudaSearchEvaluatorKind::Velocity ||
+            kind == CudaSearchEvaluatorKind::StuntPoints;
 }
 
 __global__ void SeedCandidateBestSamplesKernel(
@@ -1921,7 +1927,7 @@ __global__ __launch_bounds__(
             shapeCapacity};
     DeviceControlState controlState = *mutableBoundaryControls;
     bool evaluatorReported = false;
-    const bool maximize = MaximizeEvaluator(configuredEvaluator);
+    const bool maximize = MaximizesScore(configuredEvaluator.kind);
     DeviceSample localBest;
     std::uint32_t evaluationIndex = 0u;
     for (std::uint32_t tickIndex = 0u;
@@ -2008,10 +2014,15 @@ __global__ __launch_bounds__(
         if (publicTime < evaluationStartTimeMs) {
             continue;
         }
+        std::uint32_t stuntsScore = 0u;
+        if constexpr (SimulateStunts) {
+            stuntsScore = state.stunts.stuntsScore;
+        }
         DeviceSample sample = EvaluateState(
                 configuredEvaluator, state, previousPosition,
                 static_cast<double>(publicTime - tickDurationMs),
                 static_cast<double>(publicTime),
+                stuntsScore,
                 &evaluatorReported);
         sample.candidateId = candidateId;
         sample.candidateSlot = slot;
@@ -3006,8 +3017,7 @@ struct CudaSearchExecutor::Impl {
                 nextCandidateBestSamples.Get(), reducedBest.Get(),
                 winnerSlots,
                 BetterSample{
-                        configuration.evaluator.kind ==
-                                CudaSearchEvaluatorKind::Velocity},
+                        MaximizesScore(configuration.evaluator.kind)},
                 DeviceSample{});
         if (error != cudaSuccess ||
             !nextReductionTemporary.Allocate(reductionBytes)) {
@@ -3353,8 +3363,7 @@ struct CudaSearchExecutor::Impl {
                 candidateBestSamples.Get(), reducedBest.Get(),
                 winnerCount,
                 BetterSample{
-                        configuration.evaluator.kind ==
-                                CudaSearchEvaluatorKind::Velocity},
+                        MaximizesScore(configuration.evaluator.kind)},
                 DeviceSample{});
         if (error != cudaSuccess) {
             result.status = CudaSearchStatus::DeviceFailure;
@@ -3427,8 +3436,7 @@ struct CudaSearchExecutor::Impl {
                 static_cast<std::uint32_t>(
                         configuration.maximumEventCount),
                 evaluationTickCount,
-                configuration.evaluator.kind ==
-                        CudaSearchEvaluatorKind::Velocity,
+                MaximizesScore(configuration.evaluator.kind),
                 baseline,
                 globalBestSample.Get(),
                 globalBestState.Get(),
@@ -4072,8 +4080,8 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
                 impl->reducedBest.Get(),
                 winnerSampleSlots,
                 BetterSample{
-                        preparedConfiguration.evaluator.kind ==
-                                CudaSearchEvaluatorKind::Velocity},
+                        MaximizesScore(
+                                preparedConfiguration.evaluator.kind)},
                 DeviceSample{});
         if (error != cudaSuccess ||
             !impl->reductionTemporary.Allocate(reductionBytes)) {

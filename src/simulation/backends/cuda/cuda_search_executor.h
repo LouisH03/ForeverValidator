@@ -57,6 +57,7 @@ enum class CudaSearchEvaluatorKind : std::uint32_t {
     Point,
     Pose,
     VolumeEntry,
+    StuntPoints,
     FinishTime,
 };
 

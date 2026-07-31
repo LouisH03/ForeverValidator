@@ -388,6 +388,8 @@ struct PhysicsSandboxCudaVolumeEntryEvaluator {
     PhysicsSandboxCudaVector3 maximum{};
 };
 
+struct PhysicsSandboxCudaStuntPointsEvaluator {};
+
 struct PhysicsSandboxCudaFinishTimeEvaluator {};
 
 using PhysicsSandboxCudaEvaluator = std::variant<
@@ -395,6 +397,7 @@ using PhysicsSandboxCudaEvaluator = std::variant<
         PhysicsSandboxCudaPointEvaluator,
         PhysicsSandboxCudaPoseEvaluator,
         PhysicsSandboxCudaVolumeEntryEvaluator,
+        PhysicsSandboxCudaStuntPointsEvaluator,
         PhysicsSandboxCudaFinishTimeEvaluator>;
 
 struct PhysicsSandboxCudaSearchConfiguration {
