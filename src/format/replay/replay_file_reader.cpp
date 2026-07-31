@@ -80,6 +80,8 @@ constexpr Nat32 GhostEncodingMode = 0u;
 constexpr Nat32 GhostStateVersion = 9u;
 constexpr Nat32 GhostEncodedSampleBytes = 61u;
 constexpr Nat32 ScriptedInputClockOffsetMs = 0xffffu;
+// Scripted finish markers can be quantized half a 10 ms tick late.
+constexpr Nat32 ScriptedInputFinishToleranceMs = 5u;
 
 struct Bytes {
     const Byte *data = nullptr;
@@ -1670,8 +1672,8 @@ bool NormalizeScriptedInputClock(
     }
 
     const ReplayInputEvent *raceRunning = nullptr;
-    const ReplayInputEvent *finishLine = nullptr;
-    for (const ReplayInputEvent &event : *events) {
+    ReplayInputEvent *finishLine = nullptr;
+    for (ReplayInputEvent &event : *events) {
         if (raceRunning == nullptr &&
             event.action == ReplayInputActionKind::RaceRunning &&
             event.value.IsCanonicalPress()) {
@@ -1682,10 +1684,21 @@ bool NormalizeScriptedInputClock(
             finishLine = &event;
         }
     }
-    if (raceRunning != nullptr && finishLine != nullptr &&
-        (finishLine->timeMs < raceRunning->timeMs ||
-         finishLine->timeMs - raceRunning->timeMs != metadata.durationMs)) {
-        return false;
+    if (raceRunning != nullptr && finishLine != nullptr) {
+        if (finishLine->timeMs < raceRunning->timeMs ||
+            raceRunning->timeMs >
+                    std::numeric_limits<Nat32>::max() - metadata.durationMs) {
+            return false;
+        }
+        const Nat32 markerDuration =
+                finishLine->timeMs - raceRunning->timeMs;
+        const Nat32 discrepancy = markerDuration > metadata.durationMs
+                ? markerDuration - metadata.durationMs
+                : metadata.durationMs - markerDuration;
+        if (discrepancy > ScriptedInputFinishToleranceMs) {
+            return false;
+        }
+        finishLine->timeMs = raceRunning->timeMs + metadata.durationMs;
     }
     *provenance = ReplayInputProvenance::Scripted;
     return true;
