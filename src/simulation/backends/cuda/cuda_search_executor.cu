@@ -368,6 +368,7 @@ public:
           compactOffsets_(compactOffsets),
           compactRandom_(compactRandom),
           compactEdits_(compactEdits),
+          finalCount_(finalCount),
           candidateSlot_(candidateSlot),
           candidateStride_(candidateStride),
           editCursor_({
@@ -379,6 +380,9 @@ public:
     __device__ bool Next(CudaSearchInputEvent *event) {
         if (compactEdits_) {
             return editCursor_.Next(event);
+        }
+        if (index_ >= finalCount_) {
+            return false;
         }
         *event = CandidateInputAt(
                 baselineInputs_, materializedInputs_,
@@ -394,6 +398,7 @@ private:
     const std::uint32_t *compactOffsets_ = nullptr;
     bool compactRandom_ = false;
     bool compactEdits_ = false;
+    std::uint32_t finalCount_ = 0u;
     std::uint32_t candidateSlot_ = 0u;
     std::uint32_t candidateStride_ = 0u;
     std::uint32_t index_ = 0u;
