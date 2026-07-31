@@ -2,6 +2,7 @@
 
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "engine/core/engine_types.h"
 
@@ -26,8 +27,11 @@ struct InstalledVehicleAssetGraph {
     InstalledVehicleAssetReference vehicleStruct;
     InstalledVehicleAssetReference fakeContactBitmap;
     InstalledVehicleAssetReference fakeContactTexture;
+    std::vector<InstalledVehicleAssetReference> raceCameras;
 
     static std::optional<InstalledVehicleAssetGraph> ResolveFromPack(
             CPlugFilePack &pack);
+    static std::optional<std::vector<InstalledVehicleAssetReference>>
+    ResolveRaceCamerasFromPack(CPlugFilePack &pack);
     bool IsComplete() const;
 };

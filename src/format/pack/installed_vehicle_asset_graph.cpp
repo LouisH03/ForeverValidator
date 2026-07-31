@@ -158,6 +158,49 @@ bool ResolveUniqueDeclaredClass(
     return found;
 }
 
+bool IsRaceCameraClass(u32 classId) {
+    return classId == TMNF_CLASS_CGameControlCameraTrackManiaRace ||
+           classId == TMNF_CLASS_CGameControlCameraTrackManiaRace2 ||
+           classId == TMNF_CLASS_CGameControlCameraTrackManiaRace3;
+}
+
+bool ResolveDeclaredRaceCameras(
+        CPlugFilePack &pack,
+        const InstalledVehicleAssetReference &source,
+        const GbxBodyReferenceTable &references,
+        std::vector<InstalledVehicleAssetReference> *out) {
+    if (out == nullptr) {
+        return false;
+    }
+    out->clear();
+    for (const GbxBodyExternalReference &reference :
+         references.externalReferences) {
+        if (reference.IsResource()) {
+            continue;
+        }
+        std::string logicalPath;
+        std::array<char, 512u> selectedPath{};
+        if (!references.ResolvePlainPathForReference(
+                    source.logicalPath, reference, &logicalPath) ||
+            !pack.SelectedPathForPlainRef(
+                    logicalPath.c_str(), selectedPath.data(),
+                    selectedPath.size())) {
+            continue;
+        }
+        const CPlugFileFidContainer_SFileDesc *file =
+                pack.FindFileDescByPath(selectedPath.data());
+        if (file == nullptr || !IsRaceCameraClass(file->classId)) {
+            continue;
+        }
+        InstalledVehicleAssetReference camera;
+        camera.logicalPath = std::move(logicalPath);
+        camera.selectedPath = selectedPath.data();
+        camera.classId = file->classId;
+        out->push_back(std::move(camera));
+    }
+    return true;
+}
+
 }  // namespace
 
 std::optional<InstalledVehicleAssetGraph>
@@ -175,6 +218,9 @@ InstalledVehicleAssetGraph::ResolveFromPack(CPlugFilePack &pack) {
                         &graph.collector) &&
                 ParseReferenceTable(
                         pack, graph.collector, &collectorReferences) &&
+                ResolveDeclaredRaceCameras(
+                        pack, graph.collector, collectorReferences,
+                        &graph.raceCameras) &&
                 ResolveUniqueDeclaredClass(
                         pack,
                         graph.collector,
@@ -226,6 +272,26 @@ InstalledVehicleAssetGraph::ResolveFromPack(CPlugFilePack &pack) {
             return std::nullopt;
         }
         return graph;
+    } catch (const std::bad_alloc &) {
+        return std::nullopt;
+    }
+}
+
+std::optional<std::vector<InstalledVehicleAssetReference>>
+InstalledVehicleAssetGraph::ResolveRaceCamerasFromPack(CPlugFilePack &pack) {
+    try {
+        InstalledVehicleAssetReference collector;
+        GbxBodyReferenceTable references;
+        std::vector<InstalledVehicleAssetReference> cameras;
+        if (!FindUniquePackClass(
+                    pack, TMNF_CLASS_CGameCtnCollectorVehicle, &collector) ||
+            !ParseReferenceTable(pack, collector, &references) ||
+            !ResolveDeclaredRaceCameras(
+                    pack, collector, references, &cameras) ||
+            cameras.empty()) {
+            return std::nullopt;
+        }
+        return cameras;
     } catch (const std::bad_alloc &) {
         return std::nullopt;
     }
