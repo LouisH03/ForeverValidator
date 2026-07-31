@@ -1416,6 +1416,7 @@ __global__ void SeedCandidateBestSamplesKernel(
 __global__ void GenerateSearchCandidatesKernel(
         const CudaSearchInputEvent *baselineInputs,
         std::uint32_t baselineInputCount,
+        std::uint32_t immutableTailInputCount,
         const CudaSearchModifierConfiguration *modifiers,
         std::uint32_t modifierCount,
         const double *smoothWeights,
@@ -1759,11 +1760,14 @@ __global__ void GenerateSearchCandidatesKernel(
             }
         }
     }
-    const std::uint32_t mutationCount = baseline
+    std::uint32_t mutationCount = baseline
             ? 0u
             : EffectiveChangeCount(
                       baselineInputs, baselineInputCount,
                       events, eventCount);
+    if (!baseline && eventCount != baselineInputCount) {
+        mutationCount += immutableTailInputCount;
+    }
     eventCounts[slot] = eventCount;
     mutationCounts[slot] = mutationCount;
     const bool active = baseline || mutationCount != 0u;
@@ -2498,6 +2502,7 @@ struct CudaSearchExecutor::Impl {
 
     CudaSearchExecutorConfiguration configuration;
     std::vector<CudaSearchInputEvent> immutableInputPrefix;
+    std::vector<CudaSearchInputEvent> immutableInputTail;
     std::int64_t mutableFromTimeMs = 0;
     std::uint32_t timelineTickCount = 0u;
     std::uint32_t evaluationTickCount = 0u;
@@ -3143,6 +3148,8 @@ struct CudaSearchExecutor::Impl {
                 baselineInputs.Get(),
                 static_cast<std::uint32_t>(
                         configuration.baselineInputs.size()),
+                static_cast<std::uint32_t>(
+                        immutableInputTail.size()),
                 modifiers.Get(),
                 static_cast<std::uint32_t>(
                         configuration.modifiers.size()),
@@ -3586,6 +3593,14 @@ struct CudaSearchExecutor::Impl {
                                     mutableFromTimeMs);
                 }
             }
+            result.best.inputs.reserve(
+                    result.best.inputs.size() +
+                    immutableInputTail.size());
+            for (CudaSearchInputEvent input : immutableInputTail) {
+                result.best.inputs.push_back(
+                        cuda_search_detail::AbsoluteSuffixEvent(
+                                input, mutableFromTimeMs));
+            }
             result.deviceToHostBytes += sizeof(bestSample) +
                     sizeof(result.best.state) +
                     hostSummary.globalEventCount *
@@ -3709,6 +3724,43 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
                     mutableFromTimeMs;
             modifier.window.maximumTimeMs -= mutableFromTimeMs;
         }
+        std::vector<CudaSearchInputEvent> immutableInputTail;
+        const bool windowLocalExistingEvent =
+                !preparedConfiguration.
+                         useLegacyMutationPipelineForTesting &&
+                preparedConfiguration.modifiers.size() == 1u &&
+                preparedConfiguration.modifiers[0].kind ==
+                        CudaSearchModifierKind::ExistingEvent &&
+                preparedConfiguration.modifiers[0].timeParameterMs != 0;
+        if (windowLocalExistingEvent) {
+            const std::int64_t evaluationEndRelativeMs =
+                    preparedConfiguration.evaluationEndTimeMs -
+                    mutableFromTimeMs;
+            const std::int64_t materializationEndTimeMs =
+                    std::max(
+                            evaluationEndRelativeMs,
+                            preparedConfiguration.modifiers[0].
+                                    window.maximumTimeMs);
+            cuda_search_detail::SearchInputWindow inputWindow;
+            if (!cuda_search_detail::PartitionSearchInputWindow(
+                        preparedConfiguration.baselineInputs,
+                        materializationEndTimeMs,
+                        &inputWindow) ||
+                inputWindow.immutableTail.size() >
+                        preparedConfiguration.maximumEventCount) {
+                if (diagnostic != nullptr) {
+                    *diagnostic =
+                            "CUDA search inputs cannot be partitioned at the materialization horizon";
+                }
+                return {};
+            }
+            preparedConfiguration.maximumEventCount -=
+                    inputWindow.immutableTail.size();
+            preparedConfiguration.baselineInputs =
+                    std::move(inputWindow.materialized);
+            immutableInputTail =
+                    std::move(inputWindow.immutableTail);
+        }
         const std::uint64_t candidateEvents =
                 static_cast<std::uint64_t>(
                         preparedConfiguration.maximumBatchSize) *
@@ -3764,6 +3816,8 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
         impl->configuration = preparedConfiguration;
         impl->immutableInputPrefix =
                 std::move(inputPartition.immutablePrefix);
+        impl->immutableInputTail =
+                std::move(immutableInputTail);
         impl->mutableFromTimeMs = mutableFromTimeMs;
         impl->timelineTickCount = static_cast<std::uint32_t>(
                 preparedConfiguration.baselineTicks.size());
