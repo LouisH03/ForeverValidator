@@ -381,6 +381,10 @@ bool SessionModule::Build(
             "--std=c++17",
             "--gpu-architecture=compute_75",
             "--device-c",
+            "--fmad=false",
+            "--prec-div=true",
+            "--prec-sqrt=true",
+            "--ftz=false",
             "-dlto",
     };
     if (compileResult == NVRTC_SUCCESS) {
@@ -436,6 +440,10 @@ bool SessionModule::Build(
             "-lto",
             "-kernels-used=SimulateSearchCandidatesKernel",
             "-split-compile=0",
+            "-fma=0",
+            "-prec-div=1",
+            "-prec-sqrt=1",
+            "-ftz=0",
     };
     nvJitLinkHandle link = nullptr;
     nvJitLinkResult linkResult = nvJitLinkCreate(
