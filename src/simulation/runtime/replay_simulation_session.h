@@ -88,6 +88,8 @@ public:
     ReplaySimulationSession(const ReplaySimulationSession &) = delete;
     ReplaySimulationSession &operator=(const ReplaySimulationSession &) = delete;
 
+    std::unique_ptr<ReplaySimulationSession> ClonePrepared() const;
+
     void Reset();
     bool PreloadChallenge(CGameCtnChallengeConstruction &construction);
     bool InstallStaticScene(StaticSceneModelCollection models);

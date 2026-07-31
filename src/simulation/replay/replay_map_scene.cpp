@@ -40,11 +40,38 @@ ReplayMapSceneResult ReplayMapScene::PreloadChallenge(
         return ReplayMapSceneResult::ChallengeUnavailable;
     }
 
+    std::unique_ptr<CGameCtnChallenge> challenge;
     if (!construction.MovePreparedSceneTo(
-                challenge_, blockPlacements_)) {
+                challenge, blockPlacements_)) {
         return ReplayMapSceneResult::ChallengeUnavailable;
     }
+    challenge_ = std::move(challenge);
     return ReplayMapSceneResult::Ready;
+}
+
+bool ReplayMapScene::ClonePreparedFrom(const ReplayMapScene &source) {
+    persistentCollisionZone_.Reset();
+    staticCorpuses_.Clear();
+    dedicatedCollisionCorpuses_.Clear();
+    try {
+        challenge_ = source.challenge_;
+        blockPlacements_ = source.blockPlacements_;
+        models_ = source.models_;
+    } catch (const std::bad_alloc &) {
+        challenge_.reset();
+        blockPlacements_.Clear();
+        models_.Clear();
+        active_ = false;
+        ready_ = false;
+        collisionZoneConstructed_ = false;
+        stationaryCorpusesInstalled_ = false;
+        return false;
+    }
+    active_ = source.active_;
+    ready_ = false;
+    collisionZoneConstructed_ = false;
+    stationaryCorpusesInstalled_ = false;
+    return challenge_ != nullptr && !models_.Empty();
 }
 
 ReplayMapSceneResult ReplayMapScene::InstallModels(
