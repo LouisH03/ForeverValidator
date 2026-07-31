@@ -1480,6 +1480,14 @@ struct PhysicsSandbox::Impl {
         view.car.angularSpeed = ToPublicVector(frame.angularSpeed);
         view.car.force = ToPublicVector(frame.force);
         view.car.torque = ToPublicVector(frame.torque);
+        view.car.signedSpeed = state->signedSpeed;
+        view.car.turbo = state->turbo;
+        view.car.cameraFlightTransition = state->cameraFlightTransition;
+        view.car.burning = state->burning;
+        view.car.gearChanged = state->gearChanged;
+        view.car.wheelContact = state->wheelContact;
+        view.car.wheelHasSurface = state->wheelHasSurface;
+        view.car.cameraSupportUp = ToPublicVector(state->cameraSupportUp);
         view.accelerate = state->controls.lowSpeedGateA;
         view.brake = state->controls.lowSpeedGateB;
         view.steering = state->controls.steering;

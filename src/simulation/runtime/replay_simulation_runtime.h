@@ -1,6 +1,7 @@
 #ifndef TMNF_REPLAY_SIMULATION_RUNTIME_H
 #define TMNF_REPLAY_SIMULATION_RUNTIME_H
 
+#include <array>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -27,6 +28,17 @@ struct ReplaySimulationStepExecution {
     std::optional<std::uint32_t> finishTickMs;
     std::optional<forevervalidator::FinishTimeEstimate> finishTime;
     std::uint32_t respawnExecutedCount = 0u;
+};
+
+struct ReplayRaceCameraVehicleState {
+    float signedSpeed = 0.0f;
+    float turbo = 0.0f;
+    float cameraFlightTransition = 0.0f;
+    bool burning = false;
+    bool gearChanged = false;
+    std::array<bool, 4> wheelContact{{true, true, true, true}};
+    std::array<bool, 4> wheelHasSurface{{true, true, true, true}};
+    GmVec3 cameraSupportUp{0.0f, 1.0f, 0.0f};
 };
 
 
@@ -82,6 +94,7 @@ public:
     std::optional<std::uint32_t> StuntsScore() const;
     ReplayDynaFrameState CurrentFrame() const;
     ReplayVehicleControlState CurrentControls() const;
+    ReplayRaceCameraVehicleState CurrentRaceCameraState() const;
     const ReplayRaceProgress &RaceProgress() const;
     std::optional<std::uint32_t> ApplyReplayStuntTimePenalty(
             std::uint32_t overtimeMs);

@@ -41,6 +41,14 @@ struct ReplaySimulationStateView {
     std::optional<forevervalidator::FinishTimeEstimate> finishTime;
     std::optional<std::uint32_t> stuntsScore;
     std::uint32_t respawnCount = 0u;
+    float signedSpeed = 0.0f;
+    float turbo = 0.0f;
+    float cameraFlightTransition = 0.0f;
+    bool burning = false;
+    bool gearChanged = false;
+    std::array<bool, 4> wheelContact{{true, true, true, true}};
+    std::array<bool, 4> wheelHasSurface{{true, true, true, true}};
+    GmVec3 cameraSupportUp{0.0f, 1.0f, 0.0f};
 };
 
 struct ReplayCudaVehiclePrefixDifferential {

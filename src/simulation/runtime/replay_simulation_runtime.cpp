@@ -983,6 +983,30 @@ ReplayVehicleControlState ReplaySimulationRuntime::CurrentControls() const {
     return {input.lowSpeedGateA, input.lowSpeedGateB, input.steering};
 }
 
+ReplayRaceCameraVehicleState
+ReplaySimulationRuntime::CurrentRaceCameraState() const {
+    ReplayRaceCameraVehicleState result;
+    const CSceneVehicleCar &car = state_->vehicle.Car();
+    const CSceneVehicleCar::SVehicleCarState &physics =
+            car.ReplayPhysicsState();
+    result.signedSpeed = physics.forwardSpeed;
+    result.turbo = physics.turboActive != 0u ? 1.0f : 0.0f;
+    result.gearChanged =
+            physics.engineControlState ==
+            CSceneVehicleCarEngineControlState_GearShift;
+    const std::size_t wheelCount =
+            std::min<std::size_t>(car.WheelGetCount(), 4u);
+    for (std::size_t index = 0u; index < wheelCount; ++index) {
+        const CSceneVehicleCar::SSimulationWheel &wheel =
+                car.WheelAt(static_cast<u32>(index));
+        result.wheelContact[index] =
+                wheel.currentPhysicsState.contactPresent;
+        result.wheelHasSurface[index] =
+                wheel.asyncState.contactPresent;
+    }
+    return result;
+}
+
 
 std::uint64_t ReplaySimulationRuntimeSemanticHash(
         const ReplaySimulationRuntime::RuntimeClone &clone) {

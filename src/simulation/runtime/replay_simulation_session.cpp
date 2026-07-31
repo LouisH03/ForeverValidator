@@ -1506,6 +1506,16 @@ ReplaySimulationSession::CurrentState() const {
     result.finishTime = impl->instance.runtime->FinishTime();
     result.stuntsScore = impl->instance.runtime->StuntsScore();
     result.respawnCount = impl->instance.incrementalRespawnCount;
+    const ReplayRaceCameraVehicleState camera =
+            impl->instance.runtime->CurrentRaceCameraState();
+    result.signedSpeed = camera.signedSpeed;
+    result.turbo = camera.turbo;
+    result.cameraFlightTransition = camera.cameraFlightTransition;
+    result.burning = camera.burning;
+    result.gearChanged = camera.gearChanged;
+    result.wheelContact = camera.wheelContact;
+    result.wheelHasSurface = camera.wheelHasSurface;
+    result.cameraSupportUp = camera.cameraSupportUp;
     return result;
 }
 

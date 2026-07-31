@@ -3,6 +3,7 @@
 
 // This API is experimental. It may change without compatibility guarantees.
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -101,6 +102,19 @@ struct PhysicsSandboxCarState {
     Vector3 angularSpeed{};
     Vector3 force{};
     Vector3 torque{};
+
+    // Vehicle signals consumed by the public race-camera controllers. These
+    // are exposed with the simulated car state so callers can reproduce the
+    // game's airborne, turbo, and gear-transition camera behavior without
+    // depending on engine-private vehicle structures.
+    float signedSpeed = 0.0f;
+    float turbo = 0.0f;
+    float cameraFlightTransition = 0.0f;
+    bool burning = false;
+    bool gearChanged = false;
+    std::array<bool, 4> wheelContact{{true, true, true, true}};
+    std::array<bool, 4> wheelHasSurface{{true, true, true, true}};
+    Vector3 cameraSupportUp{0.0f, 1.0f, 0.0f};
 };
 
 struct PhysicsSandboxCollisionTriangle {
