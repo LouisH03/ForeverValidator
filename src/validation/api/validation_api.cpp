@@ -1996,6 +1996,27 @@ PhysicsSandboxResult<PhysicsSandboxStateView> PhysicsSandbox::LoadReplay(
     }
 }
 
+PhysicsSandboxResult<std::string> PhysicsSandbox::ReadMapName()
+        const noexcept {
+    try {
+        if (!impl_ || !impl_->loaded) {
+            return PhysicsSandboxResult<std::string>::Failure(
+                    SandboxError(PhysicsSandboxErrorCode::InvalidSandbox,
+                                 "sandbox has no loaded map name"));
+        }
+        return PhysicsSandboxResult<std::string>::Success(
+                impl_->challengeMetadata.mapName);
+    } catch (const std::bad_alloc &) {
+        return PhysicsSandboxResult<std::string>::Failure(
+                SandboxError(PhysicsSandboxErrorCode::AllocationFailed,
+                             "could not copy sandbox map name"));
+    } catch (...) {
+        return PhysicsSandboxResult<std::string>::Failure(
+                SandboxError(PhysicsSandboxErrorCode::UnexpectedFailure,
+                             "unexpected sandbox map name read failure"));
+    }
+}
+
 PhysicsSandboxResult<std::vector<PhysicsSandboxInputEvent>>
 PhysicsSandbox::ReadInputs() const noexcept {
     try {

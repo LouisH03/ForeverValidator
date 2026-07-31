@@ -493,6 +493,8 @@ public:
     PhysicsSandboxResult<PhysicsSandboxStateView> LoadReplay(
             ByteView replayBytes,
             const ReplayIdentity &identity) noexcept;
+    PhysicsSandboxResult<std::string> ReadMapName()
+            const noexcept;
     PhysicsSandboxResult<std::vector<PhysicsSandboxInputEvent>> ReadInputs()
             const noexcept;
     PhysicsSandboxResult<std::size_t> ReplaceInputs(
