@@ -16,7 +16,10 @@ enum class Status : std::uint32_t {
     CollisionFailureBase = 200u,
 };
 
-template <bool ReuseWheelPassInvariants = false>
+template <
+        bool ReuseWheelPassInvariants = false,
+        CudaHandlingSpecialization Handling =
+                CudaHandlingSpecialization::Generic>
 __device__ inline vehicle::ForceStatus ForcePass(
         CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration,
@@ -26,7 +29,8 @@ __device__ inline vehicle::ForceStatus ForcePass(
         return vehicle::ForceStatus::Success;
     }
     return vehicle::ComputeForcesModel6<
-            ReuseWheelPassInvariants>(
+            ReuseWheelPassInvariants,
+            Handling>(
             candidate, configuration, dt);
 }
 
@@ -34,6 +38,11 @@ template <
         bool TrackCollisionDiagnostics = true,
         bool ReuseWheelPassInvariants = false,
         bool TrustedInputs = false,
+        bool CompactReplacements = false,
+        bool EightOrderedEllipsoids = false,
+        bool WarpCoherentAcceleration = false,
+        CudaHandlingSpecialization Handling =
+                CudaHandlingSpecialization::Generic,
         typename Scratch = collision::CudaCollisionScratch>
 __device__ inline Status CollisionSubstep(
         const CudaPackedSceneHeader *scene,
@@ -42,7 +51,9 @@ __device__ inline Status CollisionSubstep(
         float dt,
         Scratch &scratch) {
     const vehicle::ForceStatus forceStatus =
-            ForcePass<ReuseWheelPassInvariants>(
+            ForcePass<
+                    ReuseWheelPassInvariants,
+                    Handling>(
                     candidate, configuration, dt);
     if (forceStatus != vehicle::ForceStatus::Success) {
         return static_cast<Status>(
@@ -50,18 +61,21 @@ __device__ inline Status CollisionSubstep(
                         Status::UnsupportedForceBase) +
                 static_cast<std::uint32_t>(forceStatus));
     }
-    dynamics::PreCollision(
+    dynamics::PreCollision<CompactReplacements>(
             candidate.body, scratch, dt);
     collision::Status collisionStatus =
             collision::Detect<
                     TrackCollisionDiagnostics,
-                    TrustedInputs>(
+                    TrustedInputs,
+                    EightOrderedEllipsoids,
+                    WarpCoherentAcceleration>(
                     scene, configuration, candidate, scratch);
     if (collisionStatus == collision::Status::Success) {
         collisionStatus =
                 collision::Respond<
                         TrackCollisionDiagnostics,
-                        TrustedInputs>(
+                        TrustedInputs,
+                        CompactReplacements>(
                         scene, configuration, candidate, scratch);
     }
     if (collisionStatus != collision::Status::Success) {
@@ -70,7 +84,7 @@ __device__ inline Status CollisionSubstep(
                         Status::CollisionFailureBase) +
                 static_cast<std::uint32_t>(collisionStatus));
     }
-    dynamics::PostCollision(
+    dynamics::PostCollision<CompactReplacements>(
             candidate.body, scratch);
     return Status::Success;
 }
@@ -79,6 +93,12 @@ template <
         bool TrackCollisionDiagnostics = true,
         bool ReuseWheelPassInvariants = false,
         bool TrustedInputs = false,
+        bool CompactReplacements = false,
+        bool EightOrderedEllipsoids = false,
+        bool WarpCoherentAcceleration = false,
+        bool WriteOutputSnapshots = true,
+        CudaHandlingSpecialization Handling =
+                CudaHandlingSpecialization::Generic,
         typename Scratch = collision::CudaCollisionScratch>
 __device__ inline Status Step(
         const CudaPackedSceneHeader *scene,
@@ -120,7 +140,11 @@ __device__ inline Status Step(
                         CollisionSubstep<
                                 TrackCollisionDiagnostics,
                                 ReuseWheelPassInvariants,
-                                TrustedInputs>(
+                                TrustedInputs,
+                                CompactReplacements,
+                                EightOrderedEllipsoids,
+                                WarpCoherentAcceleration,
+                                Handling>(
                                 scene, configuration, candidate,
                                 split, scratch);
                 if (status != Status::Success) return status;
@@ -131,7 +155,11 @@ __device__ inline Status Step(
                 CollisionSubstep<
                         TrackCollisionDiagnostics,
                         ReuseWheelPassInvariants,
-                        TrustedInputs>(
+                        TrustedInputs,
+                        CompactReplacements,
+                        EightOrderedEllipsoids,
+                        WarpCoherentAcceleration,
+                        Handling>(
                         scene, configuration, candidate,
                         remaining, scratch);
         if (finalStatus != Status::Success) {
@@ -140,7 +168,11 @@ __device__ inline Status Step(
         candidate.body.write = candidate.body.temporary;
     }
     if (candidate.vehicle.mobil.physicsUpdatesEnabled) {
-        vehicle::AfterContacts(candidate, configuration);
+        if constexpr (WriteOutputSnapshots) {
+            vehicle::AfterContacts(candidate, configuration);
+        } else {
+            vehicle::AfterContactsWithoutSnapshots(candidate);
+        }
     }
     return Status::Success;
 }

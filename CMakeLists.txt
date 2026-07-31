@@ -107,6 +107,49 @@ target_link_libraries(forevervalidator_core
     PUBLIC OpenSSL::Crypto ZLIB::ZLIB)
 forevervalidator_configure_target(forevervalidator_core)
 if(FOREVERVALIDATOR_ENABLE_CUDA)
+    set(FOREVERVALIDATOR_CUDA_SEARCH_LTO_IR
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/forevervalidator_cuda_search.ltoir")
+    set(FOREVERVALIDATOR_CUDA_SEARCH_LTO_HEADER
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/forevervalidator_cuda_search_lto_ir.h")
+    file(GLOB_RECURSE FOREVERVALIDATOR_CUDA_SPECIALIZATION_HEADERS
+        CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/*.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/*.cuh")
+    add_custom_command(
+        OUTPUT "${FOREVERVALIDATOR_CUDA_SEARCH_LTO_IR}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory
+                "${CMAKE_CURRENT_BINARY_DIR}/generated"
+        COMMAND "${CMAKE_CUDA_COMPILER}"
+                -O3 -DNDEBUG -std=c++17 -arch=sm_75
+                --fmad=false --prec-div=true --prec-sqrt=true --ftz=false
+                -DFOREVERVALIDATOR_HAS_CUDA=1
+                -DFOREVERVALIDATOR_RELEASE_IPO_BUILD=1
+                -DFOREVERVALIDATOR_CUDA_RESEARCH_SESSION_LTO=1
+                -DNOMINMAX -DOPENSSL_SUPPRESS_DEPRECATED
+                "-I${CMAKE_CURRENT_SOURCE_DIR}/include"
+                "-I${CMAKE_CURRENT_SOURCE_DIR}/src"
+                -dlto -ltoir
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_search_executor.cu"
+                -o "${FOREVERVALIDATOR_CUDA_SEARCH_LTO_IR}"
+        DEPENDS
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_search_executor.cu"
+                ${FOREVERVALIDATOR_CUDA_SPECIALIZATION_HEADERS}
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${FOREVERVALIDATOR_CUDA_SEARCH_LTO_HEADER}"
+        COMMAND "${CMAKE_COMMAND}"
+                "-DINPUT=${FOREVERVALIDATOR_CUDA_SEARCH_LTO_IR}"
+                "-DOUTPUT=${FOREVERVALIDATOR_CUDA_SEARCH_LTO_HEADER}"
+                -DSYMBOL=ForeverValidatorCudaSearchLtoIr
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_binary.cmake"
+        DEPENDS
+                "${FOREVERVALIDATOR_CUDA_SEARCH_LTO_IR}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_binary.cmake"
+        VERBATIM)
+    add_custom_target(forevervalidator_cuda_search_lto
+        DEPENDS "${FOREVERVALIDATOR_CUDA_SEARCH_LTO_HEADER}")
+    add_dependencies(forevervalidator_core
+        forevervalidator_cuda_search_lto)
     target_sources(forevervalidator_core PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_backend.cu"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_arithmetic_certification.cu"
@@ -118,9 +161,13 @@ if(FOREVERVALIDATOR_ENABLE_CUDA)
         "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_vehicle_force_certification.cu"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_stunt_certification.cu"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_scene_storage.cu"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_session_specialization.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_search_executor.cu"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_timeline_executor.cu")
-    target_link_libraries(forevervalidator_core PUBLIC CUDA::cudart)
+    target_include_directories(forevervalidator_core PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    target_link_libraries(forevervalidator_core PUBLIC
+        CUDA::cudart CUDA::cuda_driver CUDA::nvrtc CUDA::nvJitLink)
     target_compile_definitions(forevervalidator_core PUBLIC
         FOREVERVALIDATOR_HAS_CUDA=1)
     target_compile_options(forevervalidator_core PRIVATE

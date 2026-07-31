@@ -157,7 +157,8 @@ CudaStateConversionResult EncodeBody(
 
 CudaStateConversionResult EncodeVehicle(
         const ReplayVehicleSimulation::RuntimeClone &source,
-        CudaVehicleState &destination) {
+        CudaVehicleState &destination,
+        CudaVehiclePassthroughState &passthrough) {
     const CSceneVehicleCar::RuntimeClone &car = source.car;
     if (car.wheels.size() > std::size(destination.wheels.values) ||
         source.wheelSurfaces.movedByUpdateSurface.size() !=
@@ -169,13 +170,13 @@ CudaStateConversionResult EncodeVehicle(
               car.vehicle.vehicleEvents.end(),
               destination.vehicleEvents);
     destination.water = car.vehicle.water;
-    destination.updateAsync = car.vehicle.updateAsync;
-    destination.networked = car.vehicle.networked;
-    destination.predictionDelayTicks =
+    passthrough.updateAsync = car.vehicle.updateAsync;
+    passthrough.networked = car.vehicle.networked;
+    passthrough.predictionDelayTicks =
             car.vehicle.predictionDelayTicks;
     EncodeOptional(car.vehicle.stateSampleWindow,
-                   destination.stateSampleWindow);
-    destination.asyncPeriodSeconds = car.vehicle.asyncPeriodSeconds;
+                   passthrough.stateSampleWindow);
+    passthrough.asyncPeriodSeconds = car.vehicle.asyncPeriodSeconds;
     destination.wheels.count =
             static_cast<std::uint32_t>(car.wheels.size());
     for (std::size_t index = 0u; index < car.wheels.size(); ++index) {
@@ -193,8 +194,10 @@ CudaStateConversionResult EncodeVehicle(
         wheel.realTime = sourceWheel.realTimeState;
         wheel.previousPhysics = sourceWheel.previousPhysicsState;
         wheel.currentPhysics = sourceWheel.currentPhysicsState;
-        wheel.previousAsync = sourceWheel.previousAsyncState;
-        wheel.currentAsync = sourceWheel.asyncState;
+        passthrough.wheels[index].previousAsync =
+                sourceWheel.previousAsyncState;
+        passthrough.wheels[index].currentAsync =
+                sourceWheel.asyncState;
         wheel.surfaceMovedByUpdate =
                 source.wheelSurfaces.movedByUpdateSurface[index];
     }
@@ -207,9 +210,9 @@ CudaStateConversionResult EncodeVehicle(
     EncodeFrame(car.frameHistory.physicsCurrent,
                 destination.frameHistory.physicsCurrent);
     EncodeFrame(car.frameHistory.asyncCurrent,
-                destination.frameHistory.asyncCurrent);
+                passthrough.asyncCurrent);
     EncodeFrame(car.frameHistory.asyncPrevious,
-                destination.frameHistory.asyncPrevious);
+                passthrough.asyncPrevious);
     destination.engine = car.engine;
     destination.reverseGearSpeedThreshold =
             car.reverseGearSpeedThreshold;
@@ -355,6 +358,7 @@ void DecodeBody(
 }
 
 void DecodeVehicle(const CudaVehicleState &source,
+                   const CudaVehiclePassthroughState &passthrough,
                    ReplayVehicleSimulation::RuntimeClone &destination) {
     CSceneVehicleCar::RuntimeClone &car = destination.car;
     car.vehicle.mobil = source.mobil;
@@ -362,12 +366,14 @@ void DecodeVehicle(const CudaVehicleState &source,
               std::end(source.vehicleEvents),
               car.vehicle.vehicleEvents.begin());
     car.vehicle.water = source.water;
-    car.vehicle.updateAsync = source.updateAsync;
-    car.vehicle.networked = source.networked;
-    car.vehicle.predictionDelayTicks = source.predictionDelayTicks;
+    car.vehicle.updateAsync = passthrough.updateAsync;
+    car.vehicle.networked = passthrough.networked;
+    car.vehicle.predictionDelayTicks =
+            passthrough.predictionDelayTicks;
     car.vehicle.stateSampleWindow =
-            DecodeOptional(source.stateSampleWindow);
-    car.vehicle.asyncPeriodSeconds = source.asyncPeriodSeconds;
+            DecodeOptional(passthrough.stateSampleWindow);
+    car.vehicle.asyncPeriodSeconds =
+            passthrough.asyncPeriodSeconds;
     car.wheels.resize(source.wheels.count);
     destination.wheelSurfaces.movedByUpdateSurface.assign(
             source.wheels.count, false);
@@ -385,8 +391,10 @@ void DecodeVehicle(const CudaVehicleState &source,
         target.realTimeState = wheel.realTime;
         target.previousPhysicsState = wheel.previousPhysics;
         target.currentPhysicsState = wheel.currentPhysics;
-        target.previousAsyncState = wheel.previousAsync;
-        target.asyncState = wheel.currentAsync;
+        target.previousAsyncState =
+                passthrough.wheels[index].previousAsync;
+        target.asyncState =
+                passthrough.wheels[index].currentAsync;
         destination.wheelSurfaces.movedByUpdateSurface[index] =
                 wheel.surfaceMovedByUpdate;
     }
@@ -398,9 +406,9 @@ void DecodeVehicle(const CudaVehicleState &source,
                 car.frameHistory.physicsPrevious);
     DecodeFrame(source.frameHistory.physicsCurrent,
                 car.frameHistory.physicsCurrent);
-    DecodeFrame(source.frameHistory.asyncCurrent,
+    DecodeFrame(passthrough.asyncCurrent,
                 car.frameHistory.asyncCurrent);
-    DecodeFrame(source.frameHistory.asyncPrevious,
+    DecodeFrame(passthrough.asyncPrevious,
                 car.frameHistory.asyncPrevious);
     car.engine = source.engine;
     car.reverseGearSpeedThreshold = source.reverseGearSpeedThreshold;
@@ -563,8 +571,10 @@ CudaStateConversionResult EncodeCudaCandidateState(
     if (result != CudaStateConversionResult::Success) {
         return result;
     }
-    result = EncodeVehicle(source.runtime.vehicle,
-                           destination->vehicle);
+    result = EncodeVehicle(
+            source.runtime.vehicle,
+            destination->vehicle,
+            destination->vehiclePassthrough);
     if (result != CudaStateConversionResult::Success) {
         return result;
     }
@@ -609,7 +619,10 @@ CudaStateConversionResult DecodeCudaCandidateState(
         DecodeBody(
                 source.body, source.collisionReplacementOverflow,
                 result.runtime.body);
-        DecodeVehicle(source.vehicle, result.runtime.vehicle);
+        DecodeVehicle(
+                source.vehicle,
+                source.vehiclePassthrough,
+                result.runtime.vehicle);
         DecodeRace(
                 source.race, source.stunts,
                 source.stuntEvents,

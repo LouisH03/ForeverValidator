@@ -151,6 +151,24 @@ __device__ inline void ResetWheelSnapshot(State &state) {
     state.visualRotation = IdentityMatrix();
 }
 
+__device__ inline void ResetVehiclePassthrough(
+        CudaCandidatePhysicsState &) {}
+
+__device__ inline void ResetVehiclePassthrough(
+        CudaCandidateState &candidate) {
+    ResetFrame(candidate.vehiclePassthrough.asyncCurrent);
+    ResetFrame(candidate.vehiclePassthrough.asyncPrevious);
+    for (std::uint32_t index = 0u;
+         index < facts::WheelCount(candidate.vehicle); ++index) {
+        ResetWheelSnapshot(
+                candidate.vehiclePassthrough.
+                        wheels[index].previousAsync);
+        ResetWheelSnapshot(
+                candidate.vehiclePassthrough.
+                        wheels[index].currentAsync);
+    }
+}
+
 __device__ inline void ResetWheel(
         CudaWheelState &wheel,
         const CudaPackedStaticConfigurationHeader *configuration) {
@@ -174,14 +192,13 @@ __device__ inline void ResetWheel(
     wheel.realTime.contactNormalSampleCount = 0u;
     wheel.realTime.rejectedNormalContact = false;
     wheel.realTime.rejectedNormalContactPoint = {};
-    ResetWheelSnapshot(wheel.previousAsync);
-    ResetWheelSnapshot(wheel.currentAsync);
     ResetWheelSnapshot(wheel.previousPhysics);
     ResetWheelSnapshot(wheel.currentPhysics);
 }
 
+template<typename Candidate>
 __device__ inline void VehicleReset(
-        CudaCandidatePhysicsState &candidate,
+        Candidate &candidate,
         const CudaPackedStaticConfigurationHeader *configuration) {
     CudaVehicleState &vehicle = candidate.vehicle;
     vehicle.controls.lowSpeedGateA = 0.0f;
@@ -193,8 +210,7 @@ __device__ inline void VehicleReset(
     vehicle.controls.forcedLowSpeedFriction = false;
     vehicle.water.splashPending = false;
 
-    ResetFrame(vehicle.frameHistory.asyncCurrent);
-    ResetFrame(vehicle.frameHistory.asyncPrevious);
+    ResetVehiclePassthrough(candidate);
     ResetFrame(vehicle.frameHistory.physicsPrevious);
     ResetFrame(vehicle.frameHistory.physicsCurrent);
     vehicle.frameHistory.physicsCurrent.vehicleEvent0Value =
@@ -269,7 +285,7 @@ __device__ inline void VehicleReset(
     vehicle.contacts.wheelContactCount = 0u;
     vehicle.feedback.surfaceAccumulator = 0.0f;
     for (std::uint32_t index = 0u;
-         index < vehicle.wheels.count; ++index) {
+         index < facts::WheelCount(vehicle); ++index) {
         ResetWheel(vehicle.wheels.values[index], configuration);
     }
     vehicle.engine.useLowSpeedGateB = false;
@@ -311,8 +327,35 @@ __device__ inline void ApplyControls(
             controls.steering;
 }
 
-__device__ inline void PrepareStep(
+__device__ inline void RefreshPhysicalParameters(
+        CudaCandidatePhysicsState &candidate) {
+    candidate.body.physicalParameters.mass =
+            candidate.body.parameters.mass;
+    candidate.body.physicalParameters.impulseInertia =
+            candidate.body.parameters.bodyInertiaLike;
+    candidate.body.physicalParameters.linearFluidFriction =
+            candidate.body.parameters.linearDampingScale;
+    candidate.body.physicalParameters.physicalResponseCoefA =
+            candidate.body.parameters.angularDampingScale;
+    candidate.body.physicalParameters.physicalResponseCoefB =
+            candidate.body.parameters.maxStepDistance;
+    candidate.body.physicalParameters.
+            vehicleContactFeedbackScale =
+            candidate.body.parameters.forceScale;
+    candidate.body.physicalParameters.localCenterOfMass =
+            candidate.body.parameters.localCenterOfMass;
+}
+
+__device__ inline void PrepareSteadyStep(
         CudaCandidatePhysicsState &candidate,
+        const CudaControlTick &tick) {
+    ApplyControls(candidate, tick.controls);
+    RefreshPhysicalParameters(candidate);
+}
+
+template<typename Candidate>
+__device__ inline void PrepareStep(
+        Candidate &candidate,
         const CudaControlTick &tick,
         const CudaPackedStaticConfigurationHeader *configuration) {
     ApplyControls(candidate, tick.controls);
@@ -348,25 +391,12 @@ __device__ inline void PrepareStep(
         candidate.vehicle.integration.speedBlocked = false;
         detail::VehicleReset(candidate, configuration);
     }
-    candidate.body.physicalParameters.mass =
-            candidate.body.parameters.mass;
-    candidate.body.physicalParameters.impulseInertia =
-            candidate.body.parameters.bodyInertiaLike;
-    candidate.body.physicalParameters.linearFluidFriction =
-            candidate.body.parameters.linearDampingScale;
-    candidate.body.physicalParameters.physicalResponseCoefA =
-            candidate.body.parameters.angularDampingScale;
-    candidate.body.physicalParameters.physicalResponseCoefB =
-            candidate.body.parameters.maxStepDistance;
-    candidate.body.physicalParameters.
-            vehicleContactFeedbackScale =
-            candidate.body.parameters.forceScale;
-    candidate.body.physicalParameters.localCenterOfMass =
-            candidate.body.parameters.localCenterOfMass;
+    RefreshPhysicalParameters(candidate);
 }
 
+template<typename Candidate>
 __device__ inline bool Respawn(
-        CudaCandidatePhysicsState &candidate,
+        Candidate &candidate,
         const CudaPackedStaticConfigurationHeader *configuration) {
     if (!candidate.race.playerSpawnLocation.present) {
         return false;

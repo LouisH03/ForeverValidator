@@ -6,6 +6,40 @@
 #include "simulation/backends/cuda/cuda_state_layout.h"
 
 namespace forevervalidator::simulation::cuda::dynamics {
+
+__device__ inline bool IsFrozen(
+        const CudaDynamicBodyState &body) {
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_FULL_ANGULAR_DYNAMICS)
+    return false;
+#else
+    return body.dynamicType ==
+            static_cast<std::uint32_t>(
+                    CHmsDyna::EDynamicType_Frozen);
+#endif
+}
+
+__device__ inline bool IsLinearOnly(
+        const CudaDynamicBodyState &body) {
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_FULL_ANGULAR_DYNAMICS)
+    return false;
+#else
+    return body.dynamicType ==
+            static_cast<std::uint32_t>(
+                    CHmsDyna::EDynamicType_LinearOnly);
+#endif
+}
+
+__device__ inline bool IsFullAngular(
+        const CudaDynamicBodyState &body) {
+#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_FULL_ANGULAR_DYNAMICS)
+    return true;
+#else
+    return body.dynamicType ==
+            static_cast<std::uint32_t>(
+                    CHmsDyna::EDynamicType_FullAngularDynamics);
+#endif
+}
+
 namespace detail {
 
 __device__ inline float Dot(const GmVec3 &left,
@@ -92,9 +126,7 @@ __device__ inline void IntegrateStep(
         const CHmsDyna::CHmsStateDyna &source,
         CHmsDyna::CHmsStateDyna &destination,
         float dt) {
-    if (body.dynamicType ==
-            static_cast<std::uint32_t>(
-                    CHmsDyna::EDynamicType_Frozen)) {
+    if (IsFrozen(body)) {
         destination = source;
         return;
     }
@@ -132,9 +164,7 @@ __device__ inline void IntegrateStep(
     destination.linearSpeed.z =
             source.linearSpeed.z + forceDeltaZ;
 
-    if (body.dynamicType ==
-            static_cast<std::uint32_t>(
-                    CHmsDyna::EDynamicType_LinearOnly)) {
+    if (IsLinearOnly(body)) {
         destination.rotation = source.rotation;
         return;
     }
@@ -254,15 +284,22 @@ __device__ inline void PreCollision(
     overflowReplacements.count = 0u;
 }
 
-template<typename Scratch>
+template<bool CompactReplacements = false, typename Scratch>
 __device__ inline void PreCollision(
         CudaDynamicBodyState &body,
         Scratch &scratch,
         float dt) {
     const CHmsDyna::CHmsStateDyna source = body.current;
     IntegrateStep(body, source, body.current, dt);
-    body.collisionReplacements = {};
+    if constexpr (!CompactReplacements) {
+        body.collisionReplacements = {};
+    }
     scratch.replacementOverflowCount = 0u;
+    if constexpr (CompactReplacements) {
+        scratch.replacementSumX = 0.0f;
+        scratch.replacementSumY = 0.0f;
+        scratch.replacementSumZ = 0.0f;
+    }
 }
 
 __device__ inline void AccumulateReplacement(
@@ -401,13 +438,23 @@ __device__ inline void PostCollision(
     body.current.position.z += replacement.z;
 }
 
-template<typename Scratch>
+template<bool CompactReplacements = false, typename Scratch>
 __device__ inline void PostCollision(
         CudaDynamicBodyState &body,
         const Scratch &scratch) {
-    const GmVec3 replacement =
-            SynthesizeReplacement(
+    const GmVec3 replacement = [&]() {
+        if constexpr (CompactReplacements) {
+            return scratch.replacementOverflowCount == 0u
+                    ? GmVec3{}
+                    : FinalizeReplacement(
+                              scratch.replacementSumX,
+                              scratch.replacementSumY,
+                              scratch.replacementSumZ);
+        } else {
+            return SynthesizeReplacement(
                     body.collisionReplacements, scratch);
+        }
+    }();
     body.current.position.x += replacement.x;
     body.current.position.y =
             replacement.y + body.current.position.y;

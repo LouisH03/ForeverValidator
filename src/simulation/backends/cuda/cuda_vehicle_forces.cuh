@@ -346,7 +346,7 @@ __device__ inline int ApplyWaterForces(
                 0.0f &&
         localSpeed.y < -1.0e-5f) {
         const float horizontalThreshold =
-                configuration->tuning.water.
+                cuda::facts::Tuning(configuration).water.
                         splashHorizontalSpeedThreshold;
         bool applySplash = false;
         if (horizontalSpeedSq >
@@ -361,7 +361,7 @@ __device__ inline int ApplyWaterForces(
             applySplash = !(splashCurveInput < 0.0f);
         } else {
             const float totalThreshold =
-                    configuration->tuning.water.
+                    cuda::facts::Tuning(configuration).water.
                             splashTotalSpeedThreshold;
             const float totalSpeedSq =
                     linearSpeedWorld.x * linearSpeedWorld.x +
@@ -427,14 +427,14 @@ __device__ inline int ApplyWaterForces(
     const GmVec3 angularSpeed = WorldToLocal(
             candidate.body, candidate.body.current.angularSpeed);
     const float angularLinearScale =
-            -configuration->tuning.water.angularLinearDamping;
+            -cuda::facts::Tuning(configuration).water.angularLinearDamping;
     const float angularSpeedLen = exact::Sqrt(
             angularSpeed.x * angularSpeed.x +
             angularSpeed.y * angularSpeed.y +
             angularSpeed.z * angularSpeed.z);
     const float angularSpeedScale =
             -angularSpeedLen *
-            configuration->tuning.water.angularSpeedDamping;
+            cuda::facts::Tuning(configuration).water.angularSpeedDamping;
     const GmVec3 torque = {
             angularSpeed.x * angularLinearScale +
                     angularSpeed.x * angularSpeedScale,
@@ -446,7 +446,7 @@ __device__ inline int ApplyWaterForces(
 
     const GmVec3 buoyancyLocal = {
             0.0f,
-            -configuration->tuning.water.buoyancyForce,
+            -cuda::facts::Tuning(configuration).water.buoyancyForce,
             0.0f,
     };
     const GmVec3 buoyancy = {
@@ -510,7 +510,7 @@ __device__ inline float ClampSymmetric(
 __device__ inline bool IsGroundContact(
         const CudaVehicleState &vehicle) {
     for (std::uint32_t index = 0u;
-         index < vehicle.wheels.count; ++index) {
+         index < facts::WheelCount(vehicle); ++index) {
         if (vehicle.wheels.values[index].realTime.contactPresent) {
             return true;
         }
@@ -522,7 +522,7 @@ __device__ inline bool HasMaterialContact(
         const CudaVehicleState &vehicle,
         std::uint32_t material) {
     for (std::uint32_t index = 0u;
-         index < vehicle.wheels.count; ++index) {
+         index < facts::WheelCount(vehicle); ++index) {
         const auto &wheel = vehicle.wheels.values[index].realTime;
         if (wheel.contactPresent &&
             static_cast<std::uint32_t>(wheel.contactMaterial) ==
@@ -593,9 +593,13 @@ __device__ inline void CreateFakeContacts(
                     configuration,
                     configuration->fakeContactTextureRgb);
     for (std::uint32_t index = 0u;
-         index < vehicle.wheels.count; ++index) {
+         index < facts::WheelCount(vehicle); ++index) {
         CudaWheelState &wheel = vehicle.wheels.values[index];
         if (!wheel.realTime.contactPresent) continue;
+        const GmVec3 &restTranslation =
+                facts::Wheel(
+                        configuration,
+                        index).restSurfacePose.translation;
         const VehicleMaterialDefinition *material = Material(
                 configuration,
                 static_cast<std::uint32_t>(
@@ -608,25 +612,25 @@ __device__ inline void CreateFakeContacts(
         }
         const GmVec3 worldPoint = {
                 (candidate.body.write.rotation.basisX.x *
-                         wheel.restPose.translation.x +
+                         restTranslation.x +
                  candidate.body.write.rotation.basisY.x *
-                         wheel.restPose.translation.y) +
+                         restTranslation.y) +
                         candidate.body.write.rotation.basisZ.x *
-                                wheel.restPose.translation.z +
+                                restTranslation.z +
                         candidate.body.write.position.x,
                 (candidate.body.write.rotation.basisX.y *
-                         wheel.restPose.translation.x +
+                         restTranslation.x +
                  candidate.body.write.rotation.basisY.y *
-                         wheel.restPose.translation.y) +
+                         restTranslation.y) +
                         candidate.body.write.rotation.basisZ.y *
-                                wheel.restPose.translation.z +
+                                restTranslation.z +
                         candidate.body.write.position.y,
                 (candidate.body.write.rotation.basisX.z *
-                         wheel.restPose.translation.x +
+                         restTranslation.x +
                  candidate.body.write.rotation.basisY.z *
-                         wheel.restPose.translation.y) +
+                         restTranslation.y) +
                         candidate.body.write.rotation.basisZ.z *
-                                wheel.restPose.translation.z +
+                                restTranslation.z +
                         candidate.body.write.position.z,
         };
         const std::uint32_t pixelX = FakeContactTextureIndex(
@@ -649,7 +653,7 @@ __device__ inline void CreateFakeContacts(
         }
         collision::response_detail::Contact contact;
         contact.localNormal = {0.0f, 1.0f, 0.0f};
-        contact.localPoint = wheel.restPose.translation;
+        contact.localPoint = restTranslation;
         contact.localSpeed = {0.0f, -fakeSpeed, 0.0f};
         contact.peerMaterial =
                 static_cast<std::uint32_t>(
@@ -666,15 +670,30 @@ __device__ inline void CreateFakeContacts(
     }
 }
 
+template <
+        CudaHandlingSpecialization Handling =
+                CudaHandlingSpecialization::Generic>
 __device__ inline void ApplyFrictionForces(
         CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration,
         const GmVec3 &speed) {
     CudaVehicleState &vehicle = candidate.vehicle;
-    if ((configuration->tuning.handlingModel ==
-                 CSceneVehicleCarHandlingModel_SlipResponse ||
-         configuration->tuning.handlingModel ==
-                 CSceneVehicleCarHandlingModel_GearedDrive) &&
+    bool slipHandling = false;
+    if constexpr (
+            Handling ==
+                    CudaHandlingSpecialization::GearedDriveDry ||
+            Handling ==
+                    CudaHandlingSpecialization::GearedDriveWater) {
+        slipHandling = true;
+    } else if constexpr (
+            Handling == CudaHandlingSpecialization::Generic) {
+        slipHandling =
+                cuda::facts::Tuning(configuration).handlingModel ==
+                        CSceneVehicleCarHandlingModel_SlipResponse ||
+                cuda::facts::Tuning(configuration).handlingModel ==
+                        CSceneVehicleCarHandlingModel_GearedDrive;
+    }
+    if (slipHandling &&
         vehicle.controls.noGroundFrictionGuard &&
         !IsGroundContact(vehicle)) {
         return;
@@ -696,14 +715,14 @@ __device__ inline void ApplyFrictionForces(
             force.y = force.y * inverseLength;
             force.z = inverseLength * force.z;
             const float frictionScale =
-                    -configuration->tuning.
+                    -cuda::facts::Tuning(configuration).
                             lowSpeedFrictionMagnitude;
             force.x = frictionScale * force.x;
             force.y = force.y * frictionScale;
             force.z = frictionScale * force.z;
             if (!vehicle.controls.forcedLowSpeedFriction) {
                 const float dampingScale =
-                        -configuration->tuning.
+                        -cuda::facts::Tuning(configuration).
                                 lowSpeedLinearDamping;
                 const GmVec3 damping = {
                         speed.x * dampingScale,
@@ -717,9 +736,7 @@ __device__ inline void ApplyFrictionForces(
             AddCentralForce(candidate, force);
         }
     }
-    if (configuration->tuning.handlingModel <
-        static_cast<std::uint32_t>(
-                CSceneVehicleCarHandlingModel_SlipResponse)) {
+    if (!slipHandling) {
         if (vehicle.contacts.lateralSlowDownContactActive) {
             const float scale = -tuning::EvaluateSpeed(
                     configuration,
@@ -742,7 +759,7 @@ __device__ inline void ApplyFrictionForces(
         const std::uint32_t elapsed =
                 tick -
                 vehicle.contacts.lateralSlowDownLastTick;
-        if (elapsed < configuration->tuning.slipResponse.
+        if (elapsed < cuda::facts::Tuning(configuration).slipResponse.
                               lateralSlowDownTickWindow) {
             const float speedSquared =
                     (speed.y * speed.y + speed.x * speed.x) +
@@ -806,7 +823,7 @@ __device__ inline void GroundMaterial(
     std::uint32_t count = 0u;
     const CudaVehicleState &vehicle = candidate.vehicle;
     for (std::uint32_t index = 0u;
-         index < vehicle.wheels.count; ++index) {
+         index < facts::WheelCount(vehicle); ++index) {
         if (!vehicle.wheels.values[index].realTime.contactPresent) {
             continue;
         }
@@ -859,15 +876,15 @@ __device__ inline void SlopeAdherence(
             static_cast<double>(exact::Sqrt(lengthSquared))));
     first = SlopeBlend(
             slope,
-            configuration->tuning.bodyAirResponse.
+            cuda::facts::Tuning(configuration).bodyAirResponse.
                     slopeAdherence1Min,
-            configuration->tuning.bodyAirResponse.
+            cuda::facts::Tuning(configuration).bodyAirResponse.
                     slopeAdherence1Max);
     second = SlopeBlend(
             slope,
-            configuration->tuning.bodyAirResponse.
+            cuda::facts::Tuning(configuration).bodyAirResponse.
                     slopeAdherence2Min,
-            configuration->tuning.bodyAirResponse.
+            cuda::facts::Tuning(configuration).bodyAirResponse.
                     slopeAdherence2Max);
 }
 
@@ -877,8 +894,8 @@ __device__ inline float VisualSteerYaw(
         const GmVec3 &linearSpeed) {
     const float denominator =
             fabsf(linearSpeed.z) *
-                    configuration->tuning.visual.wheelSpeedScale +
-            configuration->tuning.visual.wheelSpeedBase;
+                    cuda::facts::Tuning(configuration).visual.wheelSpeedScale +
+            cuda::facts::Tuning(configuration).visual.wheelSpeedBase;
     float asinValue = 0.0f;
     if (!(denominator < ScalarEpsilon)) {
         const float input = 1.0f / denominator;
@@ -893,17 +910,32 @@ __device__ inline float VisualSteerYaw(
     return -vehicle.controls.currentSteering * asinValue;
 }
 
+template <
+        CudaHandlingSpecialization Handling =
+                CudaHandlingSpecialization::Generic>
 __device__ inline void UpdateAirControl(
         CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration,
         const GmVec3 &angularSpeed,
         bool groundContact,
-        bool resetMemory) {
+    bool resetMemory) {
     CudaVehicleState &vehicle = candidate.vehicle;
-    if ((configuration->tuning.handlingModel ==
-                 CSceneVehicleCarHandlingModel_SlipResponse ||
-         configuration->tuning.handlingModel ==
-                 CSceneVehicleCarHandlingModel_GearedDrive) &&
+    bool slipHandling = false;
+    if constexpr (
+            Handling ==
+                    CudaHandlingSpecialization::GearedDriveDry ||
+            Handling ==
+                    CudaHandlingSpecialization::GearedDriveWater) {
+        slipHandling = true;
+    } else if constexpr (
+            Handling == CudaHandlingSpecialization::Generic) {
+        slipHandling =
+                cuda::facts::Tuning(configuration).handlingModel ==
+                        CSceneVehicleCarHandlingModel_SlipResponse ||
+                cuda::facts::Tuning(configuration).handlingModel ==
+                        CSceneVehicleCarHandlingModel_GearedDrive;
+    }
+    if (slipHandling &&
         vehicle.controls.noGroundFrictionGuard) {
         return;
     }
@@ -918,7 +950,7 @@ __device__ inline void UpdateAirControl(
         vehicle.airControl.memoryAngular = angularSpeed;
     } else if (
             tick - vehicle.airControl.memoryTick <
-            configuration->tuning.bodyAirResponse.
+            cuda::facts::Tuning(configuration).bodyAirResponse.
                     airControlMemoryTickWindow) {
         GmVec3 target = angularSpeed;
         bool strong = false;
@@ -927,7 +959,7 @@ __device__ inline void UpdateAirControl(
              vehicle.airControl.memoryAngular.y < 0.0f) ||
             (vehicle.controls.steeringControl < -ScalarEpsilon &&
              0.0f < vehicle.airControl.memoryAngular.y)) {
-            if (configuration->tuning.bodyAirResponse.
+            if (cuda::facts::Tuning(configuration).bodyAirResponse.
                         airControlYSwitchThreshold <
                 fabsf(angularSpeed.y)) {
                 strong = true;
@@ -950,10 +982,7 @@ __device__ inline void UpdateAirControl(
             vehicle.airControl.memoryAngular.y = angularSpeed.y;
         }
         target.y = vehicle.airControl.memoryAngular.y;
-        if (configuration->tuning.handlingModel ==
-                    CSceneVehicleCarHandlingModel_SlipResponse ||
-            configuration->tuning.handlingModel ==
-                    CSceneVehicleCarHandlingModel_GearedDrive) {
+        if (slipHandling) {
             if (ScalarEpsilon <
                         vehicle.controls.lowSpeedGateB &&
                 0.0f <
@@ -988,12 +1017,12 @@ __device__ inline void UpdateAirControl(
         if (length >= ScalarEpsilon) {
             const float inverse = 1.0f / length;
             const float quadratic =
-                    configuration->tuning.bodyAirResponse.
+                    cuda::facts::Tuning(configuration).bodyAirResponse.
                             airTorqueQuadraticCoef *
                     length * length;
             const float linear =
                     length *
-                    configuration->tuning.bodyAirResponse.
+                    cuda::facts::Tuning(configuration).bodyAirResponse.
                             airTorqueLinearCoef;
             const float magnitude = quadratic + linear;
             AddTorque(candidate, {
@@ -1033,7 +1062,7 @@ __device__ inline bool GroundContact(
         GmVec3 &peerAxis,
         std::uint32_t &peerCorpusId) {
     for (std::uint32_t index = 0u;
-         index < vehicle.wheels.count; ++index) {
+         index < facts::WheelCount(vehicle); ++index) {
         const auto &contact =
                 vehicle.wheels.values[index].realTime;
         if (contact.contactPresent &&
@@ -1105,8 +1134,8 @@ __device__ inline void ProcessTurboContacts(
                 peerAxis, peerCorpusId)) {
         EnableTurbo(
                 vehicle, tick,
-                configuration->tuning.turbo.durationA,
-                configuration->tuning.turbo.impulseScaleA *
+                cuda::facts::Tuning(configuration).turbo.durationA,
+                cuda::facts::Tuning(configuration).turbo.impulseScaleA *
                         peerAxis.z,
                 CSceneVehicleCar::ETurboType_Direct,
                 peerCorpusId);
@@ -1116,8 +1145,8 @@ __device__ inline void ProcessTurboContacts(
                 peerAxis, peerCorpusId)) {
         EnableTurbo(
                 vehicle, tick,
-                configuration->tuning.turbo.durationB,
-                configuration->tuning.turbo.impulseScaleB *
+                cuda::facts::Tuning(configuration).turbo.durationB,
+                cuda::facts::Tuning(configuration).turbo.impulseScaleB *
                         peerAxis.z,
                 CSceneVehicleCar::ETurboType_Direct,
                 peerCorpusId);
@@ -1127,8 +1156,8 @@ __device__ inline void ProcessTurboContacts(
                 peerAxis, peerCorpusId)) {
         EnableTurbo(
                 vehicle, tick,
-                configuration->tuning.turbo.durationA,
-                configuration->tuning.turbo.impulseScaleA *
+                cuda::facts::Tuning(configuration).turbo.durationA,
+                cuda::facts::Tuning(configuration).turbo.impulseScaleA *
                         peerAxis.z,
                 CSceneVehicleCar::ETurboType_Roulette,
                 peerCorpusId);
@@ -1160,23 +1189,23 @@ __device__ inline void UpdateImpactStates(
     auto &contacts = vehicle.contacts;
     contacts.frontWheelImpactState = ImpactSeverity(
             contacts.frontWheelImpactBucket,
-            configuration->tuning.contactResponse.
+            cuda::facts::Tuning(configuration).contactResponse.
                     wheelImpactFeedbackLowThreshold,
-            configuration->tuning.contactResponse.
+            cuda::facts::Tuning(configuration).contactResponse.
                     wheelImpactFeedbackHighThreshold,
             contacts.frontWheelImpactState);
     contacts.rearWheelImpactState = ImpactSeverity(
             contacts.rearWheelImpactBucket,
-            configuration->tuning.contactResponse.
+            cuda::facts::Tuning(configuration).contactResponse.
                     wheelImpactFeedbackLowThreshold,
-            configuration->tuning.contactResponse.
+            cuda::facts::Tuning(configuration).contactResponse.
                     wheelImpactFeedbackHighThreshold,
             contacts.rearWheelImpactState);
     contacts.bodyImpactState = ImpactSeverity(
             contacts.bodyImpactBucket,
-            configuration->tuning.contactResponse.
+            cuda::facts::Tuning(configuration).contactResponse.
                     bodyImpactFeedbackLowThreshold,
-            configuration->tuning.contactResponse.
+            cuda::facts::Tuning(configuration).contactResponse.
                     bodyImpactFeedbackHighThreshold,
             contacts.bodyImpactState);
     if (contacts.peakRearWheelImpactState <
@@ -1235,7 +1264,7 @@ __device__ inline void ApplySpecialContactResponse(
                 impulse.z *= inverse;
             }
             const float magnitude =
-                    configuration->tuning.contactResponse.
+                    cuda::facts::Tuning(configuration).contactResponse.
                             specialContactImpulseMagnitude;
             impulse.x *= magnitude;
             impulse.y *= magnitude;
@@ -1249,7 +1278,7 @@ __device__ inline void ApplySpecialContactResponse(
     case CSceneVehicleCarSpecialContactMode_SolidFeedback:
         candidate.body.physicalParameters.
                 vehicleContactFeedbackScale =
-                configuration->tuning.contactResponse.
+                cuda::facts::Tuning(configuration).contactResponse.
                         specialSolidFeedbackValue;
         candidate.body.parameters.forceScale =
                 candidate.body.physicalParameters.
@@ -1259,7 +1288,7 @@ __device__ inline void ApplySpecialContactResponse(
         vehicle.turbo.type =
                 CSceneVehicleCar::ETurboType_Direct;
         vehicle.turbo.impulseScale =
-                configuration->tuning.turbo.impulseScaleA;
+                cuda::facts::Tuning(configuration).turbo.impulseScaleA;
         break;
     default:
         break;
@@ -1314,7 +1343,7 @@ __device__ inline void UpdateFeedback(
                     candidate.body,
                     candidate.body.current.force);
     const float forceScale =
-            1.0f / configuration->tuning.feedback.forceDivisor;
+            1.0f / cuda::facts::Tuning(configuration).feedback.forceDivisor;
     vehicle.gearedDrive.scaledCurrentForce.x *= forceScale;
     vehicle.gearedDrive.scaledCurrentForce.y =
             forceScale *
@@ -1323,7 +1352,7 @@ __device__ inline void UpdateFeedback(
     const float rate = tuning::Evaluate(
             configuration, CudaTuningCurveId::SurfaceFeedback,
             surfaceFeedback) +
-            configuration->tuning.feedback.surfaceBaseRate;
+            cuda::facts::Tuning(configuration).feedback.surfaceBaseRate;
     const float accumulated =
             rate * dt + vehicle.feedback.surfaceAccumulator;
     vehicle.feedback.surfaceAccumulator =
@@ -1359,7 +1388,7 @@ __device__ inline void UpdateFeedback(
 __device__ inline void ClearContactScratch(
         CudaVehicleState &vehicle) {
     for (std::uint32_t index = 0u;
-         index < vehicle.wheels.count; ++index) {
+         index < facts::WheelCount(vehicle); ++index) {
         auto &wheel = vehicle.wheels.values[index].realTime;
         wheel.contactPresent = false;
         wheel.contactNormalSampleCount = 0u;
@@ -1386,42 +1415,46 @@ __device__ inline void WheelSuspensionForce(
         CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration,
         CudaWheelState &wheel,
+        std::uint32_t wheelIndex,
         const GmVec3 &sharedWorldCenter = {}) {
     if (!wheel.realTime.contactPresent) return;
     float forceY = 0.0f;
-    if (configuration->tuning.wheelForceMode ==
+    if (facts::WheelForceMode(configuration) ==
         static_cast<std::uint32_t>(
                 CSceneVehicleCarWheelForceMode_DirectSpring)) {
         forceY =
-                (configuration->tuning.suspension.
+                (cuda::facts::Tuning(configuration).suspension.
                          wheelRestDamperAbsorb -
                  wheel.realTime.damperAbsorb) *
-                (configuration->tuning.suspension.
+                (cuda::facts::Tuning(configuration).suspension.
                          wheelSpringCoef *
-                 configuration->tuning.suspension.
+                 cuda::facts::Tuning(configuration).suspension.
                          wheelStaticSpringScale);
     } else if (
-            configuration->tuning.wheelForceMode ==
+            facts::WheelForceMode(configuration) ==
                     static_cast<std::uint32_t>(
                             CSceneVehicleCarWheelForceMode_FollowAbsorb) ||
-            configuration->tuning.wheelForceMode ==
+            facts::WheelForceMode(configuration) ==
                     static_cast<std::uint32_t>(
                             CSceneVehicleCarWheelForceMode_FollowAbsorbWithImpulse)) {
         const float spring =
-                (configuration->tuning.suspension.
+                (cuda::facts::Tuning(configuration).suspension.
                          wheelRestDamperAbsorb -
                  wheel.realTime.damperAbsorb) *
-                configuration->tuning.suspension.
+                cuda::facts::Tuning(configuration).suspension.
                         wheelSpringCoef;
         forceY =
                 spring -
-                configuration->tuning.suspension.
+                cuda::facts::Tuning(configuration).suspension.
                         wheelDamperCoef *
                         wheel.realTime.damperVelocity;
     }
     AddForceAtPoint<ReuseWorldCenter>(
             candidate, {0.0f, forceY, 0.0f},
-            wheel.forceApplicationPoint, sharedWorldCenter);
+            facts::Wheel(
+                    configuration,
+                    wheelIndex).forceApplicationPoint,
+            sharedWorldCenter);
 }
 
 __device__ inline float BurnoutPhase(
@@ -1443,25 +1476,25 @@ __device__ inline float BurnoutDriveFade(
     if (vehicle.gearedDrive.burnoutPhase ==
         CSceneVehicleCarBurnoutPhase_TimedSpin) {
         return BurnoutFade(
-                configuration->tuning.gearedDrive.burnout.
+                cuda::facts::Tuning(configuration).gearedDrive.burnout.
                         driveFadeScale,
                 exact::Sin(BurnoutPhase(
                         tick -
                                 vehicle.gearedDrive.
                                         burnoutStartTick,
-                        configuration->tuning.gearedDrive.
+                        cuda::facts::Tuning(configuration).gearedDrive.
                                 burnout.durationTicks)));
     }
     if (vehicle.gearedDrive.burnoutPhase ==
         CSceneVehicleCarBurnoutPhase_ExitFade) {
         return BurnoutFade(
-                configuration->tuning.gearedDrive.burnout.
+                cuda::facts::Tuning(configuration).gearedDrive.burnout.
                         exitAccelFadeScale,
                 exact::Sin(BurnoutPhase(
                         tick -
                                 vehicle.gearedDrive.
                                         burnoutExitStartTick,
-                        configuration->tuning.gearedDrive.
+                        cuda::facts::Tuning(configuration).gearedDrive.
                                 burnout.exitDurationTicks)));
     }
     return 1.0f;
@@ -1476,13 +1509,13 @@ __device__ inline float BurnoutSideFade(
         return 1.0f;
     }
     return BurnoutFade(
-            configuration->tuning.gearedDrive.burnout.
+            cuda::facts::Tuning(configuration).gearedDrive.burnout.
                     sideForceFadeScale,
             exact::Cos(BurnoutPhase(
                     tick -
                             vehicle.gearedDrive.
                                     burnoutStartTick,
-                    configuration->tuning.gearedDrive.burnout.
+                    cuda::facts::Tuning(configuration).gearedDrive.burnout.
                             durationTicks *
                             2u)));
 }
@@ -1498,12 +1531,12 @@ __device__ inline float BurnoutExitAcceleration(
     const std::uint32_t quotient =
             (tick -
              vehicle.gearedDrive.burnoutExitStartTick) /
-            configuration->tuning.gearedDrive.burnout.
+            cuda::facts::Tuning(configuration).gearedDrive.burnout.
                     exitDurationTicks;
     const float delta =
             exact::FromUnsignedInteger(quotient) - 1.0f;
     return delta * delta *
-           configuration->tuning.gearedDrive.burnout.
+           cuda::facts::Tuning(configuration).gearedDrive.burnout.
                    exitBonusAccelScale;
 }
 
@@ -1516,7 +1549,7 @@ __device__ inline void AdvanceBurnout(
         CSceneVehicleCarBurnoutPhase_TimedSpin) {
         if (tick < vehicle.gearedDrive.burnoutStartTick ||
             tick - vehicle.gearedDrive.burnoutStartTick >=
-                    configuration->tuning.gearedDrive.burnout.
+                    cuda::facts::Tuning(configuration).gearedDrive.burnout.
                             durationTicks) {
             vehicle.gearedDrive.burnoutExitStartTick = tick;
             vehicle.gearedDrive.burnoutPhase =
@@ -1529,7 +1562,7 @@ __device__ inline void AdvanceBurnout(
         CSceneVehicleCarBurnoutPhase_ExitFade) {
         if (tick < vehicle.gearedDrive.burnoutExitStartTick ||
             tick - vehicle.gearedDrive.burnoutExitStartTick >=
-                    configuration->tuning.gearedDrive.burnout.
+                    cuda::facts::Tuning(configuration).gearedDrive.burnout.
                             exitDurationTicks) {
             vehicle.gearedDrive.burnoutPhase =
                     CSceneVehicleCarBurnoutPhase_Inactive;
@@ -1537,7 +1570,7 @@ __device__ inline void AdvanceBurnout(
             return;
         }
         for (std::uint32_t index = 0u;
-             index < vehicle.wheels.count; ++index) {
+             index < facts::WheelCount(vehicle); ++index) {
             vehicle.wheels.values[index].
                     realTime.slipping = true;
         }
@@ -1548,7 +1581,7 @@ __device__ inline bool AllWheelsMaterial(
         const CudaVehicleState &vehicle,
         std::uint32_t material) {
     for (std::uint32_t index = 0u;
-         index < vehicle.wheels.count; ++index) {
+         index < facts::WheelCount(vehicle); ++index) {
         const auto &wheel = vehicle.wheels.values[index].realTime;
         if (!wheel.contactPresent ||
             static_cast<std::uint32_t>(wheel.contactMaterial) !=
@@ -1604,12 +1637,12 @@ __device__ inline float SteerAssistRamp(
             linearSpeed.z * linearSpeed.z);
     if (speed < 0.7f) return 0.0f;
     if (speed >
-        configuration->tuning.steering.assistFullSpeed) {
+        cuda::facts::Tuning(configuration).steering.assistFullSpeed) {
         return 1.0f;
     }
     return exact::Sin(
             (speed /
-             configuration->tuning.steering.assistFullSpeed) *
+             cuda::facts::Tuning(configuration).steering.assistFullSpeed) *
             HalfPi);
 }
 
@@ -1638,7 +1671,7 @@ __device__ inline float SlipAccelerationMix(
     }
     const float slip =
             (requested - limit) / limit /
-            configuration->tuning.gearedDrive.slipRatioScale;
+            cuda::facts::Tuning(configuration).gearedDrive.slipRatioScale;
     return 1.0f - ClampZeroOne(slip);
 }
 
@@ -1647,9 +1680,9 @@ __device__ inline float SlippingWheelScale(
         const CudaPackedStaticConfigurationHeader *configuration) {
     float result = 1.0f;
     for (std::uint32_t index = 0u;
-         index < vehicle.wheels.count; ++index) {
+         index < facts::WheelCount(vehicle); ++index) {
         if (vehicle.wheels.values[index].realTime.slipping) {
-            result *= configuration->tuning.gearedDrive.
+            result *= cuda::facts::Tuning(configuration).gearedDrive.
                     perSlippingWheelAccelScale;
         }
     }
@@ -1659,7 +1692,7 @@ __device__ inline float SlippingWheelScale(
 __device__ inline void MarkAllWheelsSlipping(
         CudaVehicleState &vehicle) {
     for (std::uint32_t index = 0u;
-         index < vehicle.wheels.count; ++index) {
+         index < facts::WheelCount(vehicle); ++index) {
         vehicle.wheels.values[index].realTime.slipping = true;
     }
 }
@@ -1684,16 +1717,16 @@ __device__ inline ForceStatus ComputeModel3Ground(
         Model6Result &result) {
     CudaVehicleState &vehicle = candidate.vehicle;
     const bool lateralHandling =
-            configuration->tuning.handlingModel ==
+            cuda::facts::Tuning(configuration).handlingModel ==
             static_cast<std::uint32_t>(
                     CSceneVehicleCarHandlingModel_Lateral);
     for (std::uint32_t index = 0u;
-         index < vehicle.wheels.count; ++index) {
+         index < facts::WheelCount(vehicle); ++index) {
         CudaWheelState &wheel = vehicle.wheels.values[index];
         WheelSuspensionForce<ReuseWheelPassInvariants>(
-                candidate, configuration, wheel);
+                candidate, configuration, wheel, index);
         if (!wheel.realTime.contactPresent ||
-            !(configuration->tuning.gearedDrive.
+            !(cuda::facts::Tuning(configuration).gearedDrive.
                       lateralForceScale > 0.0f) ||
             !lateralHandling) {
             continue;
@@ -1707,7 +1740,7 @@ __device__ inline ForceStatus ComputeModel3Ground(
             return ForceStatus::MissingMaterial;
         }
         const float slipGrip = wheel.realTime.slipping
-                ? configuration->tuning.gearedDrive.
+                ? cuda::facts::Tuning(configuration).gearedDrive.
                           slippingSideFrictionScale
                 : 1.0f;
         const float maximumSide =
@@ -1726,9 +1759,9 @@ __device__ inline ForceStatus ComputeModel3Ground(
         lateral = wheel_detail::NormalizeOr(
                 lateral, {1.0f, 0.0f, 0.0f},
                 VectorEpsilonSquared);
-        if (wheel.axle ==
-            static_cast<std::uint32_t>(
-                    VehicleWheelAxle::Front)) {
+        if (facts::WheelAxle(
+                    configuration,
+                    index) == VehicleWheelAxle::Front) {
             const exact::SinCosResult sinCos =
                     exact::SinCos(visualSteerYaw);
             lateral = {
@@ -1739,7 +1772,7 @@ __device__ inline ForceStatus ComputeModel3Ground(
             };
         }
         float sideForce =
-                -configuration->tuning.gearedDrive.
+                -cuda::facts::Tuning(configuration).gearedDrive.
                          lateralForceScale *
                 0.5f *
                 ((linearSpeed.y * lateral.y +
@@ -1753,10 +1786,10 @@ __device__ inline ForceStatus ComputeModel3Ground(
                     SignNonNegative(sideForce) * maximumSide;
             sideForce =
                     (1.0f -
-                     configuration->tuning.gearedDrive.
+                     cuda::facts::Tuning(configuration).gearedDrive.
                              sideFrictionSlipBlend) *
                             capped +
-                    configuration->tuning.gearedDrive.
+                    cuda::facts::Tuning(configuration).gearedDrive.
                             sideFrictionSlipBlend *
                             sideForce;
             wheel.realTime.slipping = true;
@@ -1811,12 +1844,12 @@ __device__ inline ForceStatus ComputeModel3Ground(
         }
     }
     for (std::uint32_t index = 0u;
-         index < vehicle.wheels.count; ++index) {
+         index < facts::WheelCount(vehicle); ++index) {
         CudaWheelState &wheel = vehicle.wheels.values[index];
         const bool front =
-                wheel.axle ==
-                static_cast<std::uint32_t>(
-                        VehicleWheelAxle::Front);
+                facts::WheelAxle(
+                        configuration,
+                        index) == VehicleWheelAxle::Front;
         const float halfTrack =
                 (front
                          ? vehicle.gearedDrive.
@@ -1825,11 +1858,11 @@ __device__ inline ForceStatus ComputeModel3Ground(
                                    wheelLongitudinalSpan) *
                 0.5f;
         float steerRamp = 1.0f;
-        if (!(configuration->tuning.steering.
+        if (!(cuda::facts::Tuning(configuration).steering.
                       assistFullSpeed < speedMagnitude)) {
             steerRamp = exact::Sin(
                     (speedMagnitude /
-                     configuration->tuning.steering.
+                     cuda::facts::Tuning(configuration).steering.
                              assistFullSpeed) *
                     HalfPi);
         }
@@ -1844,23 +1877,23 @@ __device__ inline ForceStatus ComputeModel3Ground(
                 linearSpeed.x +
                 angularSpeed.y * halfTrack;
         float sideForce =
-                -configuration->tuning.gearedDrive.
+                -cuda::facts::Tuning(configuration).gearedDrive.
                          lateralForceScale *
                 0.5f * wheelSideSpeed;
         if (maximumSide < fabsf(sideForce)) {
             const float blended =
                     (1.0f -
-                     configuration->tuning.gearedDrive.
+                     cuda::facts::Tuning(configuration).gearedDrive.
                              driveSideFrictionSlipBlend) *
                             maximumSide +
-                    configuration->tuning.gearedDrive.
+                    cuda::facts::Tuning(configuration).gearedDrive.
                             driveSideFrictionSlipBlend *
                             fabsf(sideForce);
             sideForce =
                     SignNonNegative(sideForce) * blended;
         }
         float sideTorque =
-                configuration->tuning.gearedDrive.
+                cuda::facts::Tuning(configuration).gearedDrive.
                         sideForceToDriveTorqueScale *
                 sideForce;
         if (front) {
@@ -1870,7 +1903,7 @@ __device__ inline ForceStatus ComputeModel3Ground(
                     : -1.0f;
             const float slipScale =
                     wheel.realTime.slipping
-                    ? configuration->tuning.gearedDrive.
+                    ? cuda::facts::Tuning(configuration).gearedDrive.
                               slippingSteerTorqueScale
                     : 1.0f;
             const float steerTorque =
@@ -1904,7 +1937,7 @@ __device__ inline ForceStatus ComputeModel3Ground(
                     linearSpeed.z) *
             material.w;
     float sideSlowdownInput = fabsf(
-            configuration->tuning.gearedDrive.
+            cuda::facts::Tuning(configuration).gearedDrive.
                     lateralForceScale *
             0.5f * linearSpeed.x);
     if (sideLimit < sideSlowdownInput) {
@@ -1921,7 +1954,7 @@ __device__ inline ForceStatus ComputeModel3Ground(
                      : 0.0f);
     float driveForce =
             (accelerationBase -
-             configuration->tuning.steering.slowDownScale *
+             cuda::facts::Tuning(configuration).steering.slowDownScale *
                      sideSlowdownInput *
                      fabsf(vehicle.controls.currentSteering) *
                      tuning::EvaluateSpeed(
@@ -1942,18 +1975,18 @@ __device__ inline ForceStatus ComputeModel3Ground(
     float opposing = 0.0f;
     if (linearSpeed.z > 0.0f) {
         opposing =
-                (configuration->tuning.gearedDrive.
+                (cuda::facts::Tuning(configuration).gearedDrive.
                          forwardAccelBase +
-                 configuration->tuning.gearedDrive.
+                 cuda::facts::Tuning(configuration).gearedDrive.
                          forwardAccelSpeedCoef *
                          linearSpeed.z) *
                 vehicle.controls.lowSpeedGateB;
         const float cap =
                 material.z *
                 (result.slipFlag == 0
-                         ? configuration->tuning.gearedDrive.
+                         ? cuda::facts::Tuning(configuration).gearedDrive.
                                    forwardAccelCap
-                         : configuration->tuning.gearedDrive.
+                         : cuda::facts::Tuning(configuration).gearedDrive.
                                    forwardAccelCapWhenSlipping);
         if (cap < opposing) {
             opposing = cap;
@@ -1963,18 +1996,18 @@ __device__ inline ForceStatus ComputeModel3Ground(
     if (linearSpeed.z < 0.0f &&
         vehicle.controls.forcedLowSpeedFriction) {
         opposing =
-                (configuration->tuning.gearedDrive.
+                (cuda::facts::Tuning(configuration).gearedDrive.
                          forwardAccelBase -
-                 configuration->tuning.gearedDrive.
+                 cuda::facts::Tuning(configuration).gearedDrive.
                          forwardAccelSpeedCoef *
                          linearSpeed.z) *
                 vehicle.controls.lowSpeedGateA;
         const float cap =
                 material.z *
                 (result.slipFlag == 0
-                         ? configuration->tuning.gearedDrive.
+                         ? cuda::facts::Tuning(configuration).gearedDrive.
                                    forwardAccelCap
-                         : configuration->tuning.gearedDrive.
+                         : cuda::facts::Tuning(configuration).gearedDrive.
                                    forwardAccelCapWhenSlipping);
         if (cap < opposing) {
             opposing = cap;
@@ -1988,26 +2021,26 @@ __device__ inline ForceStatus ComputeModel3Ground(
     }
     result.surfaceFeedback = opposing;
     float longitudinal = driveForce - opposing;
-    if (configuration->tuning.engineSpeedNorm *
+    if (cuda::facts::Tuning(configuration).engineSpeedNorm *
                 material.x <
         linearSpeed.z) {
         longitudinal =
-                -configuration->tuning.gearedDrive.
+                -cuda::facts::Tuning(configuration).gearedDrive.
                          speedLimitForce;
     }
     if (linearSpeed.z <
-        -(configuration->tuning.gearedDrive.
+        -(cuda::facts::Tuning(configuration).gearedDrive.
                   reverseSpeedNorm *
           material.x)) {
         longitudinal =
-                configuration->tuning.gearedDrive.
+                cuda::facts::Tuning(configuration).gearedDrive.
                         speedLimitForce;
     }
     const float forceZ = longitudinal * slopeB;
     AddCentralForce(candidate, {0.0f, 0.0f, forceZ});
     AddTorque(candidate, {
             -forceZ *
-                    configuration->tuning.slipResponse.
+                    cuda::facts::Tuning(configuration).slipResponse.
                             longitudinalTorqueScale,
             0.0f,
             0.0f,
@@ -2015,10 +2048,10 @@ __device__ inline ForceStatus ComputeModel3Ground(
     AddCentralForce(candidate, {
             0.0f,
             0.0f,
-            (-configuration->tuning.gearedDrive.
+            (-cuda::facts::Tuning(configuration).gearedDrive.
                      forceZScale *
              currentForce.z) /
-                    configuration->tuning.bodyAirResponse.
+                    cuda::facts::Tuning(configuration).bodyAirResponse.
                             groundedSolidFeedback1,
     });
     return ForceStatus::Success;
@@ -2060,7 +2093,7 @@ __device__ inline void EnterCircularBurnout(
 
     GmVec3 normalSum{};
     for (std::uint32_t index = 0u;
-         index < vehicle.wheels.count; ++index) {
+         index < facts::WheelCount(vehicle); ++index) {
         const CudaWheelState &wheel = vehicle.wheels.values[index];
         if (!wheel.realTime.contactPresent) continue;
         normalSum.x =
@@ -2130,10 +2163,10 @@ __device__ inline void EnterCircularBurnout(
             SignedAngle(forwardAxis, tangent) *
             SignNonNegative(visualSteerYaw);
     if (signedAngle >
-                configuration->tuning.gearedDrive.burnout.
+                cuda::facts::Tuning(configuration).gearedDrive.burnout.
                         angleLimitPositive ||
         signedAngle <
-                -configuration->tuning.gearedDrive.burnout.
+                -cuda::facts::Tuning(configuration).gearedDrive.burnout.
                         angleLimitNegative) {
         drive.burnoutPhase =
                 CSceneVehicleCarBurnoutPhase_Inactive;
@@ -2192,7 +2225,7 @@ __device__ inline void ApplyCircularBurnout(
 
     GmVec3 normalSum{};
     for (std::uint32_t index = 0u;
-         index < vehicle.wheels.count; ++index) {
+         index < facts::WheelCount(vehicle); ++index) {
         const GmVec3 &normal =
                 vehicle.wheels.values[index].realTime.
                         accumulatedContactNormal;
@@ -2208,7 +2241,7 @@ __device__ inline void ApplyCircularBurnout(
     const float normalDrift = fabsf(SignedAngle(
             worldNormal, drive.burnoutContactNormal));
     if (normalDrift >
-        configuration->tuning.gearedDrive.burnout.angleLimit) {
+        cuda::facts::Tuning(configuration).gearedDrive.burnout.angleLimit) {
         drive.burnoutPhase =
                 CSceneVehicleCarBurnoutPhase_Inactive;
         return;
@@ -2267,7 +2300,7 @@ __device__ inline void ApplyCircularBurnout(
     const float radialSpeed =
             dynamics::detail::Dot(linearSpeed, radialDirection);
     if (fabsf(tangentSpeed) >
-        configuration->tuning.gearedDrive.burnout.
+        cuda::facts::Tuning(configuration).gearedDrive.burnout.
                 tangentSpeedMax) {
         drive.burnoutPhase =
                 CSceneVehicleCarBurnoutPhase_Inactive;
@@ -2275,7 +2308,7 @@ __device__ inline void ApplyCircularBurnout(
     const bool radiusNeedsCorrection =
             radius > drive.burnoutBaseRadius ||
             radius <
-                    configuration->tuning.gearedDrive.burnout.
+                    cuda::facts::Tuning(configuration).gearedDrive.burnout.
                             radiusMin;
     if (!radiusNeedsCorrection) {
         drive.burnoutPhase =
@@ -2283,16 +2316,14 @@ __device__ inline void ApplyCircularBurnout(
     } else {
         const float correctionExponent =
                 (radius - drive.burnoutTargetRadius) *
-                        configuration->tuning.gearedDrive.
+                        cuda::facts::Tuning(configuration).gearedDrive.
                                 burnout.radiusCorrectionScale -
                 radialSpeed *
-                        configuration->tuning.gearedDrive.
+                        cuda::facts::Tuning(configuration).gearedDrive.
                                 burnout.
                                 radiusCorrectionSpeedScale;
-        const double tangentSpeedWide =
-                static_cast<double>(tangentSpeed);
-        const float tangentSpeedSquared = exact::FromDouble(
-                tangentSpeedWide * tangentSpeedWide);
+        const float tangentSpeedSquared =
+                tangentSpeed * tangentSpeed;
         const float correctionMagnitude =
                 (tangentSpeedSquared / radius) *
                 exact::Exp(correctionExponent);
@@ -2304,9 +2335,10 @@ __device__ inline void ApplyCircularBurnout(
     }
 
     for (std::uint32_t index = 0u;
-         index < vehicle.wheels.count; ++index) {
+         index < facts::WheelCount(vehicle); ++index) {
         CudaWheelState &wheel = vehicle.wheels.values[index];
-        WheelSuspensionForce(candidate, configuration, wheel);
+        WheelSuspensionForce(
+                candidate, configuration, wheel, index);
         wheel.realTime.slipping = false;
     }
 
@@ -2318,7 +2350,7 @@ __device__ inline void ApplyCircularBurnout(
                     radius)) /
             static_cast<double>(3.6f));
     const float lateralScale =
-            configuration->tuning.gearedDrive.burnout.
+            cuda::facts::Tuning(configuration).gearedDrive.burnout.
                     lateralCorrectionScale *
             (-SignNonNegative(visualSteerYaw) * lateralSpeed -
              tangentSpeed);
@@ -2340,11 +2372,11 @@ __device__ inline void ApplyCircularBurnout(
     if (!isfinite(angleNorm) ||
         signedAngle <
                 -static_cast<double>(
-                        configuration->tuning.gearedDrive.
+                        cuda::facts::Tuning(configuration).gearedDrive.
                                 burnout.angleLimitNegative) ||
         signedAngle >
                 static_cast<double>(
-                        configuration->tuning.gearedDrive.
+                        cuda::facts::Tuning(configuration).gearedDrive.
                                 burnout.angleLimitPositive)) {
         drive.burnoutPhase =
                 CSceneVehicleCarBurnoutPhase_Inactive;
@@ -2356,12 +2388,12 @@ __device__ inline void ApplyCircularBurnout(
                 const float delta = angleNorm + 1.0f;
                 const float deltaSquared = delta * delta;
                 angleReturnTorque =
-                        -configuration->tuning.gearedDrive.
+                        -cuda::facts::Tuning(configuration).gearedDrive.
                                  burnout.angleReturnQuadratic *
                         angularY * deltaSquared;
             } else {
                 angleReturnTorque =
-                        -configuration->tuning.gearedDrive.
+                        -cuda::facts::Tuning(configuration).gearedDrive.
                                  burnout.angularDampingLinear *
                         angularY;
             }
@@ -2369,12 +2401,12 @@ __device__ inline void ApplyCircularBurnout(
             const float delta = angleNorm - 1.0f;
             const float deltaSquared = delta * delta;
             angleReturnTorque =
-                    -configuration->tuning.gearedDrive.
+                    -cuda::facts::Tuning(configuration).gearedDrive.
                              burnout.angleReturnQuadratic *
                     angularY * deltaSquared;
         } else {
             angleReturnTorque =
-                    -configuration->tuning.gearedDrive.
+                    -cuda::facts::Tuning(configuration).gearedDrive.
                              burnout.angularDampingLinear *
                     angularY;
         }
@@ -2386,12 +2418,12 @@ __device__ inline void ApplyCircularBurnout(
             (angleNorm > 0.0f &&
              tangentAngularSpeed < 0.0f)) {
             tangentDampingTorque =
-                    -configuration->tuning.gearedDrive.
+                    -cuda::facts::Tuning(configuration).gearedDrive.
                              burnout.tangentAngularDamping *
                     tangentAngularSpeed;
         }
         const float circleTorqueY =
-                (configuration->tuning.gearedDrive.burnout.
+                (cuda::facts::Tuning(configuration).gearedDrive.burnout.
                          angleTorqueScale *
                  angleNorm +
                  angleReturnTorque) +
@@ -2455,49 +2487,53 @@ __device__ inline void ApplyDirtSlide(
     const float denominator =
             denominatorBase * denominatorBase;
     const float sideDenominator =
-            configuration->tuning.gearedDrive.
+            cuda::facts::Tuning(configuration).gearedDrive.
                     dirtSlideGateScale *
                     vehicle.controls.lowSpeedGateA +
             1.0f;
     const GmVec3 front = {
-            (configuration->tuning.gearedDrive.
+            (cuda::facts::Tuning(configuration).gearedDrive.
                      dirtSlideSideForceScale *
              unitSpeed.x) /
                     sideDenominator,
             0.0f,
-            configuration->tuning.gearedDrive.
+            cuda::facts::Tuning(configuration).gearedDrive.
                             dirtSlideForwardGateScale *
                     vehicle.controls.lowSpeedGateA *
                     1.5f * absoluteUnitX * absoluteXGate *
-                    configuration->tuning.gearedDrive.
+                    cuda::facts::Tuning(configuration).gearedDrive.
                             dirtSlideForwardForceScale /
                     denominator,
     };
     const GmVec3 rear = {
             -front.x,
             0.0f,
-            configuration->tuning.gearedDrive.
+            cuda::facts::Tuning(configuration).gearedDrive.
                             dirtSlideForwardGateScale *
                     vehicle.controls.lowSpeedGateA *
                     absoluteUnitX * absoluteXGate *
-                    configuration->tuning.gearedDrive.
+                    cuda::facts::Tuning(configuration).gearedDrive.
                             dirtSlideForwardForceScale /
                     denominator,
     };
     for (std::uint32_t index = 0u;
-         index < vehicle.wheels.count; ++index) {
+         index < facts::WheelCount(vehicle); ++index) {
         const CudaWheelState &wheel =
                 vehicle.wheels.values[index];
         if (!wheel.realTime.slipping) continue;
         if (index <= 1u) {
             AddForceAtPoint(
                     candidate, front,
-                    wheel.forceApplicationPoint);
+                    facts::Wheel(
+                            configuration,
+                            index).forceApplicationPoint);
         }
         if (index == 2u || index == 3u) {
             AddForceAtPoint(
                     candidate, rear,
-                    wheel.forceApplicationPoint);
+                    facts::Wheel(
+                            configuration,
+                            index).forceApplicationPoint);
         }
     }
 }
@@ -2507,14 +2543,14 @@ __device__ inline GmVec3 GroundFeedbackForce(
         const CudaPackedStaticConfigurationHeader *configuration) {
     GmVec3 result = {
             vehicle.gearedDrive.scaledCurrentForce.x *
-                    -configuration->tuning.feedback.forceDivisor,
+                    -cuda::facts::Tuning(configuration).feedback.forceDivisor,
             vehicle.gearedDrive.scaledCurrentForce.y *
-                    -configuration->tuning.feedback.forceDivisor,
+                    -cuda::facts::Tuning(configuration).feedback.forceDivisor,
             vehicle.gearedDrive.scaledCurrentForce.z *
-                    -configuration->tuning.feedback.forceDivisor,
+                    -cuda::facts::Tuning(configuration).feedback.forceDivisor,
     };
     if (exact::Sqrt(dynamics::detail::Dot(result, result)) <
-        configuration->tuning.gearedDrive.currentForceTorqueMin) {
+        cuda::facts::Tuning(configuration).gearedDrive.currentForceTorqueMin) {
         result = {};
     }
     return result;
@@ -2595,13 +2631,13 @@ __device__ inline ForceStatus ComputeModel6Ground(
         }
     }
     for (std::uint32_t index = 0u;
-         index < vehicle.wheels.count; ++index) {
+         index < facts::WheelCount(vehicle); ++index) {
         CudaWheelState &wheel = vehicle.wheels.values[index];
         WheelSuspensionForce<ReuseWheelPassInvariants>(
-                candidate, configuration, wheel,
+                candidate, configuration, wheel, index,
                 sharedWorldCenter);
         if (!wheel.realTime.contactPresent ||
-            !(configuration->tuning.gearedDrive.
+            !(cuda::facts::Tuning(configuration).gearedDrive.
                       lateralForceScale >= 0.0f)) {
             continue;
         }
@@ -2632,9 +2668,9 @@ __device__ inline ForceStatus ComputeModel6Ground(
         sideAxis = wheel_detail::NormalizeOr(
                 sideAxis, {1.0f, 0.0f, 0.0f},
                 VectorEpsilonSquared);
-        if (wheel.axle ==
-            static_cast<std::uint32_t>(
-                    VehicleWheelAxle::Front)) {
+        if (facts::WheelAxle(
+                    configuration,
+                    index) == VehicleWheelAxle::Front) {
             exact::SinCosResult sinCos;
             if constexpr (ReuseWheelPassInvariants) {
                 sinCos = steeringSinCos;
@@ -2660,12 +2696,12 @@ __device__ inline ForceStatus ComputeModel6Ground(
                 wheel_detail::Cross(lever, feedbackForce);
         feedbackTorque.x =
                 -feedbackTorque.x *
-                configuration->tuning.gearedDrive.
+                cuda::facts::Tuning(configuration).gearedDrive.
                         currentTorqueXScale;
         feedbackTorque.y = 0.0f;
         feedbackTorque.z =
                 -feedbackTorque.z *
-                configuration->tuning.gearedDrive.
+                cuda::facts::Tuning(configuration).gearedDrive.
                         currentTorqueZScale;
         AddTorque(candidate, feedbackTorque);
         if (vehicle.gearedDrive.burnoutPhase ==
@@ -2688,10 +2724,10 @@ __device__ inline ForceStatus ComputeModel6Ground(
         }
         float normalizedDamper = 0.0f;
         const float minAbsorb =
-                configuration->tuning.suspension.
+                cuda::facts::Tuning(configuration).suspension.
                         damperModulationMinAbsorb;
         const float maxAbsorb =
-                configuration->tuning.suspension.
+                cuda::facts::Tuning(configuration).suspension.
                         damperModulationMaxAbsorb;
         if (minAbsorb != maxAbsorb) {
             normalizedDamper =
@@ -2704,14 +2740,14 @@ __device__ inline ForceStatus ComputeModel6Ground(
                         SuspensionDamperAbsorbModulation,
                 normalizedDamper);
         const float slipGrip = wheel.realTime.slipping
-                ? configuration->tuning.gearedDrive.
+                ? cuda::facts::Tuning(configuration).gearedDrive.
                           slippingSideFrictionScale
                 : 1.0f;
         const float lowSpeedGrip =
                 wheel.realTime.slipping &&
                         vehicle.controls.lowSpeedGateB >
                                 LowSpeedGateThreshold
-                ? configuration->tuning.gearedDrive.
+                ? cuda::facts::Tuning(configuration).gearedDrive.
                           lowSpeedBSlippingGripScale
                 : 1.0f;
         float maximumSideFriction;
@@ -2733,7 +2769,7 @@ __device__ inline ForceStatus ComputeModel6Ground(
         const float sideSpeed =
                 dynamics::detail::Dot(linearSpeed, sideAxis);
         float requested =
-                -configuration->tuning.gearedDrive.
+                -cuda::facts::Tuning(configuration).gearedDrive.
                          lateralForceScale *
                 0.5f * sideSpeed * sideFade;
         if (!(maximum < fabsf(requested))) {
@@ -2741,10 +2777,10 @@ __device__ inline ForceStatus ComputeModel6Ground(
         } else {
             requested =
                     (1.0f -
-                     configuration->tuning.gearedDrive.
+                     cuda::facts::Tuning(configuration).gearedDrive.
                              sideFrictionSlipBlend) *
                             SignNonNegative(requested) * maximum +
-                    configuration->tuning.gearedDrive.
+                    cuda::facts::Tuning(configuration).gearedDrive.
                             sideFrictionSlipBlend *
                             requested;
             wheel.realTime.slipping = true;
@@ -2788,7 +2824,7 @@ __device__ inline ForceStatus ComputeModel6Ground(
         vehicle.controls.lowSpeedGateB >
                 LowSpeedGateThreshold) {
         if (linearSpeed.z <
-                    configuration->tuning.gearedDrive.burnout.
+                    cuda::facts::Tuning(configuration).gearedDrive.burnout.
                             donutSpeedLow &&
             vehicle.gearedDrive.frameIso.rotation.basisY.y >
                     0.75f) {
@@ -2798,10 +2834,10 @@ __device__ inline ForceStatus ComputeModel6Ground(
             vehicle.gearedDrive.burnoutStartTick = tick;
         } else if (
                 linearSpeed.z <
-                        configuration->tuning.gearedDrive.burnout.
+                        cuda::facts::Tuning(configuration).gearedDrive.burnout.
                                 donutSpeedHigh &&
                 linearSpeed.z >
-                        configuration->tuning.gearedDrive.burnout.
+                        cuda::facts::Tuning(configuration).gearedDrive.burnout.
                                 donutSpeedLow &&
                 !(fabsf(visualSteerYaw) < ScalarEpsilon)) {
             EnterCircularBurnout(
@@ -2837,12 +2873,12 @@ __device__ inline ForceStatus ComputeModel6Ground(
     float sideLimit = 0.0f;
     float sideRequested = 0.0f;
     for (std::uint32_t index = 0u;
-         index < vehicle.wheels.count; ++index) {
+         index < facts::WheelCount(vehicle); ++index) {
         CudaWheelState &wheel = vehicle.wheels.values[index];
         const bool front =
-                wheel.axle ==
-                static_cast<std::uint32_t>(
-                        VehicleWheelAxle::Front);
+                facts::WheelAxle(
+                        configuration,
+                        index) == VehicleWheelAxle::Front;
         const float halfTrack =
                 (front
                          ? vehicle.gearedDrive.
@@ -2867,17 +2903,17 @@ __device__ inline ForceStatus ComputeModel6Ground(
         const float maximum =
                 maximumSideFriction * material.w;
         float requested =
-                -configuration->tuning.gearedDrive.
+                -cuda::facts::Tuning(configuration).gearedDrive.
                          lateralForceScale *
                 0.5f * wheelSpeed;
         bool slipped = false;
         if (fabsf(requested) > maximum) {
             const float clipped =
                     (1.0f -
-                     configuration->tuning.gearedDrive.
+                     cuda::facts::Tuning(configuration).gearedDrive.
                              driveSideFrictionSlipBlend) *
                             maximum +
-                    configuration->tuning.gearedDrive.
+                    cuda::facts::Tuning(configuration).gearedDrive.
                             driveSideFrictionSlipBlend *
                             fabsf(requested);
             sideLimit += maximum;
@@ -2886,7 +2922,7 @@ __device__ inline ForceStatus ComputeModel6Ground(
             slipped = true;
         }
         float sideTorque =
-                configuration->tuning.gearedDrive.
+                cuda::facts::Tuning(configuration).gearedDrive.
                         sideForceToDriveTorqueScale *
                 requested;
         if (front) {
@@ -2910,7 +2946,7 @@ __device__ inline ForceStatus ComputeModel6Ground(
                 assist = -assist;
             }
             if (wheel.realTime.slipping) {
-                assist *= configuration->tuning.gearedDrive.
+                assist *= cuda::facts::Tuning(configuration).gearedDrive.
                         slippingSteerTorqueScale;
             }
             sideTorque -= assist;
@@ -2925,7 +2961,7 @@ __device__ inline ForceStatus ComputeModel6Ground(
             vehicle, configuration, tick,
             sideLimit, sideRequested);
     const float slippingAcceleration =
-            configuration->tuning.slipResponse.
+            cuda::facts::Tuning(configuration).slipResponse.
                     slippingAccelScale *
             tuning::EvaluateSpeed(
                     configuration,
@@ -2956,7 +2992,7 @@ __device__ inline ForceStatus ComputeModel6Ground(
     const float rearSign =
             vehicle.engine.useLowSpeedGateB ? -1.0f : 0.0f;
     const float slowdown =
-            configuration->tuning.steering.slowDownScale *
+            cuda::facts::Tuning(configuration).steering.slowDownScale *
             fabsf(vehicle.controls.currentSteering) *
             tuning::EvaluateSpeed(
                     configuration,
@@ -2986,9 +3022,9 @@ __device__ inline ForceStatus ComputeModel6Ground(
     bool opposingSlipped = false;
     if (linearSpeed.z > 0.0f) {
         opposing =
-                (configuration->tuning.gearedDrive.
+                (cuda::facts::Tuning(configuration).gearedDrive.
                          forwardAccelBase +
-                 configuration->tuning.gearedDrive.
+                 cuda::facts::Tuning(configuration).gearedDrive.
                          forwardAccelSpeedCoef *
                          linearSpeed.z) *
                 vehicle.controls.lowSpeedGateB *
@@ -2996,9 +3032,9 @@ __device__ inline ForceStatus ComputeModel6Ground(
         const float cap =
                 material.z *
                 (result.slipFlag
-                         ? configuration->tuning.gearedDrive.
+                         ? cuda::facts::Tuning(configuration).gearedDrive.
                                    forwardAccelCapWhenSlipping
-                         : configuration->tuning.gearedDrive.
+                         : cuda::facts::Tuning(configuration).gearedDrive.
                                    forwardAccelCap);
         if (cap < opposing) {
             opposing = cap;
@@ -3010,10 +3046,10 @@ __device__ inline ForceStatus ComputeModel6Ground(
             vehicle.controls.lowSpeedGateA >
                     LowSpeedGateThreshold) {
         if (!vehicle.controls.forcedLowSpeedFriction &&
-            configuration->tuning.gearedDrive.burnout.
+            cuda::facts::Tuning(configuration).gearedDrive.burnout.
                             reverseForceThreshold <
                     -drive *
-                            configuration->tuning.feedback.
+                            cuda::facts::Tuning(configuration).feedback.
                                     forceDivisor *
                             linearSpeed.z &&
             vehicle.gearedDrive.frameIso.rotation.basisY.y >
@@ -3025,9 +3061,9 @@ __device__ inline ForceStatus ComputeModel6Ground(
                     true;
         }
         opposing =
-                (configuration->tuning.gearedDrive.
+                (cuda::facts::Tuning(configuration).gearedDrive.
                          forwardAccelBase -
-                 configuration->tuning.gearedDrive.
+                 cuda::facts::Tuning(configuration).gearedDrive.
                          forwardAccelSpeedCoef *
                          linearSpeed.z) *
                 vehicle.controls.lowSpeedGateA *
@@ -3035,9 +3071,9 @@ __device__ inline ForceStatus ComputeModel6Ground(
         const float cap =
                 material.z *
                 (result.slipFlag
-                         ? configuration->tuning.gearedDrive.
+                         ? cuda::facts::Tuning(configuration).gearedDrive.
                                    forwardAccelCapWhenSlippingReverse
-                         : configuration->tuning.gearedDrive.
+                         : cuda::facts::Tuning(configuration).gearedDrive.
                                    forwardAccelCapReverse);
         if (cap < opposing) {
             opposing = cap;
@@ -3050,22 +3086,22 @@ __device__ inline ForceStatus ComputeModel6Ground(
     float longitudinal =
             drive - SignNonNegative(linearSpeed.z) * opposing;
     if (linearSpeed.z >
-        configuration->tuning.engineSpeedNorm * material.x) {
+        cuda::facts::Tuning(configuration).engineSpeedNorm * material.x) {
         longitudinal = !(longitudinal < 0.0f)
-                ? -configuration->tuning.gearedDrive.
+                ? -cuda::facts::Tuning(configuration).gearedDrive.
                           speedLimitForce
                 : longitudinal -
-                          configuration->tuning.gearedDrive.
+                          cuda::facts::Tuning(configuration).gearedDrive.
                                   speedLimitForce;
     }
     if (linearSpeed.z <
-        -configuration->tuning.gearedDrive.reverseSpeedNorm *
+        -cuda::facts::Tuning(configuration).gearedDrive.reverseSpeedNorm *
                 material.x) {
         longitudinal = !(longitudinal > 0.0f)
-                ? configuration->tuning.gearedDrive.
+                ? cuda::facts::Tuning(configuration).gearedDrive.
                           speedLimitForce
                 : longitudinal +
-                          configuration->tuning.gearedDrive.
+                          cuda::facts::Tuning(configuration).gearedDrive.
                                   speedLimitForce;
     }
     AddCentralForce(
@@ -3074,9 +3110,9 @@ __device__ inline ForceStatus ComputeModel6Ground(
     AddCentralForce(candidate, {
             0.0f,
             0.0f,
-            (-configuration->tuning.gearedDrive.forceZScale *
+            (-cuda::facts::Tuning(configuration).gearedDrive.forceZScale *
              currentForce.z) /
-                    configuration->tuning.bodyAirResponse.
+                    cuda::facts::Tuning(configuration).bodyAirResponse.
                             groundedSolidFeedback1,
     });
     vehicle.slipMemory.active = slipSeen != 0;
@@ -3086,7 +3122,10 @@ __device__ inline ForceStatus ComputeModel6Ground(
 
 }  // namespace force_detail
 
-template <bool ReuseWheelPassInvariants = false>
+template <
+        bool ReuseWheelPassInvariants = false,
+        CudaHandlingSpecialization Handling =
+                CudaHandlingSpecialization::Generic>
 __device__ inline ForceStatus ComputeForcesModel6(
         CudaCandidatePhysicsState &candidate,
         const CudaPackedStaticConfigurationHeader *configuration,
@@ -3096,43 +3135,49 @@ __device__ inline ForceStatus ComputeForcesModel6(
     GmVec3 savedImpulse;
     force_detail::SaveAndClearFeedback(
             vehicle, savedForce, savedImpulse);
-    if (vehicle.integration.speedBlocked ||
-        vehicle.integration.speedBlockedSecondary ||
+    if (wheel_detail::SpeedBlocked(vehicle) ||
         vehicle.water.boxLocal.halfExtents.x < 0.0f) {
         force_detail::SetZeroDynamics(candidate);
         return ForceStatus::Success;
     }
-    const bool legacyHandling =
-            configuration->tuning.handlingModel ==
+    bool legacyHandling = false;
+    if constexpr (Handling == CudaHandlingSpecialization::Generic) {
+        legacyHandling =
+                cuda::facts::Tuning(configuration).handlingModel ==
+                        static_cast<std::uint32_t>(
+                                CSceneVehicleCarHandlingModel_Standard) ||
+                cuda::facts::Tuning(configuration).handlingModel ==
+                        static_cast<std::uint32_t>(
+                                CSceneVehicleCarHandlingModel_Lateral);
+        if (!legacyHandling &&
+            cuda::facts::Tuning(configuration).handlingModel !=
                     static_cast<std::uint32_t>(
-                            CSceneVehicleCarHandlingModel_Standard) ||
-            configuration->tuning.handlingModel ==
-                    static_cast<std::uint32_t>(
-                            CSceneVehicleCarHandlingModel_Lateral);
-    if (!legacyHandling &&
-        configuration->tuning.handlingModel !=
-                static_cast<std::uint32_t>(
-                        CSceneVehicleCarHandlingModel_GearedDrive)) {
-        return ForceStatus::UnsupportedHandlingModel;
+                            CSceneVehicleCarHandlingModel_GearedDrive)) {
+            return ForceStatus::UnsupportedHandlingModel;
+        }
+    } else if constexpr (
+            Handling == CudaHandlingSpecialization::Legacy) {
+        legacyHandling = true;
     }
     force_detail::CreateFakeContacts(
             candidate, configuration);
     cuda::vehicle::IntegrateVehiclePrefix<
-            ReuseWheelPassInvariants>(
+            ReuseWheelPassInvariants,
+            Handling>(
             candidate, configuration, dt);
     const bool groundContact =
             force_detail::IsGroundContact(vehicle);
     candidate.body.physicalParameters.
             vehicleContactFeedbackScale =
             groundContact
-            ? configuration->tuning.bodyAirResponse.
+            ? cuda::facts::Tuning(configuration).bodyAirResponse.
                       groundedSolidFeedback1
-            : configuration->tuning.bodyAirResponse.
+            : cuda::facts::Tuning(configuration).bodyAirResponse.
                       airborneSolidFeedback1;
     candidate.body.physicalParameters.linearFluidFriction =
             groundContact
             ? 0.0f
-            : configuration->tuning.bodyAirResponse.
+            : cuda::facts::Tuning(configuration).bodyAirResponse.
                       airborneSolidFeedback0;
     candidate.body.parameters.mass =
             candidate.body.physicalParameters.mass;
@@ -3157,7 +3202,7 @@ __device__ inline ForceStatus ComputeForcesModel6(
     const GmVec3 currentForce = force_detail::WorldToLocal(
             candidate.body, candidate.body.current.force);
     vehicle.engine.lowSpeedFeedbackForce = 0.0f;
-    force_detail::ApplyFrictionForces(
+    force_detail::ApplyFrictionForces<Handling>(
             candidate, configuration, linearSpeed);
     force_detail::ClampLinearSpeed(candidate, linearSpeed);
     VehicleMaterialBlendValues material;
@@ -3173,7 +3218,41 @@ __device__ inline ForceStatus ComputeForcesModel6(
                     vehicle, configuration, linearSpeed);
     vehicle.gearedDrive.localSpeed = linearSpeed;
     force_detail::Model6Result modelResult;
-    if (legacyHandling) {
+    if constexpr (Handling == CudaHandlingSpecialization::Legacy) {
+        const ForceStatus modelStatus =
+                force_detail::ComputeModel3Ground<
+                    ReuseWheelPassInvariants>(
+                        candidate, configuration, currentForce,
+                        slopeA, slopeB, linearSpeed, angularSpeed,
+                        visualSteerYaw, hasMaterial, material,
+                        modelResult);
+        if (modelStatus != ForceStatus::Success) {
+            return modelStatus;
+        }
+    } else if constexpr (
+            Handling ==
+                    CudaHandlingSpecialization::GearedDriveDry ||
+            Handling ==
+                    CudaHandlingSpecialization::GearedDriveWater) {
+        int waterActive = 0;
+        if constexpr (
+                Handling ==
+                        CudaHandlingSpecialization::
+                                GearedDriveWater) {
+            waterActive = force_detail::ApplyWaterForces(
+                    candidate, configuration, currentForce);
+        }
+        const ForceStatus modelStatus =
+                force_detail::ComputeModel6Ground<
+                        ReuseWheelPassInvariants>(
+                        candidate, configuration, dt, currentForce,
+                        slopeA, slopeB, linearSpeed, angularSpeed,
+                        visualSteerYaw, hasMaterial, material,
+                        waterActive, modelResult);
+        if (modelStatus != ForceStatus::Success) {
+            return modelStatus;
+        }
+    } else if (legacyHandling) {
         const ForceStatus modelStatus =
                 force_detail::ComputeModel3Ground<
                     ReuseWheelPassInvariants>(
@@ -3202,12 +3281,13 @@ __device__ inline ForceStatus ComputeForcesModel6(
     bool sideKill = false;
     bool anyContact = false;
     for (std::uint32_t index = 0u;
-         index < vehicle.wheels.count; ++index) {
+         index < facts::WheelCount(vehicle); ++index) {
         const CudaWheelState &wheel =
                 vehicle.wheels.values[index];
         if (wheel.realTime.contactPresent) {
             anyContact = true;
-            sideKill |= wheel.killsLateralSpeedOnContact;
+            sideKill |= facts::WheelKillsLateralSpeed(
+                    configuration, index);
         }
     }
     if (anyContact) {
@@ -3215,22 +3295,22 @@ __device__ inline ForceStatus ComputeForcesModel6(
                 -vehicle.controls.lowSpeedGateB *
                         vehicle.engine.
                                 lowSpeedFeedbackGateScale -
-                configuration->tuning.
+                cuda::facts::Tuning(configuration).
                         lowSpeedFrictionMagnitude *
                         vehicle.engine.
                                 lowSpeedFeedbackFrictionScale;
     }
     if (sideKill &&
-        configuration->tuning.gearedDrive.lateralForceScale ==
-                configuration->tuning.gearedDrive.
+        cuda::facts::Tuning(configuration).gearedDrive.lateralForceScale ==
+                cuda::facts::Tuning(configuration).gearedDrive.
                         lateralForceScale &&
-        configuration->tuning.gearedDrive.lateralForceScale <
+        cuda::facts::Tuning(configuration).gearedDrive.lateralForceScale <
                 0.0f) {
         linearSpeed.x = 0.0f;
         force_detail::SetLocalLinearSpeed(
                 candidate, linearSpeed);
     }
-    force_detail::UpdateAirControl(
+    force_detail::UpdateAirControl<Handling>(
             candidate, configuration, angularSpeed,
             groundContact, sideKill);
     const std::uint32_t tick = candidate.world.tickTimeMs;
