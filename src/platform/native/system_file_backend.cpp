@@ -40,11 +40,13 @@ constexpr int NativeDirectory = 0;
 #endif
 
 #ifdef _WIN32
+using NativeMode = int;
 constexpr int NativeReadFlags = _O_RDONLY | _O_BINARY;
 constexpr int NativeWriteFlags = _O_WRONLY | _O_CREAT | _O_BINARY;
 constexpr int NativeExclusiveFlags =
         _O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY;
 #else
+using NativeMode = mode_t;
 constexpr int NativeReadFlags = O_RDONLY | NativeCloseOnExec;
 constexpr int NativeWriteFlags = O_WRONLY | O_CREAT | NativeCloseOnExec;
 constexpr int NativeExclusiveFlags =
@@ -281,7 +283,7 @@ private:
     NativeOpenResult Open(
             const std::filesystem::path &path,
             int flags,
-            mode_t permissions) {
+            NativeMode permissions) {
         if (descriptor >= 0) {
             healthy = false;
             return NativeOpenResult::Failed;
