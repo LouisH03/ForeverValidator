@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(ForeverValidator LANGUAGES CXX)
+project(ForeverValidator VERSION 0.2.0 LANGUAGES CXX)
 
 option(FOREVERVALIDATOR_BUILD_CLI "Build the ForeverValidator CLI"
        ${PROJECT_IS_TOP_LEVEL})
@@ -44,10 +44,6 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-if(WIN32 AND (NOT MINGW OR NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU"))
-    message(FATAL_ERROR "Windows builds require MinGW-w64 GCC")
-endif()
-
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 find_package(ZLIB REQUIRED)
 
@@ -89,13 +85,20 @@ function(forevervalidator_configure_target target)
     target_compile_definitions(${target} PRIVATE
         NOMINMAX
         OPENSSL_SUPPRESS_DEPRECATED)
-    target_compile_options(${target} PRIVATE
-        "$<$<COMPILE_LANGUAGE:CXX>:-Wall>"
-        "$<$<COMPILE_LANGUAGE:CXX>:-Wextra>"
-        "$<$<COMPILE_LANGUAGE:CXX>:-Wno-deprecated-declarations>"
-        "$<$<COMPILE_LANGUAGE:CXX>:-ffp-contract=off>"
-        "$<$<COMPILE_LANGUAGE:CXX>:-frandom-seed=forevervalidator>"
-        "$<$<COMPILE_LANGUAGE:CXX>:-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=.>")
+    if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC" OR MSVC)
+        target_compile_options(${target} PRIVATE
+            "$<$<COMPILE_LANGUAGE:CXX>:/W4>"
+            "$<$<COMPILE_LANGUAGE:CXX>:/wd4996>"
+            "$<$<COMPILE_LANGUAGE:CXX>:/fp:strict>")
+    else()
+        target_compile_options(${target} PRIVATE
+            "$<$<COMPILE_LANGUAGE:CXX>:-Wall>"
+            "$<$<COMPILE_LANGUAGE:CXX>:-Wextra>"
+            "$<$<COMPILE_LANGUAGE:CXX>:-Wno-deprecated-declarations>"
+            "$<$<COMPILE_LANGUAGE:CXX>:-ffp-contract=off>"
+            "$<$<COMPILE_LANGUAGE:CXX>:-frandom-seed=forevervalidator>"
+            "$<$<COMPILE_LANGUAGE:CXX>:-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=.>")
+    endif()
 endfunction()
 
 add_library(forevervalidator_core STATIC ${FOREVERVALIDATOR_CORE_SOURCES})
@@ -115,11 +118,18 @@ if(FOREVERVALIDATOR_ENABLE_CUDA)
         CONFIGURE_DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/*.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/*.cuh")
+    set(FOREVERVALIDATOR_CUDA_COMPILER_COMMAND
+        "${CMAKE_CUDA_COMPILER}")
+    if(CMAKE_CUDA_COMPILER_LAUNCHER)
+        set(FOREVERVALIDATOR_CUDA_COMPILER_COMMAND
+            ${CMAKE_CUDA_COMPILER_LAUNCHER}
+            "${CMAKE_CUDA_COMPILER}")
+    endif()
     add_custom_command(
         OUTPUT "${FOREVERVALIDATOR_CUDA_SEARCH_LTO_IR}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory
                 "${CMAKE_CURRENT_BINARY_DIR}/generated"
-        COMMAND "${CMAKE_CUDA_COMPILER}"
+        COMMAND ${FOREVERVALIDATOR_CUDA_COMPILER_COMMAND}
                 -O3 -DNDEBUG -std=c++17 -arch=sm_75
                 --fmad=false --prec-div=true --prec-sqrt=true --ftz=false
                 -DFOREVERVALIDATOR_HAS_CUDA=1
