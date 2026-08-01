@@ -3,8 +3,8 @@
 #include "engine/game/game_ctn_block_info.h"
 #include "engine/core/cmw_nod.h"
 #include "engine/core/mw_id.h"
-struct CGameCtnBlockInfo;
-struct CGameCtnBlockInfoPylon;
+class CGameCtnBlockInfo;
+class CGameCtnBlockInfoPylon;
 
 struct CGameCtnZone : CMwNod {
     CMwId zoneId;

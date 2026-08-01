@@ -9,7 +9,7 @@
 #include "engine/core/gm_types.h"
 class BlockInfoCatalog;
 class CGameCtnBlockInfo;
-class CGameCtnReplayMapInput;
+struct CGameCtnReplayMapInput;
 class CSceneMobil;
 
 enum class CatalogConstructionZoneKind {

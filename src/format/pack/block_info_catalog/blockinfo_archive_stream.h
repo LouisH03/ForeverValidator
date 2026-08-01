@@ -10,7 +10,7 @@
 #include "format/pack/block_info_catalog/blockinfo_descriptor_unit_geometry.h"
 #include "format/archive/archive_node_reference.h"
 #include "format/archive/mw_id_archive_codec.h"
-struct BlockInfoDescriptorExternalRefs;
+class BlockInfoDescriptorExternalRefs;
 
 struct ArchiveLocalCMwIdEntry {
     std::string text;

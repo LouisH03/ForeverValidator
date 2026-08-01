@@ -10,7 +10,7 @@
 #include "format/archive/archive_node_reference.h"
 #include "engine/resources/catalog_asset_repository.h"
 #include "format/replay/replay_static_descriptor_limits.h"
-struct BlockInfoDescriptorExternalRefs;
+class BlockInfoDescriptorExternalRefs;
 struct CPlugFilePack;
 class BlockInfoCatalog;
 class ReplayCollectionWaterChunkTestAccess;

@@ -7,11 +7,11 @@
 #include "engine/core/engine_types.h"
 #include "format/static_solid/static_solid_external_node_paths.h"
 struct CGameCtnReplayMapInput;
-struct CGameCtnReplayArchiveStaticModelCollection;
+class CGameCtnReplayArchiveStaticModelCollection;
 struct CatalogDecorationSizeDefinition;
 class ReplaySceneBlockPlacements;
 struct StaticSolidArchiveCatalog;
-struct StaticSolidArchiveLoadSession;
+class StaticSolidArchiveLoadSession;
 class StaticSolidArchiveReferenceCatalog;
 struct CPlugFilePack;
 struct SceneDescriptorFolderPaths;

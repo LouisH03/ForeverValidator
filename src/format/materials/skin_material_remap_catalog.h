@@ -4,7 +4,7 @@
 #include <optional>
 #include <string>
 
-class CPlugFilePack;
+struct CPlugFilePack;
 
 struct DecorationTerrainModifierRemapPath {
     std::string target;

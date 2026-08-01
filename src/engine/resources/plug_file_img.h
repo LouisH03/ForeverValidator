@@ -8,7 +8,7 @@
 #include "engine/core/gx_color.h"
 #include "engine/resources/plug_file.h"
 #include "engine/rendering/plug_image_pixels.h"
-struct CPlugBitmap;
+class CPlugBitmap;
 
 enum EPlugVideoTimer : unsigned long {
     EPlugVideoTimer_Default = 0ul,

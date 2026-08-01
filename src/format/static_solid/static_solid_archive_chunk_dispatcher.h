@@ -4,17 +4,17 @@
 #include "engine/core/engine_types.h"
 #include "format/archive/archive_node_reference.h"
 #include "format/static_solid/static_solid_archive_id.h"
-struct CGameCtnReplayStaticSolidArchiveByteStream;
+class CGameCtnReplayStaticSolidArchiveByteStream;
 struct CGameCtnReplayStaticSolidArchiveCMwIdState;
 struct CGameCtnReplayStaticSolidArchiveDecodeProgress;
 struct CGameCtnReplayStaticSolidArchiveFeedback;
-struct CGameCtnReplayStaticSolidArchiveNodeGraph;
-struct StaticSolidArchiveVisualState;
+class CGameCtnReplayStaticSolidArchiveNodeGraph;
+class StaticSolidArchiveVisualState;
 struct CSceneVehicleStructArchiveState;
 class CSceneTrafficGraphArchiveState;
 class CGameCtnReplayStaticSolidArchiveAnimationMotionState;
-struct CGameCtnReplayArchiveStaticModelCollection;
-struct StaticSolidArchiveLoadSession;
+class CGameCtnReplayArchiveStaticModelCollection;
+class StaticSolidArchiveLoadSession;
 struct SceneDescriptorFolderPaths;
 
 class CGameCtnReplayStaticSolidArchiveEmbeddedNodeParser;

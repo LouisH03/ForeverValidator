@@ -10,7 +10,7 @@
 #include "format/static_solid/static_solid_archive_identity.h"
 #include "format/static_solid/static_solid_archive_definitions.h"
 #include "format/archive/archive_node_reference.h"
-class StaticSolidArchivePayload;
+struct StaticSolidArchivePayload;
 class StaticSolidArchiveLoadSession;
 struct CGameCtnReplayStaticSolidDescriptorDependencyQueue;
 class CGameCtnReplayStaticSolidArchiveTreeGraph;

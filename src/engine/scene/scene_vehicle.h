@@ -13,7 +13,7 @@ struct CPlugSolid;
 struct CPlugTree;
 struct CSceneVehicleMaterialContainer;
 class CSceneVehicleTuning;
-struct CSceneVehicleTunings;
+class CSceneVehicleTunings;
 
 using CSceneVehicleMaterialRemapIndex = u32;
 

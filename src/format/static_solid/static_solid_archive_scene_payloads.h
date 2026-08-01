@@ -7,11 +7,11 @@
 #include "format/archive/archive_node_reference.h"
 #include "format/static_solid/static_solid_archive_stream_roles.h"
 #include "format/static_solid/static_solid_archive_id.h"
-struct CGameCtnReplayStaticSolidArchiveByteStream;
+class CGameCtnReplayStaticSolidArchiveByteStream;
 struct CGameCtnReplayStaticSolidArchiveCMwIdState;
-struct CGameCtnReplayStaticSolidArchiveNodeGraph;
-struct CGameCtnReplayArchiveStaticModelCollection;
-struct StaticSolidArchiveLoadSession;
+class CGameCtnReplayStaticSolidArchiveNodeGraph;
+class CGameCtnReplayArchiveStaticModelCollection;
+class StaticSolidArchiveLoadSession;
 struct SceneDescriptorFolderPaths;
 
 struct CSceneArchivePayloadContext {

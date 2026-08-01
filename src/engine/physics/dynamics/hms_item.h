@@ -13,7 +13,7 @@ struct CHmsPhysicalContact;
 struct CHmsPortal;
 struct CHmsZone;
 struct CPlugSolid;
-struct CSceneMobil;
+class CSceneMobil;
 
 enum CHmsCollisionContactSide {
     CHmsCollisionContactSide_GroupA = 0u,

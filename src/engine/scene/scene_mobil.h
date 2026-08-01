@@ -8,10 +8,10 @@
 #include "engine/physics/dynamics/hms_item.h"
 #include "engine/scene/scene_object.h"
 #include "engine/resources/static_solid_asset.h"
-struct CGameCtnBlock;
+class CGameCtnBlock;
 struct CHmsPhysicalContact;
 struct CPlugMaterial;
-struct CPlugShader;
+class CPlugShader;
 struct CPlugSolid;
 struct CPlugTree;
 struct CPlugVisual;

@@ -5,9 +5,9 @@
 
 #include "engine/core/gm_types.h"
 
-class CPlugSurface;
-class CPlugSurfaceGeom;
-class CPlugTree;
+struct CPlugSurface;
+struct CPlugSurfaceGeom;
+struct CPlugTree;
 
 namespace forevervalidator::simulation {
 

@@ -8,7 +8,7 @@
 #include "engine/core/gx_color.h"
 #include "engine/rendering/plug_bitmap_render.h"
 #include "engine/resources/plug_file_img.h"
-struct CPlugShader;
+class CPlugShader;
 
 enum EGxTexAddress : unsigned long {
     EGxTexAddress_Wrap = 0ul,

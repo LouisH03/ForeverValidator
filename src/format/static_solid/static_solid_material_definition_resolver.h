@@ -4,8 +4,8 @@
 
 #include "format/static_solid/static_solid_archive_id.h"
 #include "format/static_solid/static_solid_archive_identity.h"
-struct CGameCtnReplayStaticSolidArchiveNodeGraph;
-struct StaticSolidArchiveLoadSession;
+class CGameCtnReplayStaticSolidArchiveNodeGraph;
+class StaticSolidArchiveLoadSession;
 struct SceneDescriptorFolderPaths;
 
 class StaticSolidMaterialReference {

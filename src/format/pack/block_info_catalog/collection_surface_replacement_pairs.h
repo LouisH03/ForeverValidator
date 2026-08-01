@@ -5,7 +5,7 @@
 #include <vector>
 
 #include "engine/core/engine_types.h"
-struct BlockInfoDescriptorExternalRefs;
+class BlockInfoDescriptorExternalRefs;
 struct CPlugFilePack;
 
 struct CollectionReplacementPair {

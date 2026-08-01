@@ -3,8 +3,8 @@
 #include <optional>
 
 #include "engine/resources/catalog_asset_repository.h"
-class CGameCtnReplayMapInput;
-class CPlugFilePack;
+struct CGameCtnReplayMapInput;
+struct CPlugFilePack;
 
 // Finalize identity-compatible decoration candidates against the replay's
 // serialized grid dimensions. A unique candidate is accepted even when its

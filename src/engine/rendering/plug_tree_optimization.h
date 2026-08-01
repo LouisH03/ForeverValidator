@@ -8,7 +8,7 @@
 #include "engine/core/engine_types.h"
 #include "engine/core/gm_types.h"
 struct CPlugMaterial;
-struct CPlugShader;
+class CPlugShader;
 struct CPlugSurface;
 struct CPlugTree;
 struct CPlugVisual;

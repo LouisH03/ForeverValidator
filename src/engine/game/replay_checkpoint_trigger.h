@@ -6,8 +6,8 @@
 #include <memory>
 #include <stddef.h>
 
-class CHmsItem;
-class CHmsPhysicalContact;
+struct CHmsItem;
+struct CHmsPhysicalContact;
 
 class ReplayCheckpointContactObserver {
 public:

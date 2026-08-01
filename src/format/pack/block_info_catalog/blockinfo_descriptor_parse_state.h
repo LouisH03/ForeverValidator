@@ -9,7 +9,7 @@
 #include "format/pack/block_info_catalog/blockinfo_descriptor_unit_geometry.h"
 #include "format/archive/archive_node_reference.h"
 #include "engine/core/gm_types.h"
-class BlockInfoDescriptorMobilParser;
+struct BlockInfoDescriptorMobilParser;
 
 struct BlockInfoParsedHmsState {
     u32 hasItemState = 0u;

@@ -3,7 +3,7 @@
 #include <optional>
 
 #include "engine/game/replay_vehicle_solid_definition.h"
-class CPlugFilePack;
+struct CPlugFilePack;
 struct InstalledVehicleAssetGraph;
 class DefaultVehicleSolidArchive {
 public:

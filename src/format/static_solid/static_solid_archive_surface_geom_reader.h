@@ -6,11 +6,11 @@
 #include "format/archive/archive_node_reference.h"
 #include "format/static_solid/static_solid_archive_definitions.h"
 #include "format/static_solid/static_solid_archive_id.h"
-struct CGameCtnReplayStaticSolidArchiveByteStream;
+class CGameCtnReplayStaticSolidArchiveByteStream;
 struct CGameCtnReplayStaticSolidArchiveCMwIdState;
 struct CGameCtnReplayStaticSolidArchiveDecodeProgress;
 struct CGameCtnReplayStaticSolidArchiveFeedback;
-struct StaticSolidArchiveLoadSession;
+class StaticSolidArchiveLoadSession;
 struct CGameCtnReplayStaticSolidArchiveChunkDispatchContext;
 
 class CGameCtnReplayStaticSolidSurfaceGeometryDefinition {

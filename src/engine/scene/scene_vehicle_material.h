@@ -5,7 +5,7 @@
 
 #include "engine/core/cmw_nod.h"
 #include "engine/core/engine_types.h"
-struct CPlugBitmap;
+class CPlugBitmap;
 
 struct CSceneVehicleMaterial : CMwNod {
     struct SBlendableVals {

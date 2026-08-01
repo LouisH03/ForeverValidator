@@ -12,8 +12,8 @@
 #include "simulation/backends/optimized_cpu/optimized_cpu_static_bvh.h"
 #include "simulation/backends/optimized_cpu/optimized_cpu_static_scene_fingerprint.h"
 
-class CPlugSurface;
-class CPlugTree;
+struct CPlugSurface;
+struct CPlugTree;
 
 class OptimizedCpuMovingEllipsoidPacketPlan {
 public:

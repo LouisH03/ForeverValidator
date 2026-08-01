@@ -5,7 +5,7 @@
 #include "engine/core/engine_types.h"
 #include "engine/game/game_ctn_block_info.h"
 #include "format/static_solid/static_solid_archive_node_ref_reader.h"
-struct CGameCtnReplayStaticSolidArchiveByteStream;
+class CGameCtnReplayStaticSolidArchiveByteStream;
 struct CGameCtnReplayStaticSolidArchiveCMwIdState;
 
 struct CGameCtnBlockInfoDiscardedRefsPayload {

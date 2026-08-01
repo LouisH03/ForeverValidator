@@ -6,10 +6,10 @@
 #include "format/static_solid/static_scene_archive_loader.h"
 #include "format/static_solid/static_solid_archive_id.h"
 #include "format/static_solid/static_solid_archive_node_ref_reader.h"
-struct CGameCtnReplayStaticSolidArchiveByteStream;
+class CGameCtnReplayStaticSolidArchiveByteStream;
 struct CGameCtnReplayStaticSolidArchiveCMwIdState;
-struct CGameCtnReplayStaticSolidArchiveNodeGraph;
-struct StaticSolidArchiveLoadSession;
+class CGameCtnReplayStaticSolidArchiveNodeGraph;
+class StaticSolidArchiveLoadSession;
 struct SceneDescriptorFolderPaths;
 struct CGameCtnReplayStaticSolidArchiveChunkDispatchContext;
 

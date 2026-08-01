@@ -6,7 +6,7 @@
 #include "engine/resources/catalog_asset_repository.h"
 #include "engine/game/material_definition.h"
 #include "engine/scene/static_scene_model.h"
-class CGameCtnReplayMapInput;
+struct CGameCtnReplayMapInput;
 class ReplaySceneBlockPlacements;
 class InstalledPackKeyCatalog;
 

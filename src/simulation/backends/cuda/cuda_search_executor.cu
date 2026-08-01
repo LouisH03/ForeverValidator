@@ -88,6 +88,36 @@ CUresult LaunchDriverKernel(
             std::index_sequence_for<Arguments...>{});
 }
 
+template<typename... Arguments, std::size_t... Indices>
+cudaError_t LaunchRuntimeKernelImpl(
+        const void *function,
+        std::uint32_t blocks,
+        std::tuple<Arguments...> &arguments,
+        std::index_sequence<Indices...>) {
+    std::array<void *, sizeof...(Arguments)> pointers{
+            static_cast<void *>(&std::get<Indices>(arguments))...};
+    return cudaLaunchKernel(
+            function,
+            dim3(blocks, 1u, 1u),
+            dim3(SimulationBlockSize, 1u, 1u),
+            pointers.data(),
+            0u,
+            nullptr);
+}
+
+template<typename... Arguments>
+cudaError_t LaunchRuntimeKernel(
+        const void *function,
+        std::uint32_t blocks,
+        Arguments... arguments) {
+    std::tuple<Arguments...> storage(arguments...);
+    return LaunchRuntimeKernelImpl(
+            function,
+            blocks,
+            storage,
+            std::index_sequence_for<Arguments...>{});
+}
+
 enum class DeviceCandidateStatus : std::uint32_t {
     Success,
     Cancelled,
@@ -4201,150 +4231,77 @@ struct CudaSearchExecutor::Impl {
                 return result;
             }
         } else {
-            const auto launchSimulation = [&](auto stateType,
-                                              auto simulateStunts,
-                                              auto steadyTimelineTag) {
-                using State = decltype(stateType);
-                constexpr bool SimulateStunts =
-                        decltype(simulateStunts)::value;
-                constexpr bool SteadyTimeline =
-                        decltype(steadyTimelineTag)::value;
-                const auto launch = [&](auto minimumBlocks,
-                                        auto handling) {
-                    constexpr std::uint32_t MinimumBlocksPerSm =
-                            decltype(minimumBlocks)::value;
-                    constexpr CudaHandlingSpecialization
-                            Handling = decltype(handling)::value;
-                    SimulateSearchCandidatesKernel<
-                            State,
-                            SimulateStunts,
-                            SteadyTimeline,
-                            Handling,
-                            MinimumBlocksPerSm>
-                            <<<simulationBlocks, SimulationBlockSize>>>(
-                            configuration.deviceScene,
-                            configuration.deviceStaticConfiguration,
-                            branchState.Get(),
-                            mutableBoundaryControls.Get(),
-                            baselineTicks.Get(),
-                            timelineTickCount,
-                            evaluator.Get(),
-                            configuration.tickDurationMs,
-                            configuration.prestartDurationMs,
-                            configuration.branchTimeMs,
-                            mutableFromTimeMs,
-                            configuration.evaluationStartTimeMs,
-                            evaluationTickCount,
-                            firstCandidateId,
-                            candidateCount,
-                            baseline,
-                            static_cast<std::uint32_t>(
-                                    configuration.maximumEventCount),
-                            candidateBestSamples.Get(),
-                            finishCheckpointStates.Get(),
-                            finishCheckpointStartTick,
-                            baselineInputs.Get(),
-                            static_cast<std::uint32_t>(
-                                    configuration.baselineInputs.size()),
-                            candidateEvents.Get(),
-                            candidateInputValues.Get(),
-                            compactInputOffsets.Get(),
-                            compactInputCount,
-                            compactRandomSteeringPipeline,
-                            compactEditPipeline,
-                            sparseMutationPipeline,
-                            CandidateEdits(candidateCount),
-                            SparseCandidateEvents(candidateCount),
-                            eventCounts.Get(),
-                            statuses.Get(),
-                            activeCandidates.Get(),
-                            collisionScratch.Get(),
-                            shapeCollisionScratch.Get(),
-                            shapeWorldScratch.Get(),
-                            movingBoundsScratch.Get(),
-                            surfaceHitScratch.Get(),
-                            meshRangeScratch.Get(),
-                            meshCellScratch.Get(),
-                            responseOrderScratch.Get(),
-                            configuration.maximumBatchSize,
-                            collisionShapeCount,
-                            cancellation.Get());
-                };
-                const auto launchForHandling = [&](auto handling) {
-                    if (selectedMinimumBlocks ==
-                        DenseTailKernelMinimumBlocksPerSm) {
-                        launch(std::integral_constant<
-                                       std::uint32_t,
-                                       DenseTailKernelMinimumBlocksPerSm>{},
-                               handling);
-                    } else if (selectedMinimumBlocks ==
-                               TailKernelMinimumBlocksPerSm) {
-                        launch(std::integral_constant<
-                                       std::uint32_t,
-                                       TailKernelMinimumBlocksPerSm>{},
-                               handling);
-                    } else {
-                        launch(std::integral_constant<
-                                       std::uint32_t,
-                                       ThroughputKernelMinimumBlocksPerSm>{},
-                               handling);
-                    }
-                };
-#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_WATER_ONLY)
-                launchForHandling(std::integral_constant<
-                        CudaHandlingSpecialization,
-                        CudaHandlingSpecialization::
-                                GearedDriveWater>{});
-#else
-                switch (handlingSpecialization) {
-                case CudaHandlingSpecialization::Legacy:
-                    launchForHandling(std::integral_constant<
-                            CudaHandlingSpecialization,
-                            CudaHandlingSpecialization::Legacy>{});
-                    break;
-                case CudaHandlingSpecialization::GearedDriveDry:
-                    launchForHandling(std::integral_constant<
-                            CudaHandlingSpecialization,
-                            CudaHandlingSpecialization::
-                                    GearedDriveDry>{});
-                    break;
-                case CudaHandlingSpecialization::GearedDriveWater:
-                    launchForHandling(std::integral_constant<
-                            CudaHandlingSpecialization,
-                            CudaHandlingSpecialization::
-                                    GearedDriveWater>{});
-                    break;
-                case CudaHandlingSpecialization::Generic:
-                    launchForHandling(std::integral_constant<
-                            CudaHandlingSpecialization,
-                            CudaHandlingSpecialization::Generic>{});
-                    break;
-                }
-#endif
-            };
-#if defined(FOREVERVALIDATOR_CUDA_RESEARCH_WATER_ONLY)
-            launchSimulation(
-                    CudaCandidatePhysicsState{},
-                    std::false_type{},
-                    std::true_type{});
-#else
-            if (configuration.branchState.stuntsEnabled) {
-                launchSimulation(
-                        CudaCandidateState{},
-                        std::true_type{},
-                        std::false_type{});
-            } else if (steadyTimeline) {
-                launchSimulation(
-                        CudaCandidatePhysicsState{},
-                        std::false_type{},
-                        std::true_type{});
+            const void *simulationKernel = nullptr;
+            if (selectedMinimumBlocks ==
+                DenseTailKernelMinimumBlocksPerSm) {
+                simulationKernel = SelectedSimulationKernel<
+                        DenseTailKernelMinimumBlocksPerSm>();
+            } else if (selectedMinimumBlocks ==
+                       TailKernelMinimumBlocksPerSm) {
+                simulationKernel = SelectedSimulationKernel<
+                        TailKernelMinimumBlocksPerSm>();
             } else {
-                launchSimulation(
-                        CudaCandidatePhysicsState{},
-                        std::false_type{},
-                        std::false_type{});
+                simulationKernel = SelectedSimulationKernel<
+                        ThroughputKernelMinimumBlocksPerSm>();
             }
-#endif
+            const cudaError_t simulationLaunch = LaunchRuntimeKernel(
+                    simulationKernel,
+                    simulationBlocks,
+                    configuration.deviceScene,
+                    configuration.deviceStaticConfiguration,
+                    branchState.Get(),
+                    mutableBoundaryControls.Get(),
+                    baselineTicks.Get(),
+                    timelineTickCount,
+                    evaluator.Get(),
+                    configuration.tickDurationMs,
+                    configuration.prestartDurationMs,
+                    configuration.branchTimeMs,
+                    mutableFromTimeMs,
+                    configuration.evaluationStartTimeMs,
+                    evaluationTickCount,
+                    firstCandidateId,
+                    candidateCount,
+                    baseline,
+                    static_cast<std::uint32_t>(
+                            configuration.maximumEventCount),
+                    candidateBestSamples.Get(),
+                    finishCheckpointStates.Get(),
+                    finishCheckpointStartTick,
+                    baselineInputs.Get(),
+                    static_cast<std::uint32_t>(
+                            configuration.baselineInputs.size()),
+                    candidateEvents.Get(),
+                    candidateInputValues.Get(),
+                    compactInputOffsets.Get(),
+                    compactInputCount,
+                    compactRandomSteeringPipeline,
+                    compactEditPipeline,
+                    sparseMutationPipeline,
+                    CandidateEdits(candidateCount),
+                    SparseCandidateEvents(candidateCount),
+                    eventCounts.Get(),
+                    statuses.Get(),
+                    activeCandidates.Get(),
+                    collisionScratch.Get(),
+                    shapeCollisionScratch.Get(),
+                    shapeWorldScratch.Get(),
+                    movingBoundsScratch.Get(),
+                    surfaceHitScratch.Get(),
+                    meshRangeScratch.Get(),
+                    meshCellScratch.Get(),
+                    responseOrderScratch.Get(),
+                    static_cast<std::uint32_t>(
+                            configuration.maximumBatchSize),
+                    collisionShapeCount,
+                    cancellation.Get());
+            if (simulationLaunch != cudaSuccess) {
+                result.status = CudaSearchStatus::DeviceFailure;
+                result.diagnostic = CudaFailure(
+                        "launching CUDA simulation kernel",
+                        simulationLaunch);
+                return result;
+            }
         }
         cudaEventRecord(simulationFinished.Get());
         if (configuration.evaluator.kind ==

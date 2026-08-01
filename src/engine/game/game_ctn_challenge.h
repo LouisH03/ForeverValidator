@@ -22,18 +22,18 @@
 #include "engine/game/game_identifier.h"
 #include "engine/core/gm_types.h"
 #include "engine/scene/scene_mobil.h"
-struct CGameCtnBlockInfo;
-struct CGameCtnBlockInfoClip;
-struct CGameCtnBlockInfoPylon;
-struct CGameCtnBlockUnit;
-struct CGameCtnBlockUnitInfo;
-struct CGameCtnChapter;
-struct CGameCtnCatalog;
-struct CGameCtnCollection;
-struct CGameCtnCollectorList;
-struct CGameCtnDecoration;
-struct CGameCtnFieldUnit;
-struct CGameCtnPylonColumn;
+class CGameCtnBlockInfo;
+class CGameCtnBlockInfoClip;
+class CGameCtnBlockInfoPylon;
+class CGameCtnBlockUnit;
+class CGameCtnBlockUnitInfo;
+class CGameCtnChapter;
+class CGameCtnCatalog;
+class CGameCtnCollection;
+class CGameCtnCollectorList;
+class CGameCtnDecoration;
+class CGameCtnFieldUnit;
+class CGameCtnPylonColumn;
 struct CSystemPackDesc;
 
 using FieldUnitColumn = std::vector<std::unique_ptr<CGameCtnFieldUnit>>;

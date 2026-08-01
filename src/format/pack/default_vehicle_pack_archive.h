@@ -5,7 +5,7 @@
 
 #include "engine/game/replay_vehicle_source_definition.h"
 #include "engine/game/replay_vehicle_tuning_definition.h"
-class CPlugFilePack;
+struct CPlugFilePack;
 struct InstalledVehicleAssetGraph;
 struct DefaultVehiclePackData {
     ReplayVehicleTuningDefinition tuning;

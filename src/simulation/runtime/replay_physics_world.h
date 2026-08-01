@@ -8,7 +8,7 @@
 #include "engine/core/mw_cmd_buffer_core.h"
 #include "simulation/runtime/replay_environment.h"
 #include "simulation/replay/replay_map_scene.h"
-class CHmsCorpus;
+struct CHmsCorpus;
 class CSceneVehicleCar;
 class CTrackManiaRace;
 class OptimizedCpuStaticSurfaceTransformCache;

@@ -8,7 +8,7 @@
 #include "engine/resources/catalog_asset_handle.h"
 #include "engine/core/cmw_nod.h"
 #include "engine/game/game_ctn_block_info.h"
-class CPlugFilePack;
+struct CPlugFilePack;
 class CSceneMobil;
 class StaticSolidArchiveReferenceCatalog;
 

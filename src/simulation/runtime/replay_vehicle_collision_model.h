@@ -5,7 +5,7 @@
 #include <memory>
 
 #include "engine/game/replay_vehicle_collision_definition.h"
-class CPlugTree;
+struct CPlugTree;
 
 class ReplayVehicleCollisionModel {
 public:

@@ -5,7 +5,7 @@
 #include <string_view>
 
 #include "engine/game/material_definition.h"
-class CPlugFilePack;
+struct CPlugFilePack;
 
 class MaterialPackRepository {
 public:

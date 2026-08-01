@@ -3,8 +3,8 @@
 
 #include "engine/core/engine_types.h"
 
-struct CGameCtnReplayStaticSolidArchiveByteStream;
-struct CGameCtnReplayStaticSolidArchiveNodeGraph;
+class CGameCtnReplayStaticSolidArchiveByteStream;
+class CGameCtnReplayStaticSolidArchiveNodeGraph;
 struct SceneDescriptorFolderPaths;
 
 struct CGameCtnReplayStaticSolidArchiveRootHeader {

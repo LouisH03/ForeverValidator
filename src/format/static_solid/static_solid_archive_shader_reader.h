@@ -3,7 +3,7 @@
 
 #include "engine/core/engine_types.h"
 
-struct CGameCtnReplayStaticSolidArchiveByteStream;
+class CGameCtnReplayStaticSolidArchiveByteStream;
 struct CGameCtnReplayStaticSolidArchiveCMwIdState;
 class CGameCtnReplayStaticSolidArchiveNodeRefReader;
 

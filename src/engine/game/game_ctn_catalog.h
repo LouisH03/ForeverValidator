@@ -9,7 +9,7 @@ class CGameCtnCollection;
 class CGameCtnCatalog;
 class CGameCtnDecoration;
 class CGameSkin;
-class CSystemPackDesc;
+struct CSystemPackDesc;
 
 class CGameCtnArticle : public CMwNod {
 public:

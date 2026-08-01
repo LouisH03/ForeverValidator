@@ -17,9 +17,9 @@
 #include "engine/game/game_identifier.h"
 #include "engine/core/gm_types.h"
 #include "engine/core/mw_id.h"
-struct CGameCtnBlockInfo;
-struct CGameCtnBlockUnit;
-struct CSceneMobil;
+class CGameCtnBlockInfo;
+class CGameCtnBlockUnit;
+class CSceneMobil;
 
 struct CGameCtnBlockSkin : CMwNod {
     CFastStringInt label;

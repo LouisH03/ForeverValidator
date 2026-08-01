@@ -6,7 +6,7 @@
 #include "engine/core/engine_types.h"
 #include "format/archive/archive_node_reference.h"
 
-struct CGameCtnReplayStaticSolidArchiveByteStream;
+class CGameCtnReplayStaticSolidArchiveByteStream;
 struct CGameCtnReplayStaticSolidArchiveCMwIdState;
 class CGameCtnReplayStaticSolidArchiveNodeRefReader;
 

@@ -9,7 +9,7 @@
 
 #include "engine/core/gm_types.h"
 #include "format/archive/mw_id_archive_codec.h"
-struct CGameCtnReplayMapInputBlock;
+class CGameCtnReplayMapInputBlock;
 struct BlockInfoSizeParseStream;
 
 struct BlockInfoDescriptorUnitOffset {

@@ -6,7 +6,7 @@
 
 #include "engine/core/engine_types.h"
 
-class CPlugFilePack;
+struct CPlugFilePack;
 
 struct InstalledVehicleAssetReference {
     std::string logicalPath;

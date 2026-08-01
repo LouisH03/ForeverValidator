@@ -8,7 +8,7 @@
 #include "format/static_solid/static_solid_tree_assembler.h"
 class CGameCtnReplayStaticSolidArchiveGraph;
 class StaticSolidArchiveLoadSession;
-struct CGameCtnReplayStaticSolidArchiveSolidPhysicsDefinition;
+class CGameCtnReplayStaticSolidArchiveSolidPhysicsDefinition;
 
 class StaticSolidArchiveAssembler {
 public:

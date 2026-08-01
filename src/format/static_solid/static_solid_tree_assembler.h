@@ -14,10 +14,10 @@
 
 class CGameCtnReplayStaticSolidArchiveNodeDirectory;
 class CGameCtnReplayStaticSolidArchiveTreeGraph;
-struct CGameCtnReplayStaticSolidArchiveSolidPhysicsDefinition;
-struct CGameCtnReplayStaticSolidArchiveSolidTreeLink;
-struct CGameCtnReplayStaticSolidArchiveTreeSourceLink;
-struct CGameCtnReplayStaticSolidArchiveTreeSurfaceLink;
+class CGameCtnReplayStaticSolidArchiveSolidPhysicsDefinition;
+class CGameCtnReplayStaticSolidArchiveSolidTreeLink;
+class CGameCtnReplayStaticSolidArchiveTreeSourceLink;
+class CGameCtnReplayStaticSolidArchiveTreeSurfaceLink;
 
 class StaticSolidTreeAssembler {
 public:

@@ -7,8 +7,8 @@
 #include "engine/core/cmw_nod.h"
 #include "engine/game/game_identifier.h"
 #include "engine/core/mw_id.h"
-struct CGameCtnBlockInfo;
-struct CGameCtnCatalog;
+class CGameCtnBlockInfo;
+class CGameCtnCatalog;
 struct CGameCtnZone;
 struct CGameCtnZoneFlat;
 struct CGameCtnZoneFrontier;

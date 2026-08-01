@@ -7,9 +7,9 @@
 #include "format/archive/archive_node_reference.h"
 #include "format/static_solid/static_solid_archive_node_ref_reader.h"
 #include "format/static_solid/static_solid_archive_id.h"
-struct CGameCtnReplayStaticSolidArchiveByteStream;
+class CGameCtnReplayStaticSolidArchiveByteStream;
 struct CGameCtnReplayStaticSolidArchiveCMwIdState;
-struct StaticSolidArchiveLoadSession;
+class StaticSolidArchiveLoadSession;
 
 struct CPlugMaterialDiscardedRefArchivePayload {
     static int Read(CGameCtnReplayStaticSolidArchiveNodeRefReader *nodeRefs);

@@ -4,7 +4,7 @@
 
 #include "engine/core/cmw_nod.h"
 #include "engine/core/mw_id.h"
-struct CHmsSoundSource;
+class CHmsSoundSource;
 struct CPlugSound;
 struct CScene;
 

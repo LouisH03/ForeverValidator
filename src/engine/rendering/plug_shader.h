@@ -6,11 +6,11 @@
 #include "engine/core/gm_types.h"
 #include "engine/core/gx_color.h"
 #include "engine/rendering/plug.h"
-struct CPlugBitmap;
-struct CPlugBitmapRender;
-struct CPlugBitmapRenderScene3d;
+class CPlugBitmap;
+class CPlugBitmapRender;
+class CPlugBitmapRenderScene3d;
 struct CPlugMaterialCustom;
-struct CPlugShader;
+class CPlugShader;
 struct CSystemFid;
 struct CSystemPackDesc;
 

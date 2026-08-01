@@ -7,7 +7,7 @@
 #include <vector>
 
 #include "engine/core/gm_types.h"
-struct CGameCtnPylonColumn;
+class CGameCtnPylonColumn;
 
 class CGameCtnPylonColumnGrid {
 public:

@@ -2,7 +2,7 @@
 
 #include <memory>
 
-class CMwNod;
+struct CMwNod;
 
 enum class GameCatalogAssetKind {
     Collection,

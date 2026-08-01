@@ -5,8 +5,8 @@
 #include "engine/core/engine_types.h"
 #include "format/archive/archive_node_reference.h"
 #include "format/static_solid/static_solid_archive_node_ref_reader.h"
-struct CGameCtnReplayStaticSolidArchiveByteStream;
-struct CGameCtnReplayStaticSolidArchiveNodeGraph;
+class CGameCtnReplayStaticSolidArchiveByteStream;
+class CGameCtnReplayStaticSolidArchiveNodeGraph;
 
 struct CHmsArchiveDiscardedRefsPayload {
     static int ReadSingle(

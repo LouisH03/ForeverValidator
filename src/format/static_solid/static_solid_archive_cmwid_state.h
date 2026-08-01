@@ -6,7 +6,7 @@
 #include <vector>
 
 #include "engine/core/mw_id.h"
-struct CGameCtnReplayStaticSolidArchiveByteStream;
+class CGameCtnReplayStaticSolidArchiveByteStream;
 
 struct CGameCtnReplayStaticSolidArchiveCMwIdState {
     void ResetSharedNameCache(std::size_t capacity);

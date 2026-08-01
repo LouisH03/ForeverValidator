@@ -7,7 +7,7 @@
 #include "simulation/backends/optimized_cpu/optimized_cpu_vehicle_collision_bounds_plan.h"
 
 class CFuncKeysReal;
-class CPlugTree;
+struct CPlugTree;
 class CSceneVehicleCar;
 class CSceneVehicleCarTuning;
 class CSceneVehicleCarWheelSurfaceObserver;

@@ -1,6 +1,6 @@
 #pragma once
 
-class CPlugFilePack;
+struct CPlugFilePack;
 class InstalledPackAssetRepository;
 class StaticSolidArchiveReferenceCatalog;
 

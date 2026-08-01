@@ -13,7 +13,7 @@
 #include "format/static_solid/static_solid_material_definition_resolver.h"
 #include "format/static_solid/static_solid_archive_id.h"
 struct CGameCtnReplayStaticSolidDescriptorDependencyQueue;
-struct StaticSolidArchiveLoadSession;
+class StaticSolidArchiveLoadSession;
 struct CPlugFilePack;
 struct SceneDescriptorFolderPaths;
 

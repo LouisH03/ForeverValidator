@@ -4,11 +4,11 @@
 #include "format/archive/archive_node_reference.h"
 #include "format/static_solid/static_solid_archive_payload_slice.h"
 #include "format/static_solid/static_solid_archive_id.h"
-struct CGameCtnReplayStaticSolidArchiveByteStream;
+class CGameCtnReplayStaticSolidArchiveByteStream;
 struct CGameCtnReplayStaticSolidArchiveDecodeProgress;
 struct CGameCtnReplayStaticSolidArchiveFeedback;
-struct StaticSolidArchiveVisualState;
-struct StaticSolidArchiveLoadSession;
+class StaticSolidArchiveVisualState;
+class StaticSolidArchiveLoadSession;
 class CGameCtnReplayStaticSolidVisualGeometryDefinition;
 
 struct StaticSolidArchiveVisualReader {

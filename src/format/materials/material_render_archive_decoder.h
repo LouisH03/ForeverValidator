@@ -4,7 +4,7 @@
 
 #include "engine/game/material_render_definition.h"
 
-class CPlugFilePack;
+struct CPlugFilePack;
 
 std::optional<MaterialRenderDefinition> DecodeMaterialRenderArchive(
         const CPlugFilePack &pack,
