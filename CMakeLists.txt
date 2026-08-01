@@ -176,6 +176,7 @@ if(FOREVERVALIDATOR_ENABLE_CUDA)
         "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_vehicle_force_certification.cu"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_stunt_certification.cu"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_scene_storage.cu"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_driver_shim.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_session_specialization.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_timeline_executor.cu")
     if(FOREVERVALIDATOR_CUDA_SEARCH_PREBUILT_OBJECT)
@@ -199,7 +200,7 @@ if(FOREVERVALIDATOR_ENABLE_CUDA)
     target_include_directories(forevervalidator_core PRIVATE
         "${CMAKE_CURRENT_BINARY_DIR}/generated")
     target_link_libraries(forevervalidator_core PUBLIC
-        CUDA::cudart CUDA::cuda_driver CUDA::nvrtc CUDA::nvJitLink)
+        CUDA::cudart CUDA::nvrtc CUDA::nvJitLink)
     target_compile_definitions(forevervalidator_core PUBLIC
         FOREVERVALIDATOR_HAS_CUDA=1)
     target_compile_options(forevervalidator_core PRIVATE
