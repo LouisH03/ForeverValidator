@@ -18,6 +18,9 @@
         (defined(__GNUC__) || defined(__clang__))
 #define FV_E031_HAS_X86_PACKET 1
 #include <immintrin.h>
+#if defined(_WIN32)
+#include <intrin.h>
+#endif
 #else
 #define FV_E031_HAS_X86_PACKET 0
 #endif
@@ -1115,8 +1118,31 @@ FV_E031_AVX2 bool RunPacketAvx2(
 bool OptimizedCpuEllipsoidMeshPacketAvailable(void) noexcept {
 #if FV_E031_HAS_X86_PACKET
     static const bool available = []() noexcept {
+#if defined(_WIN32)
+        int registers[4]{};
+        __cpuidex(registers, 0, 0);
+        if (registers[0] < 7) {
+            return false;
+        }
+
+        __cpuidex(registers, 1, 0);
+        constexpr int OsXsave = 1 << 27;
+        constexpr int Avx = 1 << 28;
+        if ((registers[2] & (OsXsave | Avx)) != (OsXsave | Avx)) {
+            return false;
+        }
+        constexpr unsigned long long XmmAndYmmState = 0x6ull;
+        if ((_xgetbv(0) & XmmAndYmmState) != XmmAndYmmState) {
+            return false;
+        }
+
+        __cpuidex(registers, 7, 0);
+        constexpr int Avx2 = 1 << 5;
+        return (registers[1] & Avx2) != 0;
+#else
         __builtin_cpu_init();
         return __builtin_cpu_supports("avx2") != 0;
+#endif
     }();
     return available;
 #else
