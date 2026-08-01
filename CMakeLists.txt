@@ -112,6 +112,7 @@ target_link_libraries(forevervalidator_core
     PUBLIC OpenSSL::Crypto ZLIB::ZLIB)
 forevervalidator_configure_target(forevervalidator_core)
 if(FOREVERVALIDATOR_ENABLE_CUDA)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
     set(FOREVERVALIDATOR_CUDA_SEARCH_LTO_IR
         "${CMAKE_CURRENT_BINARY_DIR}/generated/forevervalidator_cuda_search.ltoir")
     set(FOREVERVALIDATOR_CUDA_SEARCH_LTO_HEADER
@@ -149,14 +150,14 @@ if(FOREVERVALIDATOR_ENABLE_CUDA)
         VERBATIM)
     add_custom_command(
         OUTPUT "${FOREVERVALIDATOR_CUDA_SEARCH_LTO_HEADER}"
-        COMMAND "${CMAKE_COMMAND}"
-                "-DINPUT=${FOREVERVALIDATOR_CUDA_SEARCH_LTO_IR}"
-                "-DOUTPUT=${FOREVERVALIDATOR_CUDA_SEARCH_LTO_HEADER}"
-                -DSYMBOL=ForeverValidatorCudaSearchLtoIr
-                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_binary.cmake"
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_binary.py"
+                --input "${FOREVERVALIDATOR_CUDA_SEARCH_LTO_IR}"
+                --output "${FOREVERVALIDATOR_CUDA_SEARCH_LTO_HEADER}"
+                --symbol ForeverValidatorCudaSearchLtoIr
         DEPENDS
                 "${FOREVERVALIDATOR_CUDA_SEARCH_LTO_IR}"
-                "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_binary.cmake"
+                "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_binary.py"
         VERBATIM)
     add_custom_target(forevervalidator_cuda_search_lto
         DEPENDS "${FOREVERVALIDATOR_CUDA_SEARCH_LTO_HEADER}")
