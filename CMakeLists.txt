@@ -14,6 +14,8 @@ option(FOREVERVALIDATOR_ENABLE_CUDA
        "Build the optional NVIDIA CUDA simulation backend" OFF)
 set(FOREVERVALIDATOR_CUDA_SPLIT_COMPILE_JOBS "1" CACHE STRING
     "Parallel NVCC optimization jobs per CUDA translation unit; may change code generation (1 disables)")
+set(FOREVERVALIDATOR_CUDA_SEARCH_PREBUILT_OBJECT "" CACHE FILEPATH
+    "Exact prebuilt cuda_search_executor object for release/CI reuse")
 
 if(FOREVERVALIDATOR_ENABLE_CUDA)
     include(CheckLanguage)
@@ -175,8 +177,25 @@ if(FOREVERVALIDATOR_ENABLE_CUDA)
         "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_stunt_certification.cu"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_scene_storage.cu"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_session_specialization.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_search_executor.cu"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_timeline_executor.cu")
+    if(FOREVERVALIDATOR_CUDA_SEARCH_PREBUILT_OBJECT)
+        if(NOT EXISTS "${FOREVERVALIDATOR_CUDA_SEARCH_PREBUILT_OBJECT}")
+            message(FATAL_ERROR
+                "FOREVERVALIDATOR_CUDA_SEARCH_PREBUILT_OBJECT does not exist: "
+                "${FOREVERVALIDATOR_CUDA_SEARCH_PREBUILT_OBJECT}")
+        endif()
+        set_source_files_properties(
+            "${FOREVERVALIDATOR_CUDA_SEARCH_PREBUILT_OBJECT}"
+            PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+        target_sources(forevervalidator_core PRIVATE
+            "${FOREVERVALIDATOR_CUDA_SEARCH_PREBUILT_OBJECT}")
+        message(STATUS
+            "ForeverValidator using prebuilt CUDA search object: "
+            "${FOREVERVALIDATOR_CUDA_SEARCH_PREBUILT_OBJECT}")
+    else()
+        target_sources(forevervalidator_core PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/backends/cuda/cuda_search_executor.cu")
+    endif()
     target_include_directories(forevervalidator_core PRIVATE
         "${CMAKE_CURRENT_BINARY_DIR}/generated")
     target_link_libraries(forevervalidator_core PUBLIC
