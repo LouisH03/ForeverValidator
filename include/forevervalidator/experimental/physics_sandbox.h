@@ -424,7 +424,7 @@ struct PhysicsSandboxCudaSearchConfiguration {
     std::vector<PhysicsSandboxCudaModifier> modifiers;
     PhysicsSandboxCudaEvaluator evaluator =
             PhysicsSandboxCudaFinishTimeEvaluator{};
-    // Use the module prepared by PhysicsSandboxOptions when available.
+    // Use the map-specific CUDA module, preparing it on demand if needed.
     bool useSessionSpecialization = false;
     // Retains the original materialization path for exact differential tests.
     bool useLegacyMutationPipelineForTesting = false;

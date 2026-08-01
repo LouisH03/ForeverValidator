@@ -880,6 +880,7 @@ struct ReplaySimulationSession::Impl {
                             SessionModule>
             cudaSearchSpecialization;
     std::string cudaSearchSpecializationDiagnostic;
+    bool cudaSearchSpecializationAttempted = false;
     std::optional<forevervalidator::simulation::
                           CudaTimelineExecutionMetrics>
             cudaTimelineMetrics;
@@ -1130,6 +1131,7 @@ void ReplaySimulationSession::Reset() {
     impl->staticRenderScene.reset();
     impl->cudaSearchSpecialization.reset();
     impl->cudaSearchSpecializationDiagnostic.clear();
+    impl->cudaSearchSpecializationAttempted = false;
     impl->cudaHostScene.Clear();
     impl->cudaDeviceScene.Reset();
     impl->cudaSceneTransfer.reset();
@@ -1661,6 +1663,13 @@ bool ReplaySimulationSession::PrepareCudaSearchSpecialization(
         }
         return true;
     }
+    if (impl->cudaSearchSpecializationAttempted) {
+        if (diagnostic != nullptr) {
+            *diagnostic = impl->cudaSearchSpecializationDiagnostic;
+        }
+        return false;
+    }
+    impl->cudaSearchSpecializationAttempted = true;
 
     forevervalidator::simulation::CudaPackedStaticConfigurationHeader
             configuration{};

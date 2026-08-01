@@ -3246,17 +3246,21 @@ CreatePhysicsSandboxCudaSearchSession(
             internal.sessionSpecialization =
                     source.session->CudaSearchSpecialization();
             if (!internal.sessionSpecialization) {
-                const std::string &specializationDiagnostic =
-                        source.session->
-                                CudaSearchSpecializationDiagnostic();
-                return PhysicsSandboxResult<
-                        PhysicsSandboxCudaSearchSession>::Failure(
-                        SearchError(
-                                PhysicsSandboxErrorCode::
-                                        SimulationFailed,
-                                specializationDiagnostic.empty()
-                                        ? "The optional fast CUDA kernel is unavailable"
-                                        : specializationDiagnostic));
+                std::string specializationDiagnostic;
+                if (!source.session->PrepareCudaSearchSpecialization(
+                            &specializationDiagnostic)) {
+                    return PhysicsSandboxResult<
+                            PhysicsSandboxCudaSearchSession>::Failure(
+                            SearchError(
+                                    PhysicsSandboxErrorCode::
+                                            SimulationFailed,
+                                    specializationDiagnostic.empty()
+                                            ? "The optional fast CUDA kernel is unavailable"
+                                            : std::move(
+                                                      specializationDiagnostic)));
+                }
+                internal.sessionSpecialization =
+                        source.session->CudaSearchSpecialization();
             }
         }
         internal.baselineTicks.reserve(endCursor - source.cursor);
