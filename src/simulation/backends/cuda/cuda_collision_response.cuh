@@ -699,10 +699,9 @@ __device__ inline void AbsorbWheel(
     wheel.realTime.latestContactPoint = contact.localPoint;
     wheel.realTime.peerZAxisInCarLocal =
             contact.peerZAxis;
-    __builtin_memcpy(
+    memory::CopyBytes<sizeof(contact.peerCorpusId)>(
             &wheel.realTime.peerCorpusId,
-            &contact.peerCorpusId,
-            sizeof(contact.peerCorpusId));
+            &contact.peerCorpusId);
     if (::forevervalidator::simulation::cuda::facts::
                 WheelForceMode(configuration) !=
         static_cast<std::uint32_t>(

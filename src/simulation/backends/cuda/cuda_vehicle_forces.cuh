@@ -1069,9 +1069,8 @@ __device__ inline bool GroundContact(
             static_cast<std::uint32_t>(
                     contact.contactMaterial) == material) {
             peerAxis = contact.peerZAxisInCarLocal;
-            __builtin_memcpy(
-                    &peerCorpusId, &contact.peerCorpusId,
-                    sizeof(peerCorpusId));
+            memory::CopyBytes<sizeof(peerCorpusId)>(
+                    &peerCorpusId, &contact.peerCorpusId);
             return true;
         }
     }
@@ -1094,9 +1093,8 @@ __device__ inline void EnableTurbo(
     } else if (type ==
                        CSceneVehicleCar::ETurboType_Roulette) {
         std::uint32_t currentSource = 0u;
-        __builtin_memcpy(
-                &currentSource, &vehicle.turbo.sourceCorpusId,
-                sizeof(currentSource));
+        memory::CopyBytes<sizeof(currentSource)>(
+                &currentSource, &vehicle.turbo.sourceCorpusId);
         if (currentSource != sourceCorpusId) {
             const std::uint32_t remainder =
                     (tick - vehicle.turbo.rouletteTickOrigin) %
@@ -1113,10 +1111,9 @@ __device__ inline void EnableTurbo(
             vehicle.turbo.type2Phase = phase;
             vehicle.turbo.impulseScale =
                     (phase + 1.0f) * impulseScale;
-            __builtin_memcpy(
+            memory::CopyBytes<sizeof(sourceCorpusId)>(
                     &vehicle.turbo.sourceCorpusId,
-                    &sourceCorpusId,
-                    sizeof(sourceCorpusId));
+                    &sourceCorpusId);
         }
     }
     vehicle.turbo.endTick = tick + duration;

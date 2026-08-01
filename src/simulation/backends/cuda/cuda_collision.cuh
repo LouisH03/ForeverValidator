@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include "simulation/backends/cuda/cuda_exact_math.cuh"
+#include "simulation/backends/cuda/cuda_memory.cuh"
 #include "simulation/backends/cuda/cuda_collision_layout.h"
 #include "simulation/backends/cuda/cuda_scene_storage.h"
 #include "simulation/backends/cuda/cuda_state_layout.h"
@@ -250,20 +251,18 @@ __device__ inline const GmIso4 &ShapeWorldAt(
 __device__ inline GmBoxAligned UnifiedMovingBoundsAt(
         const CudaCollisionSearchScratch &scratch) {
     GmBoxAligned result;
-    __builtin_memcpy(
+    memory::CopyBytes<sizeof(result)>(
             &result,
-            &scratch.shapeWorldStorage[scratch.slot],
-            sizeof(result));
+            &scratch.shapeWorldStorage[scratch.slot]);
     return result;
 }
 
 __device__ inline void StoreUnifiedMovingBounds(
         CudaCollisionSearchScratch &scratch,
         const GmBoxAligned &value) {
-    __builtin_memcpy(
+    memory::CopyBytes<sizeof(value)>(
             &scratch.shapeWorldStorage[scratch.slot],
-            &value,
-            sizeof(value));
+            &value);
 }
 
 __device__ inline GmBoxAligned &MovingBoundsAt(
@@ -767,7 +766,7 @@ __device__ inline void ExpandBoundsForRounding(
 __device__ inline std::uint16_t LocalMaterialIndex(
         GmLocalMaterialIndex value) {
     std::uint16_t result = 0u;
-    __builtin_memcpy(&result, &value, sizeof(result));
+    memory::CopyBytes<sizeof(result)>(&result, &value);
     return result;
 }
 
