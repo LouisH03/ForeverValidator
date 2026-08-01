@@ -76,7 +76,7 @@ file(GLOB_RECURSE FOREVERVALIDATOR_CORE_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/validation/evaluation/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/validation/planning/*.cpp")
 list(FILTER FOREVERVALIDATOR_CORE_SOURCES EXCLUDE REGEX
-    "/simulation/backends/cuda/cuda_session_specialization\.cpp$")
+    "/simulation/backends/cuda/(cuda_driver_shim|cuda_session_specialization)\.cpp$")
 file(GLOB_RECURSE FOREVERVALIDATOR_JSON_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/validation/serialization/*.cpp")
 file(GLOB_RECURSE FOREVERVALIDATOR_NATIVE_SOURCES CONFIGURE_DEPENDS
