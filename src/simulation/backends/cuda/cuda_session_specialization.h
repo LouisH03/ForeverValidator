@@ -12,6 +12,8 @@
 
 namespace forevervalidator::simulation::cuda::specialization {
 
+std::uint64_t SessionModuleBuildCountForTesting() noexcept;
+
 struct KernelMetrics {
     std::uint32_t registersPerThread = 0u;
     std::uint64_t localBytesPerThread = 0u;

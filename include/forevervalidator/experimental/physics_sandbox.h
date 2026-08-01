@@ -52,6 +52,8 @@ struct PhysicsSandboxOptions {
     SimulationBackend backend = SimulationBackend::Reference;
     std::uint32_t tickDurationMs = 10u;
     std::uint32_t prestartDurationMs = 2600u;
+    // Build the optional map-specific CUDA search module during LoadReplay.
+    bool prepareCudaSearchSpecialization = false;
 };
 
 enum class PhysicsSandboxInputAction : std::uint8_t {
@@ -422,6 +424,8 @@ struct PhysicsSandboxCudaSearchConfiguration {
     std::vector<PhysicsSandboxCudaModifier> modifiers;
     PhysicsSandboxCudaEvaluator evaluator =
             PhysicsSandboxCudaFinishTimeEvaluator{};
+    // Use the module prepared by PhysicsSandboxOptions when available.
+    bool useSessionSpecialization = false;
     // Retains the original materialization path for exact differential tests.
     bool useLegacyMutationPipelineForTesting = false;
 };

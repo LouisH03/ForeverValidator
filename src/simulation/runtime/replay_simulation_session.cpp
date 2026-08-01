@@ -35,6 +35,10 @@
 #include "simulation/backends/cuda/cuda_vehicle_prefix_certification.h"
 #include "simulation/backends/cuda/cuda_vehicle_force_certification.h"
 #include "simulation/backends/cuda/cuda_timeline_executor.h"
+#if FOREVERVALIDATOR_HAS_CUDA
+#include <cuda_runtime.h>
+#include "simulation/backends/cuda/cuda_session_specialization.h"
+#endif
 #include "simulation/backends/speculative_ticking/speculative_ticking_backend.h"
 #include "simulation/runtime/replay_environment.h"
 #include "simulation/runtime/replay_physics_world.h"
@@ -872,6 +876,10 @@ struct ReplaySimulationSession::Impl {
                           CudaStaticConfigurationTransferMetrics>
             cudaConfigurationTransfer;
     std::string cudaInitializationDiagnostic;
+    std::shared_ptr<forevervalidator::simulation::cuda::specialization::
+                            SessionModule>
+            cudaSearchSpecialization;
+    std::string cudaSearchSpecializationDiagnostic;
     std::optional<forevervalidator::simulation::
                           CudaTimelineExecutionMetrics>
             cudaTimelineMetrics;
@@ -1120,6 +1128,8 @@ void ReplaySimulationSession::Reset() {
     impl->mapScene.Reset(impl->instance.race);
     impl->staticCollisionTriangles.reset();
     impl->staticRenderScene.reset();
+    impl->cudaSearchSpecialization.reset();
+    impl->cudaSearchSpecializationDiagnostic.clear();
     impl->cudaHostScene.Clear();
     impl->cudaDeviceScene.Reset();
     impl->cudaSceneTransfer.reset();
@@ -1624,6 +1634,98 @@ ReplaySimulationSession::CaptureRuntimeClone() const {
     clone->randomState =
             tmnf::simulation::CaptureGameRandomState();
     return clone;
+}
+
+bool ReplaySimulationSession::PrepareCudaSearchSpecialization(
+        std::string *diagnostic) {
+#if !FOREVERVALIDATOR_HAS_CUDA
+    if (diagnostic != nullptr) {
+        *diagnostic = "CUDA support is not compiled into this build";
+    }
+    return false;
+#else
+    if (impl->backend != forevervalidator::SimulationBackend::Cuda ||
+        !impl->cudaDeviceScene.Ready() ||
+        !impl->cudaDeviceConfiguration.Ready()) {
+        impl->cudaSearchSpecializationDiagnostic =
+                "CUDA map data is not ready for fast mode";
+        if (diagnostic != nullptr) {
+            *diagnostic = impl->cudaSearchSpecializationDiagnostic;
+        }
+        return false;
+    }
+    if (impl->cudaSearchSpecialization &&
+        impl->cudaSearchSpecialization->Ready()) {
+        if (diagnostic != nullptr) {
+            diagnostic->clear();
+        }
+        return true;
+    }
+
+    forevervalidator::simulation::CudaPackedStaticConfigurationHeader
+            configuration{};
+    forevervalidator::simulation::CudaPackedSceneHeader scene{};
+    cudaError_t error = cudaMemcpy(
+            &configuration,
+            impl->cudaDeviceConfiguration.DeviceData(),
+            sizeof(configuration),
+            cudaMemcpyDeviceToHost);
+    if (error == cudaSuccess) {
+        error = cudaMemcpy(
+                &scene,
+                impl->cudaDeviceScene.DeviceData(),
+                sizeof(scene),
+                cudaMemcpyDeviceToHost);
+    }
+    if (error != cudaSuccess) {
+        impl->cudaSearchSpecializationDiagnostic =
+                "Could not read CUDA map data for fast mode: " +
+                std::string(cudaGetErrorString(error));
+        if (diagnostic != nullptr) {
+            *diagnostic = impl->cudaSearchSpecializationDiagnostic;
+        }
+        return false;
+    }
+
+    auto module = std::make_shared<
+            forevervalidator::simulation::cuda::specialization::
+                    SessionModule>();
+    std::string buildDiagnostic;
+    if (!module->Build(
+                configuration,
+                reinterpret_cast<std::uintptr_t>(
+                        impl->cudaDeviceConfiguration.DeviceData()),
+                scene,
+                reinterpret_cast<std::uintptr_t>(
+                        impl->cudaDeviceScene.DeviceData()),
+                &buildDiagnostic)) {
+        impl->cudaSearchSpecializationDiagnostic =
+                buildDiagnostic.empty()
+                ? "The optional fast CUDA kernel could not be built"
+                : std::move(buildDiagnostic);
+        if (diagnostic != nullptr) {
+            *diagnostic = impl->cudaSearchSpecializationDiagnostic;
+        }
+        return false;
+    }
+    impl->cudaSearchSpecialization = std::move(module);
+    impl->cudaSearchSpecializationDiagnostic.clear();
+    if (diagnostic != nullptr) {
+        diagnostic->clear();
+    }
+    return true;
+#endif
+}
+
+std::shared_ptr<const forevervalidator::simulation::cuda::specialization::
+                        SessionModule>
+ReplaySimulationSession::CudaSearchSpecialization() const noexcept {
+    return impl->cudaSearchSpecialization;
+}
+
+const std::string &
+ReplaySimulationSession::CudaSearchSpecializationDiagnostic() const noexcept {
+    return impl->cudaSearchSpecializationDiagnostic;
 }
 
 std::unique_ptr<forevervalidator::simulation::CudaSearchExecutor>

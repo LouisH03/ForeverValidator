@@ -2202,7 +2202,16 @@ PhysicsSandboxResult<PhysicsSandboxStateView> PhysicsSandbox::LoadReplay(
         impl_->controlPlan = SandboxControlPlanStorage::Full(
                 std::move(plan).Value());
         impl_->loaded = true;
-        return impl_->Restart(0u);
+        PhysicsSandboxResult<PhysicsSandboxStateView> restarted =
+                impl_->Restart(0u);
+        if (restarted &&
+            impl_->options.backend == SimulationBackend::Cuda &&
+            impl_->options.prepareCudaSearchSpecialization) {
+            static_cast<void>(
+                    impl_->session->PrepareCudaSearchSpecialization(
+                            nullptr));
+        }
+        return restarted;
     } catch (const std::bad_alloc &) {
         return PhysicsSandboxResult<PhysicsSandboxStateView>::Failure(
                 SandboxError(PhysicsSandboxErrorCode::AllocationFailed,
@@ -3233,6 +3242,23 @@ CreatePhysicsSandboxCudaSearchSession(
         internal.maximumEventCount = maximumEventCount;
         internal.useLegacyMutationPipelineForTesting =
                 configuration.useLegacyMutationPipelineForTesting;
+        if (configuration.useSessionSpecialization) {
+            internal.sessionSpecialization =
+                    source.session->CudaSearchSpecialization();
+            if (!internal.sessionSpecialization) {
+                const std::string &specializationDiagnostic =
+                        source.session->
+                                CudaSearchSpecializationDiagnostic();
+                return PhysicsSandboxResult<
+                        PhysicsSandboxCudaSearchSession>::Failure(
+                        SearchError(
+                                PhysicsSandboxErrorCode::
+                                        SimulationFailed,
+                                specializationDiagnostic.empty()
+                                        ? "The optional fast CUDA kernel is unavailable"
+                                        : specializationDiagnostic));
+            }
+        }
         internal.baselineTicks.reserve(endCursor - source.cursor);
         for (std::size_t index = source.cursor;
              index < endCursor; ++index) {

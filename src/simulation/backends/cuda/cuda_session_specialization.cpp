@@ -5,6 +5,7 @@
 #include <cuda_runtime_api.h>
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <chrono>
 #include <cstring>
@@ -25,6 +26,7 @@ constexpr std::uint32_t SimulationBlockSize = 32u;
 constexpr std::uint32_t ThroughputMinimumBlocks = 16u;
 constexpr std::uint32_t TailMinimumBlocks = 17u;
 constexpr std::uint32_t DenseTailMinimumBlocks = 24u;
+std::atomic_uint64_t SessionModuleBuildCount{0u};
 
 std::string NvrtcLog(nvrtcProgram program) {
     std::size_t size = 0u;
@@ -261,12 +263,17 @@ void SessionModule::Reset() noexcept {
     denseTail_ = {};
 }
 
+std::uint64_t SessionModuleBuildCountForTesting() noexcept {
+    return SessionModuleBuildCount.load(std::memory_order_relaxed);
+}
+
 bool SessionModule::Build(
         const CudaPackedStaticConfigurationHeader &configuration,
         std::uint64_t configurationBase,
         const CudaPackedSceneHeader &scene,
         std::uint64_t sceneBase,
         std::string *diagnostic) {
+    SessionModuleBuildCount.fetch_add(1u, std::memory_order_relaxed);
     Reset();
     const auto started = std::chrono::steady_clock::now();
 

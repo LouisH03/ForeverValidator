@@ -164,6 +164,11 @@ public:
             std::uint32_t overtimeMs);
     std::shared_ptr<const ReplaySimulationInstanceClone>
             CaptureRuntimeClone() const;
+    bool PrepareCudaSearchSpecialization(std::string *diagnostic);
+    std::shared_ptr<const forevervalidator::simulation::cuda::specialization::
+                            SessionModule>
+            CudaSearchSpecialization() const noexcept;
+    const std::string &CudaSearchSpecializationDiagnostic() const noexcept;
     std::unique_ptr<forevervalidator::simulation::CudaSearchExecutor>
             CreateCudaSearchExecutor(
                     forevervalidator::simulation::
