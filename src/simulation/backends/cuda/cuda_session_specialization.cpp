@@ -539,20 +539,7 @@ bool SessionModule::Build(
             result = CUDA_ERROR_INVALID_VALUE;
         }
         if (result == CUDA_SUCCESS) {
-            const cudaError_t copyResult = cudaMemcpy(
-                    reinterpret_cast<void *>(address),
-                    &value,
-                    sizeof(value),
-                    cudaMemcpyHostToDevice);
-            if (copyResult != cudaSuccess) {
-                if (diagnostic != nullptr) {
-                    *diagnostic =
-                            "installing specialized CUDA session pointer " +
-                            std::string(name) + ": " +
-                            cudaGetErrorString(copyResult);
-                }
-                return false;
-            }
+            result = cuMemcpyHtoD(address, &value, sizeof(value));
         }
         if (result != CUDA_SUCCESS && diagnostic != nullptr) {
             const char *message = nullptr;

@@ -102,6 +102,15 @@ extern "C" CUresult CUDAAPI cuModuleGetGlobal(CUdeviceptr *devicePointer,
                           : entry(devicePointer, bytes, module, name);
 }
 
+extern "C" CUresult CUDAAPI cuMemcpyHtoD(CUdeviceptr destination,
+                                          const void *source,
+                                          std::size_t bytes) {
+  using Function = CUresult(CUDAAPI *)(CUdeviceptr, const void *, std::size_t);
+  static Function entry = ResolveDriverFunction<Function>("cuMemcpyHtoD");
+  return entry == nullptr ? DriverUnavailable()
+                          : entry(destination, source, bytes);
+}
+
 extern "C" CUresult CUDAAPI cuModuleLoadData(CUmodule *module,
                                              const void *image) {
   using Function = CUresult(CUDAAPI *)(CUmodule *, const void *);
