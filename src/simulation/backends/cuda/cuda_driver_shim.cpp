@@ -90,6 +90,18 @@ cuModuleGetFunctionCount(unsigned int *functionCount, CUmodule module) {
   return entry == nullptr ? DriverUnavailable() : entry(functionCount, module);
 }
 
+extern "C" CUresult CUDAAPI cuModuleGetGlobal(CUdeviceptr *devicePointer,
+                                               std::size_t *bytes,
+                                               CUmodule module,
+                                               const char *name) {
+  using Function = CUresult(CUDAAPI *)(CUdeviceptr *, std::size_t *, CUmodule,
+                                       const char *);
+  static Function entry =
+      ResolveDriverFunction<Function>("cuModuleGetGlobal");
+  return entry == nullptr ? DriverUnavailable()
+                          : entry(devicePointer, bytes, module, name);
+}
+
 extern "C" CUresult CUDAAPI cuModuleLoadData(CUmodule *module,
                                              const void *image) {
   using Function = CUresult(CUDAAPI *)(CUmodule *, const void *);

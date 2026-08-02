@@ -200,13 +200,13 @@ void AppendShapeWords(
     source << "}\n";
 }
 
-void AppendPointerFunction(
+void AppendPointerStorage(
         std::ostringstream &source,
-        std::string_view name,
-        std::uint64_t value) {
+        std::string_view name) {
     source << "extern \"C\" __device__ unsigned long long "
-           << name << "() { return 0x" << std::hex << value
-           << "ull; }\n";
+           << name << "Storage = 0ull;\n";
+    source << "extern \"C\" __device__ unsigned long long "
+           << name << "() { return " << name << "Storage; }\n";
 }
 
 bool LoadMetrics(
@@ -366,14 +366,12 @@ bool SessionModule::Build(
             source,
             collisionShapes,
             configuration.collisionShapes.stride);
-    AppendPointerFunction(
+    AppendPointerStorage(
             source,
-            "ForeverValidatorSessionConfigurationBase",
-            configurationBase);
-    AppendPointerFunction(
+            "ForeverValidatorSessionConfigurationBase");
+    AppendPointerStorage(
             source,
-            "ForeverValidatorSessionSceneBase",
-            sceneBase);
+            "ForeverValidatorSessionSceneBase");
     const std::string sourceText = source.str();
 
     nvrtcProgram program = nullptr;
@@ -528,6 +526,50 @@ bool SessionModule::Build(
                     "loading specialized CUDA module: " +
                     std::string(message == nullptr ? "unknown" : message);
         }
+        Reset();
+        return false;
+    }
+    const auto installPointer =
+            [&](const char *name, std::uint64_t value) {
+        CUdeviceptr address = 0u;
+        std::size_t size = 0u;
+        CUresult result = cuModuleGetGlobal(
+                &address, &size, module_, name);
+        if (result == CUDA_SUCCESS && size != sizeof(value)) {
+            result = CUDA_ERROR_INVALID_VALUE;
+        }
+        if (result == CUDA_SUCCESS) {
+            const cudaError_t copyResult = cudaMemcpy(
+                    reinterpret_cast<void *>(address),
+                    &value,
+                    sizeof(value),
+                    cudaMemcpyHostToDevice);
+            if (copyResult != cudaSuccess) {
+                if (diagnostic != nullptr) {
+                    *diagnostic =
+                            "installing specialized CUDA session pointer " +
+                            std::string(name) + ": " +
+                            cudaGetErrorString(copyResult);
+                }
+                return false;
+            }
+        }
+        if (result != CUDA_SUCCESS && diagnostic != nullptr) {
+            const char *message = nullptr;
+            cuGetErrorString(result, &message);
+            *diagnostic =
+                    "installing specialized CUDA session pointer " +
+                    std::string(name) + ": " +
+                    std::string(message == nullptr ? "unknown" : message);
+        }
+        return result == CUDA_SUCCESS;
+    };
+    if (!installPointer(
+                "ForeverValidatorSessionConfigurationBaseStorage",
+                configurationBase) ||
+        !installPointer(
+                "ForeverValidatorSessionSceneBaseStorage",
+                sceneBase)) {
         Reset();
         return false;
     }
