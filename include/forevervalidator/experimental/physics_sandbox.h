@@ -48,10 +48,19 @@ template<typename T>
 using PhysicsSandboxResult =
         DiscriminatedResult<T, PhysicsSandboxError>;
 
+enum class PhysicsSandboxTimelineMode : std::uint8_t {
+    RecordedReplay,
+    Canonical,
+};
+
 struct PhysicsSandboxOptions {
     SimulationBackend backend = SimulationBackend::Reference;
     std::uint32_t tickDurationMs = 10u;
     std::uint32_t prestartDurationMs = 2600u;
+    PhysicsSandboxTimelineMode timelineMode =
+            PhysicsSandboxTimelineMode::RecordedReplay;
+    // Required in canonical mode and unset in recorded-replay mode.
+    std::optional<std::uint32_t> simulationHorizonMs;
     // Build the optional map-specific CUDA search module during LoadReplay.
     bool prepareCudaSearchSpecialization = false;
 };

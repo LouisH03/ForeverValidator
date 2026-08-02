@@ -241,6 +241,13 @@ and input timeline from a replay, advances by an exact tick count, and captures
 or restores opaque deterministic states. Static map collision structures are
 owned by the sandbox rather than copied into state snapshots.
 
+`PhysicsSandboxTimelineMode::Canonical` instead loads only the map and required
+scenario context. It creates a fresh race-start timeline bounded by the
+explicit `simulationHorizonMs`; recorded controls, finish markers, duration,
+and outcomes are excluded. Commands after the horizon remain readable but do
+not enter CPU or CUDA control plans. The default recorded-replay mode preserves
+the validation behavior of existing callers.
+
 The API exposes replay-level input events and search-relevant state such as car
 dynamics, race-relative time, checkpoints, laps, respawns, and completion. It
 does not expose arbitrary engine objects, per-tick callbacks, or TAS search

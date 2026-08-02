@@ -1453,6 +1453,9 @@ struct PhysicsSandboxState::Impl {
     SimulationBackend backend = SimulationBackend::Reference;
     std::uint32_t tickDurationMs = 0u;
     std::uint32_t prestartDurationMs = 0u;
+    std::uint32_t simulationHorizonMs = 0u;
+    PhysicsSandboxTimelineMode timelineMode =
+            PhysicsSandboxTimelineMode::RecordedReplay;
     std::size_t cursor = 0u;
     std::uint32_t runtimeCloneSchema = 0u;
 };
@@ -1470,6 +1473,7 @@ struct PhysicsSandbox::Impl {
     std::vector<ReplayInputActionKind> definedActions;
     ReplayInputProvenance provenance = ReplayInputProvenance::Unmarked;
     std::shared_ptr<const SandboxInputStorage> inputs;
+    std::uint32_t simulationHorizonMs = 0u;
     ReplayChallengeMetadata challengeMetadata{};
     ReplayAssetRoute route{};
     ReplayIdentity identity{};
@@ -1527,7 +1531,7 @@ struct PhysicsSandbox::Impl {
         ReplayControlPlanRequest request(timeline);
         request.controlTickMs = options.tickDurationMs;
         const std::int64_t durationMs = durationOverrideMs.value_or(
-                static_cast<std::int64_t>(inputMetadata.durationMs));
+                static_cast<std::int64_t>(simulationHorizonMs));
         if (durationMs < 0 ||
             durationMs > std::numeric_limits<std::int32_t>::max()) {
             return PhysicsSandboxResult<ReplayControlPlan>::Failure(
@@ -1672,7 +1676,7 @@ struct PhysicsSandbox::Impl {
         PhysicsSandboxStateView view;
         view.tick = cursor - prestartTicks;
         view.timeMs = view.tick * options.tickDurationMs;
-        view.durationMs = inputMetadata.durationMs;
+        view.durationMs = simulationHorizonMs;
         view.mapEnvironment = ToPublicMapEnvironment(route.mapEnvironment);
         view.vehicleModel = ToPublicVehicleModel(route.vehicleModel);
         view.playMode = ToPublicPlayMode(
@@ -1738,12 +1742,15 @@ struct PhysicsSandbox::Impl {
 struct PhysicsSandboxCudaSearchSession::Impl {
     std::unique_ptr<simulation::CudaSearchExecutor> executor;
     std::shared_ptr<const SandboxInputStorage> inputs;
+    std::vector<PhysicsSandboxInputEvent> lateInputs;
     std::shared_ptr<const SandboxControlPlanStorage> controlPlan;
     std::uint64_t scenarioFingerprint = 0u;
     std::uint32_t validationSeed = 0u;
     std::uint32_t tickDurationMs = 0u;
     std::uint32_t prestartDurationMs = 0u;
     std::uint64_t durationMs = 0u;
+    PhysicsSandboxTimelineMode timelineMode =
+            PhysicsSandboxTimelineMode::RecordedReplay;
     std::size_t prestartTicks = 0u;
     MapEnvironment mapEnvironment = MapEnvironment::Unknown;
     VehicleModel vehicleModel = VehicleModel::Unknown;
@@ -2080,7 +2087,9 @@ PhysicsSandboxResult<PhysicsSandboxStateView> PhysicsSandbox::LoadReplay(
                             "sandbox replay could not be decoded",
                             ReplayDecodeError(readError, identity)));
         }
-        if (!replay.HasValidationInput()) {
+        if (impl_->options.timelineMode ==
+                    PhysicsSandboxTimelineMode::RecordedReplay &&
+            !replay.HasValidationInput()) {
             return PhysicsSandboxResult<PhysicsSandboxStateView>::Failure(
                     SandboxError(PhysicsSandboxErrorCode::ReplayLoadingFailed,
                                  "sandbox replay has no playable input"));
@@ -2150,22 +2159,34 @@ PhysicsSandboxResult<PhysicsSandboxStateView> PhysicsSandbox::LoadReplay(
         session->ActivateStaticScene();
 
         std::vector<PhysicsSandboxInputEvent> inputs;
-        inputs.reserve(replay.InputTimeline().Events().size());
-        for (const ReplayInputEvent &event : replay.InputTimeline().Events()) {
-            const std::int64_t relative =
-                    static_cast<std::int64_t>(event.timeMs) -
-                    SandboxInputTimeBaseMs;
-            if (relative < std::numeric_limits<std::int32_t>::min() ||
-                relative > std::numeric_limits<std::int32_t>::max()) {
-                return PhysicsSandboxResult<PhysicsSandboxStateView>::Failure(
-                        SandboxError(
-                                PhysicsSandboxErrorCode::ReplayLoadingFailed,
-                                "sandbox replay input time is out of range"));
-            }
+        if (impl_->options.timelineMode ==
+            PhysicsSandboxTimelineMode::Canonical) {
             inputs.push_back({
-                    static_cast<std::int32_t>(relative),
-                    ToSandboxAction(event.action),
-                    ToSandboxValue(event.value)});
+                    0,
+                    PhysicsSandboxInputAction::RaceRunning,
+                    {PhysicsSandboxInputValueKind::Switch,
+                     PhysicsSandboxSwitchState::Pressed,
+                     0}});
+        } else {
+            inputs.reserve(replay.InputTimeline().Events().size());
+            for (const ReplayInputEvent &event :
+                 replay.InputTimeline().Events()) {
+                const std::int64_t relative =
+                        static_cast<std::int64_t>(event.timeMs) -
+                        SandboxInputTimeBaseMs;
+                if (relative < std::numeric_limits<std::int32_t>::min() ||
+                    relative > std::numeric_limits<std::int32_t>::max()) {
+                    return PhysicsSandboxResult<
+                            PhysicsSandboxStateView>::Failure(
+                            SandboxError(
+                                    PhysicsSandboxErrorCode::ReplayLoadingFailed,
+                                    "sandbox replay input time is out of range"));
+                }
+                inputs.push_back({
+                        static_cast<std::int32_t>(relative),
+                        ToSandboxAction(event.action),
+                        ToSandboxValue(event.value)});
+            }
         }
 
         PhysicsSandboxSceneView scene = BuildSandboxScene(
@@ -2181,8 +2202,29 @@ PhysicsSandboxResult<PhysicsSandboxStateView> PhysicsSandbox::LoadReplay(
         impl_->session = std::move(session);
         impl_->definition = std::move(definition).Value();
         impl_->inputMetadata = replay.InputTimeline().Metadata();
-        impl_->definedActions = replay.InputTimeline().DefinedActions();
-        impl_->provenance = replay.InputTimeline().Provenance();
+        if (impl_->options.timelineMode ==
+            PhysicsSandboxTimelineMode::Canonical) {
+            impl_->simulationHorizonMs =
+                    *impl_->options.simulationHorizonMs;
+            impl_->inputMetadata.durationMs = impl_->simulationHorizonMs;
+            impl_->inputMetadata.raceTimeMs.reset();
+            impl_->inputMetadata.respawnCount.reset();
+            impl_->inputMetadata.stuntScore.reset();
+            impl_->definedActions = {
+                    ReplayInputActionKind::Accelerate,
+                    ReplayInputActionKind::Gas,
+                    ReplayInputActionKind::Brake,
+                    ReplayInputActionKind::Steer,
+                    ReplayInputActionKind::SteerLeft,
+                    ReplayInputActionKind::SteerRight,
+                    ReplayInputActionKind::RaceRunning,
+                    ReplayInputActionKind::Respawn};
+            impl_->provenance = ReplayInputProvenance::Scripted;
+        } else {
+            impl_->simulationHorizonMs = impl_->inputMetadata.durationMs;
+            impl_->definedActions = replay.InputTimeline().DefinedActions();
+            impl_->provenance = replay.InputTimeline().Provenance();
+        }
         impl_->challengeMetadata = replay.ChallengeMetadata();
         impl_->route = route;
         impl_->identity = identity;
@@ -2336,7 +2378,7 @@ PhysicsSandboxResult<std::size_t> PhysicsSandbox::ReplaceInputWindow(
             maximumTimeMs % impl_->options.tickDurationMs != 0 ||
             maximumTimeMs >
                     static_cast<std::int64_t>(
-                            impl_->inputMetadata.durationMs)) {
+                            impl_->simulationHorizonMs)) {
             return PhysicsSandboxResult<std::size_t>::Failure(
                     SandboxError(PhysicsSandboxErrorCode::InvalidRequest,
                                  "invalid sandbox input window"));
@@ -2421,7 +2463,7 @@ PhysicsSandboxResult<std::size_t> PhysicsSandbox::ReplaceInputWindow(
                                        bool affected) {
             if (!affected || replacementEndTimeMs >=
                                      static_cast<std::int64_t>(
-                                             impl_->inputMetadata.durationMs)) {
+                                             impl_->simulationHorizonMs)) {
                 return;
             }
             const auto next = std::find_if(
@@ -2439,8 +2481,10 @@ PhysicsSandboxResult<std::size_t> PhysicsSandbox::ReplaceInputWindow(
                     replacementEndTimeMs,
                     next == baseInputs->end()
                             ? static_cast<std::int64_t>(
-                                      impl_->inputMetadata.durationMs)
-                            : static_cast<std::int64_t>(next->timeMs));
+                                      impl_->simulationHorizonMs)
+                            : std::min<std::int64_t>(
+                                      next->timeMs,
+                                      impl_->simulationHorizonMs));
         };
         extendToReset(PhysicsSandboxInputAction::Steer, affectsSteer);
         extendToReset(
@@ -2580,6 +2624,8 @@ PhysicsSandboxResult<PhysicsSandboxState> PhysicsSandbox::CaptureState()
         state->backend = impl_->options.backend;
         state->tickDurationMs = impl_->options.tickDurationMs;
         state->prestartDurationMs = impl_->options.prestartDurationMs;
+        state->simulationHorizonMs = impl_->simulationHorizonMs;
+        state->timelineMode = impl_->options.timelineMode;
         state->cursor = impl_->cursor;
         state->runtimeCloneSchema = SandboxRuntimeCloneSchema;
         return PhysicsSandboxResult<PhysicsSandboxState>::Success(
@@ -2605,7 +2651,10 @@ PhysicsSandboxResult<PhysicsSandboxStateView> PhysicsSandbox::RestoreState(
             state.impl_->backend != impl_->options.backend ||
             state.impl_->tickDurationMs != impl_->options.tickDurationMs ||
             state.impl_->prestartDurationMs !=
-                    impl_->options.prestartDurationMs) {
+                    impl_->options.prestartDurationMs ||
+            state.impl_->simulationHorizonMs !=
+                    impl_->simulationHorizonMs ||
+            state.impl_->timelineMode != impl_->options.timelineMode) {
             return PhysicsSandboxResult<PhysicsSandboxStateView>::Failure(
                     SandboxError(PhysicsSandboxErrorCode::IncompatibleState,
                                  "sandbox state is incompatible"));
@@ -2727,9 +2776,25 @@ PhysicsSandboxResult<PhysicsSandbox> CreatePhysicsSandbox(
     try {
         AssetProvider provider =
                 detail::PhysicsSandboxAssetSourceAccess::Take(source);
+        const bool canonical = options.timelineMode ==
+                PhysicsSandboxTimelineMode::Canonical;
+        const std::uint32_t signedTimeLimit =
+                static_cast<std::uint32_t>(
+                        std::numeric_limits<std::int32_t>::max());
+        const std::uint32_t maximumHorizon =
+                options.prestartDurationMs <= signedTimeLimit
+                ? signedTimeLimit - options.prestartDurationMs
+                : 0u;
         if (!provider || options.tickDurationMs == 0u ||
             options.prestartDurationMs == 0u ||
             options.prestartDurationMs % options.tickDurationMs != 0u ||
+            options.prestartDurationMs > signedTimeLimit ||
+            (canonical &&
+             (!options.simulationHorizonMs.has_value() ||
+              *options.simulationHorizonMs < options.tickDurationMs ||
+              *options.simulationHorizonMs % options.tickDurationMs != 0u ||
+              *options.simulationHorizonMs > maximumHorizon)) ||
+            (!canonical && options.simulationHorizonMs.has_value()) ||
             !simulation::IsSimulationBackendSupported(options.backend)) {
             return PhysicsSandboxResult<PhysicsSandbox>::Failure(
                     SandboxError(PhysicsSandboxErrorCode::InvalidRequest,
@@ -2782,6 +2847,7 @@ PhysicsSandboxResult<PhysicsSandbox> ClonePhysicsSandbox(
         impl->definedActions = source.impl_->definedActions;
         impl->provenance = source.impl_->provenance;
         impl->inputs = source.impl_->inputs;
+        impl->simulationHorizonMs = source.impl_->simulationHorizonMs;
         impl->challengeMetadata = source.impl_->challengeMetadata;
         impl->route = source.impl_->route;
         impl->identity = source.impl_->identity;
@@ -2934,6 +3000,8 @@ PhysicsSandboxCudaSearchSession::Impl::Convert(
     for (const simulation::CudaSearchInputEvent &input : best.inputs) {
         result.bestInputs.push_back(PublicInput(input));
     }
+    result.bestInputs.insert(
+            result.bestInputs.end(), lateInputs.begin(), lateInputs.end());
 
     if (!best.stateCaptured) {
         return PhysicsSandboxResult<
@@ -3026,6 +3094,8 @@ PhysicsSandboxCudaSearchSession::Impl::Convert(
     state->backend = SimulationBackend::Cuda;
     state->tickDurationMs = tickDurationMs;
     state->prestartDurationMs = prestartDurationMs;
+    state->simulationHorizonMs = static_cast<std::uint32_t>(durationMs);
+    state->timelineMode = timelineMode;
     state->cursor =
             static_cast<std::size_t>(best.state.controlCursor);
     state->runtimeCloneSchema = SandboxRuntimeCloneSchema;
@@ -3217,11 +3287,21 @@ CreatePhysicsSandboxCudaSearchSession(
                     PhysicsSandboxCudaSearchSession>::Failure(
                     SearchError(
                             PhysicsSandboxErrorCode::InvalidRequest,
-                            "CUDA search timeline exceeds the replay"));
+                            "CUDA search timeline exceeds the Simulation horizon"));
         }
 
-        const std::vector<PhysicsSandboxInputEvent> sourceInputs =
+        const std::vector<PhysicsSandboxInputEvent> allSourceInputs =
                 source.inputs->Materialize();
+        const auto lateBegin = std::upper_bound(
+                allSourceInputs.begin(),
+                allSourceInputs.end(),
+                source.simulationHorizonMs,
+                [](std::int64_t timeMs,
+                   const PhysicsSandboxInputEvent &event) {
+                    return timeMs < event.timeMs;
+                });
+        const std::vector<PhysicsSandboxInputEvent> sourceInputs(
+                allSourceInputs.begin(), lateBegin);
         std::size_t maximumEventCount = 0u;
         if (!MaximumEventCapacity(
                     sourceInputs.size(),
@@ -3373,12 +3453,14 @@ CreatePhysicsSandboxCudaSearchSession(
                 std::make_unique<PhysicsSandboxCudaSearchSession::Impl>();
         impl->executor = std::move(executor);
         impl->inputs = source.inputs;
+        impl->lateInputs.assign(lateBegin, allSourceInputs.end());
         impl->controlPlan = source.controlPlan;
         impl->scenarioFingerprint = source.scenarioFingerprint;
         impl->validationSeed = source.inputMetadata.validationSeed;
         impl->tickDurationMs = tickDurationMs;
         impl->prestartDurationMs = source.options.prestartDurationMs;
-        impl->durationMs = source.inputMetadata.durationMs;
+        impl->durationMs = source.simulationHorizonMs;
+        impl->timelineMode = source.options.timelineMode;
         impl->prestartTicks = source.prestartTicks;
         impl->mapEnvironment =
                 ToPublicMapEnvironment(source.route.mapEnvironment);
