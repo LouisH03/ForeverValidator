@@ -19,9 +19,77 @@ struct Refinement {
 };
 
 template <
+        bool TrackCollisionDiagnostics,
+        bool ReuseWheelPassInvariants,
+        bool TrustedInputs,
+        bool CompactReplacements,
+        bool EightOrderedEllipsoids,
+        bool WarpCoherentAcceleration,
+        typename Scratch>
+__device__ inline physics::Status ProbeFinishSubstep(
+        const CudaPackedSceneHeader *scene,
+        const CudaPackedStaticConfigurationHeader *configuration,
+        CudaCandidatePhysicsState &candidate,
+        float dt,
+        Scratch &scratch) {
+    const vehicle::ForceStatus forceStatus =
+            physics::ForcePass<
+                    ReuseWheelPassInvariants,
+                    CudaHandlingSpecialization::Generic>(
+                    candidate, configuration, dt);
+    if (forceStatus != vehicle::ForceStatus::Success) {
+        return static_cast<physics::Status>(
+                static_cast<std::uint32_t>(
+                        physics::Status::UnsupportedForceBase) +
+                static_cast<std::uint32_t>(forceStatus));
+    }
+    dynamics::PreCollision<CompactReplacements>(
+            candidate.body, scratch, dt);
+    const collision::Status collisionStatus =
+            collision::Detect<
+                    TrackCollisionDiagnostics,
+                    TrustedInputs,
+                    EightOrderedEllipsoids,
+                    WarpCoherentAcceleration,
+                    true>(
+                    scene, configuration, candidate, scratch);
+    if (collisionStatus != collision::Status::Success) {
+        return static_cast<physics::Status>(
+                static_cast<std::uint32_t>(
+                        physics::Status::CollisionFailureBase) +
+                static_cast<std::uint32_t>(collisionStatus));
+    }
+    const CudaSceneActor *actors =
+            collision::detail::SceneSection<CudaSceneActor>(
+                    scene, scene->actors);
+    for (std::uint32_t index = 0u;
+         index < scratch.collisionCount; ++index) {
+        decltype(auto) contact =
+                collision::detail::OrderedCollisionAt(scratch, index);
+        if (contact.staticActorIndex >= scene->actors.count) {
+            return static_cast<physics::Status>(
+                    static_cast<std::uint32_t>(
+                            physics::Status::CollisionFailureBase) +
+                    static_cast<std::uint32_t>(
+                            collision::Status::InvalidScene));
+        }
+        const CudaSceneActor &actor =
+                actors[contact.staticActorIndex];
+        if (static_cast<std::uint32_t>(
+                    actor.itemProperties.collisionGroup) == 1u) {
+            race::OnTriggerContact(candidate, actor);
+        }
+    }
+    return physics::Status::Success;
+}
+
+template <
         bool TrackCollisionDiagnostics = true,
         bool ReuseWheelPassInvariants = false,
         bool TrustedInputs = false,
+        bool CompactReplacements = false,
+        bool EightOrderedEllipsoids = false,
+        bool WarpCoherentAcceleration = false,
         typename Scratch>
 __device__ inline bool RefineTransition(
         const CudaPackedSceneHeader *scene,
@@ -31,6 +99,7 @@ __device__ inline bool RefineTransition(
         double substepStartNs,
         Scratch &scratch,
         forevervalidator::FinishTimeEstimate *estimate,
+        std::uint64_t targetResolutionNs = 1u,
         std::uint64_t incumbentUpperNs =
                 ~std::uint64_t{0},
         bool *rejected = nullptr) {
@@ -47,6 +116,14 @@ __device__ inline bool RefineTransition(
         return reject();
     }
     for (;;) {
+        const std::uint64_t intervalLower =
+                static_cast<std::uint64_t>(floor(lower));
+        const std::uint64_t intervalUpper =
+                static_cast<std::uint64_t>(ceil(upper));
+        if (intervalUpper >= intervalLower &&
+            intervalUpper - intervalLower <= targetResolutionNs) {
+            break;
+        }
         const std::uint64_t firstInterior =
                 static_cast<std::uint64_t>(floor(lower)) + 1u;
         const std::uint64_t upperCeiling =
@@ -71,10 +148,13 @@ __device__ inline bool RefineTransition(
         }
         CudaCandidatePhysicsState probe = preSubstep;
         const physics::Status status =
-                physics::CollisionSubstep<
+                ProbeFinishSubstep<
                         TrackCollisionDiagnostics,
                         ReuseWheelPassInvariants,
-                        TrustedInputs>(
+                        TrustedInputs,
+                        CompactReplacements,
+                        EightOrderedEllipsoids,
+                        WarpCoherentAcceleration>(
                         scene, configuration, probe,
                         partialDt, scratch);
         if (status != physics::Status::Success) {
@@ -98,13 +178,17 @@ __device__ inline bool RefineTransition(
             static_cast<std::uint64_t>(ceil(upper));
     estimate->estimatedNs = estimate->upperBoundNs;
     return estimate->lowerBoundNs < estimate->upperBoundNs &&
-           estimate->upperBoundNs - estimate->lowerBoundNs <= 1u;
+           estimate->upperBoundNs - estimate->lowerBoundNs <=
+                   targetResolutionNs;
 }
 
 template <
         bool TrackCollisionDiagnostics = true,
         bool ReuseWheelPassInvariants = false,
         bool TrustedInputs = false,
+        bool CompactReplacements = false,
+        bool EightOrderedEllipsoids = false,
+        bool WarpCoherentAcceleration = false,
         typename Scratch>
 __device__ inline physics::Status StepAndRefine(
         const CudaPackedSceneHeader *scene,
@@ -113,6 +197,7 @@ __device__ inline physics::Status StepAndRefine(
         const CudaControlTick &tick,
         Scratch &scratch,
         Refinement &output,
+        std::uint64_t targetResolutionNs = 1u,
         std::uint64_t incumbentUpperNs =
                 ~std::uint64_t{0}) {
     const float dt =
@@ -152,7 +237,11 @@ __device__ inline physics::Status StepAndRefine(
                     physics::CollisionSubstep<
                             TrackCollisionDiagnostics,
                             ReuseWheelPassInvariants,
-                            TrustedInputs>(
+                            TrustedInputs,
+                            CompactReplacements,
+                            EightOrderedEllipsoids,
+                            WarpCoherentAcceleration,
+                            CudaHandlingSpecialization::Generic>(
                             scene, configuration, candidate,
                             substepDt, scratch);
             if (status != physics::Status::Success) {
@@ -167,10 +256,14 @@ __device__ inline physics::Status StepAndRefine(
                 output.present = RefineTransition<
                         TrackCollisionDiagnostics,
                         ReuseWheelPassInvariants,
-                        TrustedInputs>(
+                        TrustedInputs,
+                        CompactReplacements,
+                        EightOrderedEllipsoids,
+                        WarpCoherentAcceleration>(
                         scene, configuration, preSubstep,
                         substepDt, substepStartNs, scratch,
-                        &output.estimate, incumbentUpperNs,
+                        &output.estimate, targetResolutionNs,
+                        incumbentUpperNs,
                         &rejected);
                 output.rejected = rejected;
                 output.failed = !output.present && !output.rejected;

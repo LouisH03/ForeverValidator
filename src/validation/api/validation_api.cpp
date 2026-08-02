@@ -2873,6 +2873,7 @@ PhysicsSandboxCudaSearchSession::Impl::Convert(
     result.cancelled =
             execution.status == simulation::CudaSearchStatus::Cancelled;
     result.bestChanged = execution.bestChanged;
+    result.bestValid = execution.best.valid;
     result.metrics.residentDeviceBytes =
             execution.residentDeviceBytes;
     result.metrics.mutationDeviceBytes =
@@ -2932,6 +2933,11 @@ PhysicsSandboxCudaSearchSession::Impl::Convert(
     result.bestInputs.reserve(best.inputs.size());
     for (const simulation::CudaSearchInputEvent &input : best.inputs) {
         result.bestInputs.push_back(PublicInput(input));
+    }
+
+    if (!best.stateCaptured) {
+        return PhysicsSandboxResult<
+                PhysicsSandboxCudaSearchBatch>::Success(std::move(result));
     }
 
     ReplaySimulationInstanceClone clone;
@@ -3242,6 +3248,34 @@ CreatePhysicsSandboxCudaSearchSession(
         internal.maximumEventCount = maximumEventCount;
         internal.useLegacyMutationPipelineForTesting =
                 configuration.useLegacyMutationPipelineForTesting;
+        internal.captureBestState = configuration.captureBestState;
+        if (configuration.incumbent) {
+            if (configuration.incumbent->mutationCount >
+                        std::numeric_limits<std::uint32_t>::max() ||
+                (configuration.incumbent->mutation &&
+                 !configuration.incumbent->candidateId)) {
+                return PhysicsSandboxResult<
+                        PhysicsSandboxCudaSearchSession>::Failure(
+                        SearchError(
+                                PhysicsSandboxErrorCode::InvalidRequest,
+                                "invalid CUDA incumbent seed"));
+            }
+            simulation::CudaSearchIncumbent incumbent;
+            incumbent.mutation = configuration.incumbent->mutation;
+            incumbent.candidateId =
+                    configuration.incumbent->candidateId.value_or(0u);
+            incumbent.mutationCount = static_cast<std::uint32_t>(
+                    configuration.incumbent->mutationCount);
+            incumbent.evaluationTick =
+                    configuration.incumbent->evaluationTick;
+            incumbent.score = configuration.incumbent->score;
+            incumbent.timeMs = configuration.incumbent->timeMs;
+            incumbent.detail0 = configuration.incumbent->detail0;
+            incumbent.detail1 = configuration.incumbent->detail1;
+            incumbent.preciseFinish =
+                    configuration.incumbent->preciseFinish;
+            internal.incumbent = incumbent;
+        }
         if (configuration.useSessionSpecialization) {
             internal.sessionSpecialization =
                     source.session->CudaSearchSpecialization();

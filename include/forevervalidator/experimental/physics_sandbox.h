@@ -416,6 +416,18 @@ using PhysicsSandboxCudaEvaluator = std::variant<
         PhysicsSandboxCudaStuntPointsEvaluator,
         PhysicsSandboxCudaFinishTimeEvaluator>;
 
+struct PhysicsSandboxCudaSearchIncumbent {
+    bool mutation = false;
+    std::optional<std::uint64_t> candidateId;
+    std::size_t mutationCount = 0u;
+    std::uint32_t evaluationTick = 0u;
+    double score = 0.0;
+    double timeMs = 0.0;
+    double detail0 = 0.0;
+    double detail1 = 0.0;
+    bool preciseFinish = false;
+};
+
 struct PhysicsSandboxCudaSearchConfiguration {
     std::uint32_t maximumBatchSize = 1u;
     std::int64_t earliestMutationTimeMs = 0;
@@ -428,6 +440,11 @@ struct PhysicsSandboxCudaSearchConfiguration {
     bool useSessionSpecialization = false;
     // Retains the original materialization path for exact differential tests.
     bool useLegacyMutationPipelineForTesting = false;
+    // ForeverTAS resolves improved runs on its optimized CPU worker. Other
+    // callers retain the compatible CUDA winner-state capture by default.
+    bool captureBestState = true;
+    // Seeds a recreated session with an already verified baseline incumbent.
+    std::optional<PhysicsSandboxCudaSearchIncumbent> incumbent;
 };
 
 // An opaque in-process runtime clone. States are not serializable and are not
@@ -485,6 +502,7 @@ struct PhysicsSandboxCudaSearchBatch {
     std::uint64_t mutationImprovementCount = 0u;
     bool cancelled = false;
     bool bestChanged = false;
+    bool bestValid = false;
     bool bestIsMutation = false;
     std::optional<std::uint64_t> bestCandidateId;
     std::size_t bestMutationCount = 0u;

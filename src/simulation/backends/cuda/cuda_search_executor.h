@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -78,6 +79,18 @@ struct CudaSearchInputEvent {
     std::int32_t value = 0;
 };
 
+struct CudaSearchIncumbent {
+    bool mutation = false;
+    std::uint64_t candidateId = 0u;
+    std::uint32_t mutationCount = 0u;
+    std::uint32_t evaluationTick = 0u;
+    double score = 0.0;
+    double timeMs = 0.0;
+    double detail0 = 0.0;
+    double detail1 = 0.0;
+    bool preciseFinish = false;
+};
+
 struct CudaSearchExecutorConfiguration {
     const void *deviceScene = nullptr;
     const void *deviceStaticConfiguration = nullptr;
@@ -95,6 +108,8 @@ struct CudaSearchExecutorConfiguration {
     std::int64_t evaluationEndTimeMs = 0;
     std::size_t maximumEventCount = 0u;
     bool useLegacyMutationPipelineForTesting = false;
+    bool captureBestState = true;
+    std::optional<CudaSearchIncumbent> incumbent;
     std::shared_ptr<const cuda::specialization::SessionModule>
             sessionSpecialization;
 };
@@ -112,6 +127,7 @@ enum class CudaSearchStatus : std::uint32_t {
 struct CudaSearchBest {
     bool valid = false;
     bool mutation = false;
+    bool stateCaptured = false;
     std::uint64_t candidateId = 0u;
     std::uint32_t mutationCount = 0u;
     std::uint32_t evaluationTick = 0u;

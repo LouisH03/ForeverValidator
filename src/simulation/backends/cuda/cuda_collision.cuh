@@ -1941,6 +1941,7 @@ template <
         bool TrustedInputs = false,
         bool EightOrderedEllipsoids = false,
         bool WarpCoherentAcceleration = false,
+        bool TriggerOnly = false,
         typename Scratch = CudaCollisionScratch>
 __device__ inline Status Detect(
         const CudaPackedSceneHeader *scene,
@@ -1997,6 +1998,7 @@ __device__ inline Status Detect(
                 candidate.body.current.linearSpeed,
                 surfaceCacheHorizon);
         bool useSurfaceCache =
+                !TriggerOnly &&
                 scratch.surfaceCacheEnabled &&
                 (EightOrderedEllipsoids ||
                  collisionShapeCount == 5u ||
@@ -2183,9 +2185,12 @@ __device__ inline Status Detect(
         if (useSurfaceCache && refreshSurfaceCache) {
             scratch.meshCacheValid = false;
             scratch.surfaceHitCount = 0u;
-            constexpr std::uint32_t TargetGroups[] = {
-                    1u, 3u, 4u};
-            for (std::uint32_t group : TargetGroups) {
+            constexpr std::uint32_t TargetGroups[] = {1u, 3u, 4u};
+            const std::uint32_t targetGroupCount =
+                    TriggerOnly ? 1u : 3u;
+            for (std::uint32_t groupIndex = 0u;
+                 groupIndex < targetGroupCount; ++groupIndex) {
+                const std::uint32_t group = TargetGroups[groupIndex];
                 const CudaSceneAccelerationRange range =
                         scene->accelerationGroups[group - 1u];
                 if (range.cellCount <= 1u) continue;
@@ -2628,7 +2633,11 @@ __device__ inline Status Detect(
                 detail::TransformBox(
                         shape.localBounds, shapeWorld);
         constexpr std::uint32_t TargetGroups[] = {1u, 3u, 4u};
-        for (std::uint32_t group : TargetGroups) {
+        const std::uint32_t targetGroupCount =
+                TriggerOnly ? 1u : 3u;
+        for (std::uint32_t groupIndex = 0u;
+             groupIndex < targetGroupCount; ++groupIndex) {
+            const std::uint32_t group = TargetGroups[groupIndex];
             const CudaSceneAccelerationRange range =
                     scene->accelerationGroups[group - 1u];
             if (range.cellCount <= 1u) continue;

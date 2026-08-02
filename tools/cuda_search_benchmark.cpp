@@ -51,6 +51,7 @@ bool SameBatch(const PhysicsSandboxCudaSearchBatch &left,
         left.mutationImprovementCount != right.mutationImprovementCount ||
         left.cancelled != right.cancelled ||
         left.bestChanged != right.bestChanged ||
+        left.bestValid != right.bestValid ||
         left.bestIsMutation != right.bestIsMutation ||
         left.bestCandidateId != right.bestCandidateId ||
         left.bestMutationCount != right.bestMutationCount ||
@@ -293,7 +294,9 @@ int main(int argc, char **argv) {
                 "velocity|point|pose|volume-entry|finish-time] "
                 "[velocity|point|pose|volume-entry|finish-time] "
                 "[--input-rate EVENTS_PER_SECOND] "
-                "[--boundary-offset-ticks TICKS]");
+                "[--boundary-offset-ticks TICKS] "
+                "[--existing-min COUNT] [--existing-max COUNT] "
+                "[--no-winner-state]");
     }
     const std::uint32_t candidateCount =
             static_cast<std::uint32_t>(std::stoul(argv[3]));
@@ -326,8 +329,15 @@ int main(int argc, char **argv) {
     }
     std::uint32_t inputRate = 0u;
     std::uint32_t boundaryOffsetTicks = 0u;
+    std::uint32_t existingMinimumCount = 1u;
+    std::uint32_t existingMaximumCount = 16u;
+    bool captureBestState = true;
     for (int argument = 10; argument < argc; ++argument) {
         const std::string option = argv[argument];
+        if (option == "--no-winner-state") {
+            captureBestState = false;
+            continue;
+        }
         if (argument + 1 >= argc) {
             return Fail("benchmark option is missing a value");
         }
@@ -337,6 +347,12 @@ int main(int argc, char **argv) {
         } else if (option == "--boundary-offset-ticks") {
             boundaryOffsetTicks = static_cast<std::uint32_t>(
                     std::stoul(argv[++argument]));
+        } else if (option == "--existing-min") {
+            existingMinimumCount = static_cast<std::uint32_t>(
+                    std::stoul(argv[++argument]));
+        } else if (option == "--existing-max") {
+            existingMaximumCount = static_cast<std::uint32_t>(
+                    std::stoul(argv[++argument]));
         } else {
             return Fail("unknown benchmark option: " + option);
         }
@@ -345,7 +361,8 @@ int main(int argc, char **argv) {
         return Fail("unknown modifier");
     }
     if (candidateCount == 0u || timelineTicks == 0u ||
-        repetitions == 0u) {
+        repetitions == 0u ||
+        existingMinimumCount > existingMaximumCount) {
         return Fail("benchmark dimensions must be positive");
     }
 
@@ -448,8 +465,8 @@ int main(int argc, char **argv) {
         modifier == "mixed") {
         PhysicsSandboxCudaExistingEventModifier existing;
         existing.window = modifierWindow;
-        existing.minimumCount = 1u;
-        existing.maximumCount = 16u;
+        existing.minimumCount = existingMinimumCount;
+        existing.maximumCount = existingMaximumCount;
         existing.maximumTimeShiftMs =
                 modifier == "existing-event-static" ? 0 : 100;
         existing.steeringDeltaMinimum = -4096;
@@ -532,6 +549,7 @@ int main(int argc, char **argv) {
     }
     configuration.useLegacyMutationPipelineForTesting =
             pipeline == "legacy";
+    configuration.captureBestState = captureBestState;
 
     auto session = CreatePhysicsSandboxCudaSearchSession(
             sandbox.Value(), configuration);
@@ -579,6 +597,10 @@ int main(int argc, char **argv) {
     if (!baseline) {
         return Fail("could not evaluate baseline: " +
                     Diagnostic(baseline.Error()));
+    }
+    if (!baseline.Value().bestValid ||
+        baseline.Value().bestSnapshot.has_value() != captureBestState) {
+        return Fail("CUDA baseline winner-state capture policy was not honored");
     }
     if (legacySession.has_value()) {
         auto legacyBaseline = legacySession->EvaluateBaseline();
@@ -689,12 +711,16 @@ int main(int argc, char **argv) {
                 : simulatedTicks * 1000.0 /
                           simulationKernelMilliseconds;
         const std::optional<std::uint64_t> winningEvaluationTick =
-                batch.Value().bestState.timeMs > branchTimeMs
+                batch.Value().bestValid
                 ? std::optional<std::uint64_t>(
-                          (batch.Value().bestState.timeMs - branchTimeMs) /
-                                  tickDurationMs -
-                          1u)
+                          batch.Value().bestEvaluationTick)
                 : std::nullopt;
+        const double finishRefinementTickEquivalents =
+                simulationKernelMilliseconds == 0.0
+                ? 0.0
+                : batch.Value().metrics
+                                  .finishRefinementKernelMilliseconds *
+                          timelineTicks / simulationKernelMilliseconds;
         std::cout << std::fixed << std::setprecision(6)
                   << "{"
                   << "\"repetition\":" << repetition << ","
@@ -720,6 +746,10 @@ int main(int argc, char **argv) {
                   << loaded.Value().timeMs << ","
                   << "\"normalized_input_events\":"
                   << normalizedInputCount << ","
+                  << "\"existing_minimum_count\":"
+                  << existingMinimumCount << ","
+                  << "\"existing_maximum_count\":"
+                  << existingMaximumCount << ","
                   << "\"modifier\":\"" << modifier << "\","
                   << "\"mutation_pipeline\":\"" << pipeline
                   << "\","
@@ -788,6 +818,8 @@ int main(int argc, char **argv) {
                   << batch.Value().metrics
                              .finishRefinementKernelMilliseconds
                   << ","
+                  << "\"finish_refinement_tick_equivalents\":"
+                  << finishRefinementTickEquivalents << ","
                   << "\"winner_kernel_ms\":"
                   << batch.Value().metrics.winnerKernelMilliseconds << ","
                   << "\"winner_reduction_kernel_ms\":"
