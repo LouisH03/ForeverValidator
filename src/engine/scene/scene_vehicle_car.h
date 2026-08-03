@@ -52,6 +52,21 @@ public:
     float steering = 0.0f;
   };
 
+  struct SConditionState {
+    GmVec3 localSpeed{};
+    bool freeWheeling = false;
+    bool lateralContact = false;
+    bool sliding = false;
+    int gear = 0;
+    float rpm = 0.0f;
+    float turningRate = 0.0f;
+    u32 turboType = 0u;
+    float turboBoostFactor = 0.0f;
+    std::array<bool, 4> wheelGroundContact{{false, false, false, false}};
+    std::array<bool, 4> wheelSliding{{false, false, false, false}};
+    std::array<std::uint16_t, 4> wheelSurface{{0u, 0u, 0u, 0u}};
+  };
+
   struct SFeedback {
     GmSpring<float> forwardSpring;
     GmSpring<float> sideSpring;
@@ -300,6 +315,7 @@ public:
     vehicleStruct = std::ref(definition);
   }
   SControlInput ControlInput(void) const;
+  SConditionState ConditionState(void) const;
   void ApplyControlInput(const SControlInput &input);
   const SVehicleCarState &ReplayPhysicsState(void) const {
     return frameHistory.physicsCurrent;

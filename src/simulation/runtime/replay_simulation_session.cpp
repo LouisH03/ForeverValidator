@@ -1557,6 +1557,20 @@ ReplaySimulationSession::CurrentState() const {
     result.wheelContact = camera.wheelContact;
     result.wheelHasSurface = camera.wheelHasSurface;
     result.cameraSupportUp = camera.cameraSupportUp;
+    const CSceneVehicleCar::SConditionState condition =
+            impl->instance.runtime->CurrentConditionState();
+    result.localSpeed = condition.localSpeed;
+    result.freeWheeling = condition.freeWheeling;
+    result.lateralContact = condition.lateralContact;
+    result.sliding = condition.sliding;
+    result.gear = condition.gear;
+    result.rpm = condition.rpm;
+    result.turningRate = condition.turningRate;
+    result.turboType = condition.turboType;
+    result.turboBoostFactor = condition.turboBoostFactor;
+    result.wheelContact = condition.wheelGroundContact;
+    result.wheelSliding = condition.wheelSliding;
+    result.wheelSurface = condition.wheelSurface;
     return result;
 }
 

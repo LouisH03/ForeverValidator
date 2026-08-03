@@ -95,6 +95,7 @@ public:
     ReplayDynaFrameState CurrentFrame() const;
     ReplayVehicleControlState CurrentControls() const;
     ReplayRaceCameraVehicleState CurrentRaceCameraState() const;
+    CSceneVehicleCar::SConditionState CurrentConditionState() const;
     const ReplayRaceProgress &RaceProgress() const;
     std::optional<std::uint32_t> ApplyReplayStuntTimePenalty(
             std::uint32_t overtimeMs);

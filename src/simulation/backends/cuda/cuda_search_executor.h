@@ -72,6 +72,85 @@ struct CudaSearchEvaluatorConfiguration {
     double values[10]{};
 };
 
+enum class CudaSearchConditionOpcode : std::uint32_t {
+    Constant,
+    ConstantVector,
+    Scalar,
+    Vector,
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    KilometersPerHour,
+    Degrees,
+    Distance,
+    Greater,
+    Less,
+    GreaterOrEqual,
+    LessOrEqual,
+    Equal,
+    LogicalAnd,
+};
+
+enum class CudaSearchConditionValue : std::uint32_t {
+    Position,
+    PreviousPosition,
+    Velocity,
+    PreviousVelocity,
+    LocalVelocity,
+    PreviousLocalVelocity,
+    AngularVelocity,
+    PreviousAngularVelocity,
+    Yaw,
+    Pitch,
+    Roll,
+    PreviousYaw,
+    PreviousPitch,
+    PreviousRoll,
+    Speed,
+    PreviousSpeed,
+    LocalSpeed,
+    PreviousLocalSpeed,
+    FreeWheeling,
+    LateralContact,
+    Sliding,
+    Gear,
+    Rpm,
+    TurningRate,
+    TurboType,
+    TurboBoostFactor,
+    WheelGroundContact0,
+    WheelGroundContact1,
+    WheelGroundContact2,
+    WheelGroundContact3,
+    WheelSliding0,
+    WheelSliding1,
+    WheelSliding2,
+    WheelSliding3,
+    WheelSurface0,
+    WheelSurface1,
+    WheelSurface2,
+    WheelSurface3,
+    Iterations,
+    LastImprovementTime,
+    LastRestartTime,
+    CurrentTime,
+};
+
+struct CudaSearchConditionInstruction {
+    CudaSearchConditionOpcode opcode = CudaSearchConditionOpcode::Constant;
+    CudaSearchConditionValue value = CudaSearchConditionValue::Speed;
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
+};
+
+struct CudaSearchConditionConfiguration {
+    std::vector<CudaSearchConditionInstruction> instructions;
+    double lastImprovementTimeSeconds = 0.0;
+    double lastRestartTimeSeconds = 0.0;
+};
+
 struct CudaSearchInputEvent {
     std::int32_t timeMs = 0;
     std::uint32_t action = 0u;
@@ -100,6 +179,7 @@ struct CudaSearchExecutorConfiguration {
     std::vector<CudaSearchModifierConfiguration> modifiers;
     std::vector<double> smoothWeights;
     CudaSearchEvaluatorConfiguration evaluator{};
+    std::optional<CudaSearchConditionConfiguration> condition;
     std::uint32_t maximumBatchSize = 1u;
     std::uint32_t tickDurationMs = 10u;
     std::uint32_t prestartDurationMs = 0u;
@@ -204,6 +284,9 @@ public:
     bool ReserveBatchCapacity(
             std::uint32_t candidateCount,
             std::string *diagnostic) noexcept;
+    bool UpdateConditionTimes(
+            double lastImprovementTimeSeconds,
+            double lastRestartTimeSeconds) noexcept;
     std::uint32_t BatchCapacity() const noexcept;
 
 private:

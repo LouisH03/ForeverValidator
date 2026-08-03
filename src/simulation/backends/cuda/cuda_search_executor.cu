@@ -1805,6 +1805,219 @@ __device__ bool SegmentEntry(
     return true;
 }
 
+struct DeviceConditionValue {
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
+    bool vector = false;
+};
+
+__device__ double ConditionLength(const GmVec3 &value) {
+    return sqrt(static_cast<double>(value.x) * value.x +
+                static_cast<double>(value.y) * value.y +
+                static_cast<double>(value.z) * value.z);
+}
+
+__device__ GmVec3 ConditionLocalSpeed(
+        const CHmsDyna::CHmsStateDyna &body) {
+    const auto dot = [](const GmVec3 &a, const GmVec3 &b) {
+        return a.x * b.x + a.y * b.y + a.z * b.z;
+    };
+    return {
+            dot(body.linearSpeed, body.rotation.basisX),
+            dot(body.linearSpeed, body.rotation.basisY),
+            dot(body.linearSpeed, body.rotation.basisZ)};
+}
+
+__device__ DeviceConditionValue ConditionAngles(
+        const GmQuat &q) {
+    const double sinrCosp = 2.0 *
+            (static_cast<double>(q.w) * q.x +
+             static_cast<double>(q.y) * q.z);
+    const double cosrCosp = 1.0 - 2.0 *
+            (static_cast<double>(q.x) * q.x +
+             static_cast<double>(q.y) * q.y);
+    const double sinp = 2.0 *
+            (static_cast<double>(q.w) * q.y -
+             static_cast<double>(q.z) * q.x);
+    const double sinyCosp = 2.0 *
+            (static_cast<double>(q.w) * q.z +
+             static_cast<double>(q.x) * q.y);
+    const double cosyCosp = 1.0 - 2.0 *
+            (static_cast<double>(q.y) * q.y +
+             static_cast<double>(q.z) * q.z);
+    const double pitch = fabs(sinp) >= 1.0
+            ? copysign(1.57079632679489661923, sinp)
+            : asin(sinp);
+    return {atan2(sinyCosp, cosyCosp), pitch,
+            atan2(sinrCosp, cosrCosp), true};
+}
+
+__device__ DeviceConditionValue ConditionSource(
+        CudaSearchConditionValue source,
+        const CudaCandidatePhysicsState &state,
+        std::uint64_t iterationCount,
+        double lastImprovementTimeSeconds,
+        double lastRestartTimeSeconds,
+        double currentTimeSeconds) {
+    const CHmsDyna::CHmsStateDyna &current = state.body.current;
+    const CHmsDyna::CHmsStateDyna &previous = state.body.temporary;
+    const GmVec3 currentLocal =
+            state.vehicle.frameHistory.physicsCurrent.localLinearSpeed;
+    const GmVec3 previousLocal = ConditionLocalSpeed(previous);
+    const auto vector = [](const GmVec3 &value) {
+        return DeviceConditionValue{value.x, value.y, value.z, true};
+    };
+    switch (source) {
+    case CudaSearchConditionValue::Position: return vector(current.position);
+    case CudaSearchConditionValue::PreviousPosition: return vector(previous.position);
+    case CudaSearchConditionValue::Velocity: return vector(current.linearSpeed);
+    case CudaSearchConditionValue::PreviousVelocity: return vector(previous.linearSpeed);
+    case CudaSearchConditionValue::LocalVelocity: return vector(currentLocal);
+    case CudaSearchConditionValue::PreviousLocalVelocity: return vector(previousLocal);
+    case CudaSearchConditionValue::AngularVelocity: return vector(current.angularSpeed);
+    case CudaSearchConditionValue::PreviousAngularVelocity: return vector(previous.angularSpeed);
+    case CudaSearchConditionValue::Yaw: return {ConditionAngles(current.rotationQuat).x};
+    case CudaSearchConditionValue::Pitch: return {ConditionAngles(current.rotationQuat).y};
+    case CudaSearchConditionValue::Roll: return {ConditionAngles(current.rotationQuat).z};
+    case CudaSearchConditionValue::PreviousYaw: return {ConditionAngles(previous.rotationQuat).x};
+    case CudaSearchConditionValue::PreviousPitch: return {ConditionAngles(previous.rotationQuat).y};
+    case CudaSearchConditionValue::PreviousRoll: return {ConditionAngles(previous.rotationQuat).z};
+    case CudaSearchConditionValue::Speed: return {ConditionLength(current.linearSpeed)};
+    case CudaSearchConditionValue::PreviousSpeed: return {ConditionLength(previous.linearSpeed)};
+    case CudaSearchConditionValue::LocalSpeed: return {ConditionLength(currentLocal)};
+    case CudaSearchConditionValue::PreviousLocalSpeed: return {ConditionLength(previousLocal)};
+    case CudaSearchConditionValue::FreeWheeling: return {state.vehicle.controls.forcedLowSpeedFriction ? 1.0 : 0.0};
+    case CudaSearchConditionValue::LateralContact: return {state.vehicle.contacts.lateralSlowDownContactActive ? 1.0 : 0.0};
+    case CudaSearchConditionValue::Sliding: {
+        bool sliding = false;
+        for (std::uint32_t i = 0u; i < cuda::facts::WheelCount(state.vehicle); ++i) {
+            sliding = sliding || (state.vehicle.wheels.values[i].realTime.contactPresent &&
+                                  state.vehicle.wheels.values[i].realTime.slipping);
+        }
+        return {sliding ? 1.0 : 0.0};
+    }
+    case CudaSearchConditionValue::Gear:
+        return {state.vehicle.engine.useLowSpeedGateB ? -1.0 :
+                static_cast<double>(state.vehicle.engine.gearIndex)};
+    case CudaSearchConditionValue::Rpm: return {state.vehicle.engine.engineInputMemory};
+    case CudaSearchConditionValue::TurningRate: return {state.vehicle.radiusSteering.steerAngle};
+    case CudaSearchConditionValue::TurboType: return {static_cast<double>(state.vehicle.turbo.type)};
+    case CudaSearchConditionValue::TurboBoostFactor:
+        return {state.vehicle.turbo.type == CSceneVehicleCar::ETurboType_Roulette
+                ? static_cast<double>(state.vehicle.turbo.type2Phase) + 1.0
+                : state.vehicle.turbo.impulseScale};
+    case CudaSearchConditionValue::Iterations: return {static_cast<double>(iterationCount)};
+    case CudaSearchConditionValue::LastImprovementTime: return {lastImprovementTimeSeconds};
+    case CudaSearchConditionValue::LastRestartTime: return {lastRestartTimeSeconds};
+    case CudaSearchConditionValue::CurrentTime: return {currentTimeSeconds};
+    default: break;
+    }
+    const std::uint32_t raw = static_cast<std::uint32_t>(source);
+    const std::uint32_t ground0 = static_cast<std::uint32_t>(CudaSearchConditionValue::WheelGroundContact0);
+    const std::uint32_t sliding0 = static_cast<std::uint32_t>(CudaSearchConditionValue::WheelSliding0);
+    const std::uint32_t surface0 = static_cast<std::uint32_t>(CudaSearchConditionValue::WheelSurface0);
+    std::uint32_t wheel = 0u;
+    if (raw >= ground0 && raw < ground0 + 4u) {
+        wheel = raw - ground0;
+        return {wheel < cuda::facts::WheelCount(state.vehicle) &&
+                state.vehicle.wheels.values[wheel].realTime.contactPresent ? 1.0 : 0.0};
+    }
+    if (raw >= sliding0 && raw < sliding0 + 4u) {
+        wheel = raw - sliding0;
+        const auto &value = state.vehicle.wheels.values[wheel].realTime;
+        return {wheel < cuda::facts::WheelCount(state.vehicle) &&
+                value.contactPresent && value.slipping ? 1.0 : 0.0};
+    }
+    wheel = raw - surface0;
+    if (raw >= surface0 && raw < surface0 + 4u &&
+        wheel < cuda::facts::WheelCount(state.vehicle)) {
+        const auto &value = state.vehicle.wheels.values[wheel].realTime;
+        return {value.contactPresent
+                ? static_cast<double>(value.contactMaterial)
+                : 65535.0};
+    }
+    return {};
+}
+
+__device__ __noinline__ bool EvaluateCondition(
+        const CudaSearchConditionInstruction *instructions,
+        std::uint32_t instructionCount,
+        const CudaCandidatePhysicsState &state,
+        std::uint64_t iterationCount,
+        double lastImprovementTimeSeconds,
+        double lastRestartTimeSeconds,
+        double currentTimeSeconds) {
+    if (instructionCount == 0u) return true;
+    DeviceConditionValue stack[32];
+    std::uint32_t size = 0u;
+    for (std::uint32_t index = 0u; index < instructionCount; ++index) {
+        const CudaSearchConditionInstruction instruction = instructions[index];
+        if (instruction.opcode == CudaSearchConditionOpcode::Constant) {
+            if (size >= 32u) return false;
+            stack[size++] = {instruction.x};
+            continue;
+        }
+        if (instruction.opcode == CudaSearchConditionOpcode::ConstantVector) {
+            if (size >= 32u) return false;
+            stack[size++] = {instruction.x, instruction.y, instruction.z, true};
+            continue;
+        }
+        if (instruction.opcode == CudaSearchConditionOpcode::Scalar ||
+            instruction.opcode == CudaSearchConditionOpcode::Vector) {
+            if (size >= 32u) return false;
+            DeviceConditionValue value = ConditionSource(
+                    instruction.value, state, iterationCount,
+                    lastImprovementTimeSeconds,
+                    lastRestartTimeSeconds, currentTimeSeconds);
+            if (instruction.opcode == CudaSearchConditionOpcode::Scalar &&
+                value.vector) {
+                const int component = static_cast<int>(instruction.x);
+                value = {component == 1 ? value.x
+                         : component == 2 ? value.y
+                         : component == 3 ? value.z : 0.0};
+            }
+            if ((instruction.opcode == CudaSearchConditionOpcode::Scalar &&
+                 value.vector) ||
+                (instruction.opcode == CudaSearchConditionOpcode::Vector &&
+                 !value.vector)) return false;
+            stack[size++] = value;
+            continue;
+        }
+        if (instruction.opcode == CudaSearchConditionOpcode::KilometersPerHour ||
+            instruction.opcode == CudaSearchConditionOpcode::Degrees) {
+            if (size == 0u || stack[size - 1u].vector) return false;
+            stack[size - 1u].x *= instruction.opcode ==
+                    CudaSearchConditionOpcode::KilometersPerHour
+                    ? 3.6 : 57.2957795130823208768;
+            continue;
+        }
+        if (size < 2u) return false;
+        const DeviceConditionValue right = stack[--size];
+        DeviceConditionValue &left = stack[size - 1u];
+        switch (instruction.opcode) {
+        case CudaSearchConditionOpcode::Distance:
+            if (!left.vector || !right.vector) return false;
+            left = {sqrt((left.x-right.x)*(left.x-right.x) +
+                         (left.y-right.y)*(left.y-right.y) +
+                         (left.z-right.z)*(left.z-right.z))};
+            break;
+        case CudaSearchConditionOpcode::Add: left.x += right.x; break;
+        case CudaSearchConditionOpcode::Subtract: left.x -= right.x; break;
+        case CudaSearchConditionOpcode::Multiply: left.x *= right.x; break;
+        case CudaSearchConditionOpcode::Divide: left.x = right.x == 0.0 ? 0.0 : left.x / right.x; break;
+        case CudaSearchConditionOpcode::Greater: left = {left.x > right.x ? 1.0 : 0.0}; break;
+        case CudaSearchConditionOpcode::Less: left = {left.x < right.x ? 1.0 : 0.0}; break;
+        case CudaSearchConditionOpcode::GreaterOrEqual: left = {left.x >= right.x ? 1.0 : 0.0}; break;
+        case CudaSearchConditionOpcode::LessOrEqual: left = {left.x <= right.x ? 1.0 : 0.0}; break;
+        case CudaSearchConditionOpcode::Equal: left = {left.x == right.x ? 1.0 : 0.0}; break;
+        case CudaSearchConditionOpcode::LogicalAnd: left = {left.x != 0.0 && right.x != 0.0 ? 1.0 : 0.0}; break;
+        default: return false;
+        }
+    }
+    return size == 1u && !stack[0].vector && stack[0].x != 0.0;
+}
+
 __device__ DeviceSample EvaluateState(
         const CudaSearchEvaluatorConfiguration &evaluator,
         const CudaCandidatePhysicsState &state,
@@ -2456,6 +2669,11 @@ __global__ __launch_bounds__(
         const CudaControlTick *__restrict__ baselineTicks,
         std::uint32_t timelineTickCount,
         const CudaSearchEvaluatorConfiguration *__restrict__ evaluator,
+        const CudaSearchConditionInstruction *__restrict__ condition,
+        std::uint32_t conditionInstructionCount,
+        double lastImprovementTimeSeconds,
+        double lastRestartTimeSeconds,
+        double currentTimeSeconds,
         std::uint32_t tickDurationMs,
         std::uint32_t prestartDurationMs,
         std::int64_t branchTimeMs,
@@ -2679,6 +2897,16 @@ __global__ __launch_bounds__(
         state.firstStep = false;
         ++state.controlCursor;
         if (publicTime < evaluationStartTimeMs) {
+            continue;
+        }
+        if (conditionInstructionCount != 0u &&
+            !EvaluateCondition(
+                    condition, conditionInstructionCount, state,
+                    baseline ? 0u : candidateId + 1u,
+                    lastImprovementTimeSeconds,
+                    lastRestartTimeSeconds, currentTimeSeconds)) {
+            ++evaluationIndex;
+            if (state.race.progress.raceCompleted) break;
             continue;
         }
         std::uint32_t stuntsScore = 0u;
@@ -3314,6 +3542,7 @@ struct CudaSearchExecutor::Impl {
     DeviceAllocation<CudaSearchModifierConfiguration> modifiers;
     DeviceAllocation<double> smoothWeights;
     DeviceAllocation<CudaSearchEvaluatorConfiguration> evaluator;
+    DeviceAllocation<CudaSearchConditionInstruction> condition;
     DeviceAllocation<CudaCandidateState> capturedWinnerState;
     DeviceAllocation<DeviceSample> candidateBestSamples;
     DeviceAllocation<cuda::finish::Refinement> finishRefinements;
@@ -3369,6 +3598,7 @@ struct CudaSearchExecutor::Impl {
         ADD_BYTES(modifiers);
         ADD_BYTES(smoothWeights);
         ADD_BYTES(evaluator);
+        ADD_BYTES(condition);
         ADD_BYTES(capturedWinnerState);
         ADD_BYTES(candidateBestSamples);
         ADD_BYTES(finishRefinements);
@@ -4203,6 +4433,23 @@ struct CudaSearchExecutor::Impl {
         considerKernel(
                 DenseTailKernelMinimumBlocksPerSm,
                 denseTailKernelMetrics);
+        const std::uint32_t conditionInstructionCount =
+                configuration.condition
+                ? static_cast<std::uint32_t>(
+                          configuration.condition->instructions.size())
+                : 0u;
+        const double lastImprovementTimeSeconds =
+                configuration.condition
+                ? configuration.condition->lastImprovementTimeSeconds
+                : 0.0;
+        const double lastRestartTimeSeconds =
+                configuration.condition
+                ? configuration.condition->lastRestartTimeSeconds
+                : 0.0;
+        const double currentTimeSeconds =
+                std::chrono::duration<double>(
+                        std::chrono::system_clock::now().time_since_epoch())
+                        .count();
         if (specializedModule) {
             const CUresult simulationLaunch = LaunchDriverKernel(
                     specializedModule->Kernel(selectedMinimumBlocks),
@@ -4214,6 +4461,11 @@ struct CudaSearchExecutor::Impl {
                     baselineTicks.Get(),
                     timelineTickCount,
                     evaluator.Get(),
+                    condition.Get(),
+                    conditionInstructionCount,
+                    lastImprovementTimeSeconds,
+                    lastRestartTimeSeconds,
+                    currentTimeSeconds,
                     configuration.tickDurationMs,
                     configuration.prestartDurationMs,
                     configuration.branchTimeMs,
@@ -4289,6 +4541,11 @@ struct CudaSearchExecutor::Impl {
                     baselineTicks.Get(),
                     timelineTickCount,
                     evaluator.Get(),
+                    condition.Get(),
+                    conditionInstructionCount,
+                    lastImprovementTimeSeconds,
+                    lastRestartTimeSeconds,
+                    currentTimeSeconds,
                     configuration.tickDurationMs,
                     configuration.prestartDurationMs,
                     configuration.branchTimeMs,
@@ -5452,6 +5709,10 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
             !impl->smoothWeights.Allocate(
                     preparedConfiguration.smoothWeights.size()) ||
             !impl->evaluator.Allocate(1u) ||
+            !impl->condition.Allocate(
+                    preparedConfiguration.condition
+                            ? preparedConfiguration.condition->instructions.size()
+                            : 0u) ||
             !impl->capturedWinnerState.Allocate(1u) ||
             !impl->candidateBestSamples.Allocate(winnerSampleSlots) ||
             !impl->finishRefinements.Allocate(
@@ -5604,6 +5865,11 @@ std::unique_ptr<CudaSearchExecutor> CudaSearchExecutor::Create(
         UPLOAD(impl->smoothWeights,
                preparedConfiguration.smoothWeights,
                "uploading CUDA smooth weights");
+        if (preparedConfiguration.condition) {
+            UPLOAD(impl->condition,
+                   preparedConfiguration.condition->instructions,
+                   "uploading CUDA condition program");
+        }
         UPLOAD(impl->compactInputIndices,
                compactInputIndices,
                "uploading CUDA compact input indices");
@@ -5798,6 +6064,21 @@ bool CudaSearchExecutor::ReserveBatchCapacity(
         }
         return false;
     }
+}
+
+bool CudaSearchExecutor::UpdateConditionTimes(
+        double lastImprovementTimeSeconds,
+        double lastRestartTimeSeconds) noexcept {
+    if (!impl_ || !impl_->configuration.condition ||
+        !std::isfinite(lastImprovementTimeSeconds) ||
+        !std::isfinite(lastRestartTimeSeconds)) {
+        return false;
+    }
+    impl_->configuration.condition->lastImprovementTimeSeconds =
+            lastImprovementTimeSeconds;
+    impl_->configuration.condition->lastRestartTimeSeconds =
+            lastRestartTimeSeconds;
+    return true;
 }
 
 std::uint32_t CudaSearchExecutor::BatchCapacity() const noexcept {

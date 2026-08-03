@@ -1007,6 +1007,11 @@ ReplaySimulationRuntime::CurrentRaceCameraState() const {
     return result;
 }
 
+CSceneVehicleCar::SConditionState
+ReplaySimulationRuntime::CurrentConditionState() const {
+    return state_->vehicle.Car().ConditionState();
+}
+
 
 std::uint64_t ReplaySimulationRuntimeSemanticHash(
         const ReplaySimulationRuntime::RuntimeClone &clone) {

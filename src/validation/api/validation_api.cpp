@@ -1699,6 +1699,17 @@ struct PhysicsSandbox::Impl {
         view.car.wheelContact = state->wheelContact;
         view.car.wheelHasSurface = state->wheelHasSurface;
         view.car.cameraSupportUp = ToPublicVector(state->cameraSupportUp);
+        view.car.localSpeed = ToPublicVector(state->localSpeed);
+        view.car.freeWheeling = state->freeWheeling;
+        view.car.lateralContact = state->lateralContact;
+        view.car.sliding = state->sliding;
+        view.car.gear = state->gear;
+        view.car.rpm = state->rpm;
+        view.car.turningRate = state->turningRate;
+        view.car.turboType = state->turboType;
+        view.car.turboBoostFactor = state->turboBoostFactor;
+        view.car.wheelSliding = state->wheelSliding;
+        view.car.wheelSurface = state->wheelSurface;
         view.accelerate = state->controls.lowSpeedGateA;
         view.brake = state->controls.lowSpeedGateB;
         view.steering = state->controls.steering;
@@ -3250,6 +3261,27 @@ PhysicsSandboxCudaSearchSession::ReserveBatchCapacity(
     }
 }
 
+PhysicsSandboxResult<bool>
+PhysicsSandboxCudaSearchSession::UpdateConditionTimes(
+        double lastImprovementTimeSeconds,
+        double lastRestartTimeSeconds) noexcept {
+    if (!impl_ || !impl_->executor) {
+        return PhysicsSandboxResult<bool>::Failure(
+                SearchError(
+                        PhysicsSandboxErrorCode::InvalidSandbox,
+                        "CUDA search session is invalid"));
+    }
+    if (!impl_->executor->UpdateConditionTimes(
+                lastImprovementTimeSeconds,
+                lastRestartTimeSeconds)) {
+        return PhysicsSandboxResult<bool>::Failure(
+                SearchError(
+                        PhysicsSandboxErrorCode::InvalidRequest,
+                        "CUDA condition times are unavailable or invalid"));
+    }
+    return PhysicsSandboxResult<bool>::Success(true);
+}
+
 PhysicsSandboxResult<PhysicsSandboxCudaSearchSession>
 CreatePhysicsSandboxCudaSearchSession(
         PhysicsSandbox &sandbox,
@@ -3466,6 +3498,35 @@ CreatePhysicsSandboxCudaSearchSession(
             internal.modifiers.push_back(converted);
         }
         internal.evaluator = CudaEvaluator(configuration.evaluator);
+        if (configuration.condition) {
+            if (configuration.condition->instructions.empty() ||
+                configuration.condition->instructions.size() > 256u) {
+                return PhysicsSandboxResult<
+                        PhysicsSandboxCudaSearchSession>::Failure(
+                        SearchError(
+                                PhysicsSandboxErrorCode::InvalidRequest,
+                                "CUDA condition program must contain between 1 and 256 instructions"));
+            }
+            simulation::CudaSearchConditionConfiguration condition;
+            condition.lastImprovementTimeSeconds =
+                    configuration.condition->lastImprovementTimeSeconds;
+            condition.lastRestartTimeSeconds =
+                    configuration.condition->lastRestartTimeSeconds;
+            condition.instructions.reserve(
+                    configuration.condition->instructions.size());
+            for (const PhysicsSandboxCudaConditionInstruction &instruction :
+                 configuration.condition->instructions) {
+                condition.instructions.push_back({
+                        static_cast<simulation::CudaSearchConditionOpcode>(
+                                instruction.opcode),
+                        static_cast<simulation::CudaSearchConditionValue>(
+                                instruction.value),
+                        instruction.x,
+                        instruction.y,
+                        instruction.z});
+            }
+            internal.condition = std::move(condition);
+        }
 
         std::string diagnostic;
         std::unique_ptr<simulation::CudaSearchExecutor> executor =

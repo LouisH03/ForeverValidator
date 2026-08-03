@@ -126,6 +126,20 @@ struct PhysicsSandboxCarState {
     std::array<bool, 4> wheelContact{{true, true, true, true}};
     std::array<bool, 4> wheelHasSurface{{true, true, true, true}};
     Vector3 cameraSupportUp{0.0f, 1.0f, 0.0f};
+
+    // Script-visible vehicle state. These values mirror the condition
+    // vocabulary exposed by TMInterface rather than camera presentation.
+    Vector3 localSpeed{};
+    bool freeWheeling = false;
+    bool lateralContact = false;
+    bool sliding = false;
+    std::int32_t gear = 0;
+    float rpm = 0.0f;
+    float turningRate = 0.0f;
+    std::uint32_t turboType = 0u;
+    float turboBoostFactor = 0.0f;
+    std::array<bool, 4> wheelSliding{{false, false, false, false}};
+    std::array<std::uint16_t, 4> wheelSurface{{0u, 0u, 0u, 0u}};
 };
 
 struct PhysicsSandboxCollisionTriangle {
@@ -437,6 +451,87 @@ struct PhysicsSandboxCudaSearchIncumbent {
     bool preciseFinish = false;
 };
 
+enum class PhysicsSandboxCudaConditionOpcode : std::uint32_t {
+    Constant,
+    ConstantVector,
+    Scalar,
+    Vector,
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    KilometersPerHour,
+    Degrees,
+    Distance,
+    Greater,
+    Less,
+    GreaterOrEqual,
+    LessOrEqual,
+    Equal,
+    LogicalAnd,
+};
+
+enum class PhysicsSandboxCudaConditionValue : std::uint32_t {
+    Position,
+    PreviousPosition,
+    Velocity,
+    PreviousVelocity,
+    LocalVelocity,
+    PreviousLocalVelocity,
+    AngularVelocity,
+    PreviousAngularVelocity,
+    Yaw,
+    Pitch,
+    Roll,
+    PreviousYaw,
+    PreviousPitch,
+    PreviousRoll,
+    Speed,
+    PreviousSpeed,
+    LocalSpeed,
+    PreviousLocalSpeed,
+    FreeWheeling,
+    LateralContact,
+    Sliding,
+    Gear,
+    Rpm,
+    TurningRate,
+    TurboType,
+    TurboBoostFactor,
+    WheelGroundContact0,
+    WheelGroundContact1,
+    WheelGroundContact2,
+    WheelGroundContact3,
+    WheelSliding0,
+    WheelSliding1,
+    WheelSliding2,
+    WheelSliding3,
+    WheelSurface0,
+    WheelSurface1,
+    WheelSurface2,
+    WheelSurface3,
+    Iterations,
+    LastImprovementTime,
+    LastRestartTime,
+    CurrentTime,
+};
+
+struct PhysicsSandboxCudaConditionInstruction {
+    PhysicsSandboxCudaConditionOpcode opcode =
+            PhysicsSandboxCudaConditionOpcode::Constant;
+    PhysicsSandboxCudaConditionValue value =
+            PhysicsSandboxCudaConditionValue::Speed;
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
+};
+
+struct PhysicsSandboxCudaConditionProgram {
+    std::vector<PhysicsSandboxCudaConditionInstruction> instructions;
+    double lastImprovementTimeSeconds = 0.0;
+    double lastRestartTimeSeconds = 0.0;
+};
+
 struct PhysicsSandboxCudaSearchConfiguration {
     std::uint32_t maximumBatchSize = 1u;
     std::int64_t earliestMutationTimeMs = 0;
@@ -445,6 +540,7 @@ struct PhysicsSandboxCudaSearchConfiguration {
     std::vector<PhysicsSandboxCudaModifier> modifiers;
     PhysicsSandboxCudaEvaluator evaluator =
             PhysicsSandboxCudaFinishTimeEvaluator{};
+    std::optional<PhysicsSandboxCudaConditionProgram> condition;
     // Use the map-specific CUDA module, preparing it on demand if needed.
     bool useSessionSpecialization = false;
     // Retains the original materialization path for exact differential tests.
@@ -616,6 +712,9 @@ public:
             const std::function<bool()> &cancellationRequested) noexcept;
     PhysicsSandboxResult<std::uint32_t> ReserveBatchCapacity(
             std::uint32_t candidateCount) noexcept;
+    PhysicsSandboxResult<bool> UpdateConditionTimes(
+            double lastImprovementTimeSeconds,
+            double lastRestartTimeSeconds) noexcept;
 
 private:
     struct Impl;

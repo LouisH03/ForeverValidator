@@ -49,6 +49,17 @@ struct ReplaySimulationStateView {
     std::array<bool, 4> wheelContact{{true, true, true, true}};
     std::array<bool, 4> wheelHasSurface{{true, true, true, true}};
     GmVec3 cameraSupportUp{0.0f, 1.0f, 0.0f};
+    GmVec3 localSpeed{};
+    bool freeWheeling = false;
+    bool lateralContact = false;
+    bool sliding = false;
+    std::int32_t gear = 0;
+    float rpm = 0.0f;
+    float turningRate = 0.0f;
+    std::uint32_t turboType = 0u;
+    float turboBoostFactor = 0.0f;
+    std::array<bool, 4> wheelSliding{{false, false, false, false}};
+    std::array<std::uint16_t, 4> wheelSurface{{0u, 0u, 0u, 0u}};
 };
 
 struct ReplayCudaVehiclePrefixDifferential {

@@ -82,6 +82,10 @@ bool CudaSearchExecutor::ReserveBatchCapacity(
     return false;
 }
 
+bool CudaSearchExecutor::UpdateConditionTimes(double, double) noexcept {
+    return false;
+}
+
 std::uint32_t CudaSearchExecutor::BatchCapacity() const noexcept {
     return 0u;
 }

@@ -319,6 +319,32 @@ void CSceneVehicleCar::VehicleFreeWheelingSet(int isFreeWheeling) {
   controls.forcedLowSpeedFriction = isFreeWheeling != 0;
 }
 
+CSceneVehicleCar::SConditionState CSceneVehicleCar::ConditionState(void) const {
+  SConditionState result;
+  result.localSpeed = frameHistory.physicsCurrent.localLinearSpeed;
+  result.freeWheeling = controls.forcedLowSpeedFriction;
+  result.lateralContact = contacts.lateralSlowDownContactActive;
+  result.gear = engine.useLowSpeedGateB ? -1 : engine.gearIndex;
+  result.rpm = engine.engineInputMemory;
+  result.turningRate = radiusSteering.steerAngle;
+  result.turboType = static_cast<u32>(turbo.type);
+  result.turboBoostFactor = turbo.type == ETurboType_Roulette
+      ? GetRouletteCurrentBoostFactor()
+      : turbo.impulseScale;
+  const std::size_t count = std::min<std::size_t>(wheels.size(), 4u);
+  for (std::size_t index = 0u; index < count; ++index) {
+    const SSimulationWheel::SRealTimeState &wheel =
+        wheels[index].realTimeState;
+    result.wheelGroundContact[index] = wheel.contactPresent;
+    result.wheelSliding[index] = wheel.contactPresent && wheel.slipping;
+    result.wheelSurface[index] = wheel.contactPresent
+        ? static_cast<std::uint16_t>(wheel.contactMaterial)
+        : static_cast<std::uint16_t>(0xffffu);
+    result.sliding = result.sliding || result.wheelSliding[index];
+  }
+  return result;
+}
+
 void CSceneVehicleCar::BeginRaceSimulation(void) {
   integration.updateWheelVisuals = true;
   integration.integrateWheels = true;
