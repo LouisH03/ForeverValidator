@@ -538,6 +538,11 @@ public:
     PhysicsSandboxResult<PhysicsSandboxStateView> LoadReplay(
             ByteView replayBytes,
             const ReplayIdentity &identity) noexcept;
+    // Loads either a replay or a standalone Challenge.Gbx as a scenario.
+    // Standalone challenges are valid only with the canonical timeline mode.
+    PhysicsSandboxResult<PhysicsSandboxStateView> LoadScenario(
+            ByteView scenarioBytes,
+            const ReplayIdentity &identity) noexcept;
     PhysicsSandboxResult<std::string> ReadMapName()
             const noexcept;
     PhysicsSandboxResult<std::vector<PhysicsSandboxInputEvent>> ReadInputs()
@@ -560,6 +565,10 @@ public:
 
 private:
     struct Impl;
+    PhysicsSandboxResult<PhysicsSandboxStateView> LoadScenarioFile(
+            ByteView scenarioBytes,
+            const ReplayIdentity &identity,
+            bool acceptStandaloneChallenge) noexcept;
     explicit PhysicsSandbox(std::unique_ptr<Impl> impl);
     std::unique_ptr<Impl> impl_;
     friend PhysicsSandboxResult<PhysicsSandbox> CreatePhysicsSandbox(

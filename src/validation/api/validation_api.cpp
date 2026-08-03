@@ -2068,24 +2068,57 @@ SimulationBackend PhysicsSandbox::Backend() const noexcept {
 PhysicsSandboxResult<PhysicsSandboxStateView> PhysicsSandbox::LoadReplay(
         ByteView replayBytes,
         const ReplayIdentity &identity) noexcept {
+    return LoadScenarioFile(replayBytes, identity, false);
+}
+
+PhysicsSandboxResult<PhysicsSandboxStateView> PhysicsSandbox::LoadScenario(
+        ByteView scenarioBytes,
+        const ReplayIdentity &identity) noexcept {
+    return LoadScenarioFile(scenarioBytes, identity, true);
+}
+
+PhysicsSandboxResult<PhysicsSandboxStateView> PhysicsSandbox::LoadScenarioFile(
+        ByteView replayBytes,
+        const ReplayIdentity &identity,
+        bool acceptStandaloneChallenge) noexcept {
     try {
         if (!impl_ || !replayBytes.IsValid() || replayBytes.size == 0u ||
             identity.name.empty()) {
             return PhysicsSandboxResult<PhysicsSandboxStateView>::Failure(
                     SandboxError(PhysicsSandboxErrorCode::InvalidRequest,
-                                 "invalid sandbox replay request"));
+                                 "invalid sandbox scenario request"));
         }
         ReplayFile replay;
-        const ReplayFileReadError readError = ReadReplayBytes(
+        bool standaloneChallenge = false;
+        ReplayFileReadError readError = ReadReplayBytes(
                 reinterpret_cast<const std::uint8_t *>(replayBytes.data),
                 replayBytes.size,
                 &replay);
+        if (readError == ReplayFileReadError::InvalidContainer &&
+            acceptStandaloneChallenge) {
+            readError = ReadChallengeBytes(
+                    reinterpret_cast<const std::uint8_t *>(
+                            replayBytes.data),
+                    replayBytes.size,
+                    &replay);
+            standaloneChallenge =
+                    readError == ReplayFileReadError::Success;
+        }
         if (readError != ReplayFileReadError::Success) {
             return PhysicsSandboxResult<PhysicsSandboxStateView>::Failure(
                     SandboxError(
                             PhysicsSandboxErrorCode::ReplayLoadingFailed,
-                            "sandbox replay could not be decoded",
+                            "sandbox scenario could not be decoded",
                             ReplayDecodeError(readError, identity)));
+        }
+        if (standaloneChallenge &&
+            impl_->options.timelineMode !=
+                    PhysicsSandboxTimelineMode::Canonical) {
+            return PhysicsSandboxResult<PhysicsSandboxStateView>::Failure(
+                    SandboxError(
+                            PhysicsSandboxErrorCode::InvalidRequest,
+                            "standalone challenges require the canonical "
+                            "timeline mode"));
         }
         if (impl_->options.timelineMode ==
                     PhysicsSandboxTimelineMode::RecordedReplay &&
@@ -2101,7 +2134,7 @@ PhysicsSandboxResult<PhysicsSandboxStateView> PhysicsSandbox::LoadReplay(
             return PhysicsSandboxResult<PhysicsSandboxStateView>::Failure(
                     SandboxError(
                             PhysicsSandboxErrorCode::ReplayLoadingFailed,
-                            "sandbox replay route is unsupported",
+                            "sandbox scenario route is unsupported",
                             ReplayRouteError(routeResult, identity, replay)));
         }
         if (impl_->options.backend == SimulationBackend::Cuda &&

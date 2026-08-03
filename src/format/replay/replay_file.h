@@ -113,6 +113,10 @@ private:
             const std::uint8_t *bytes,
             std::size_t byteCount,
             ReplayFile *out);
+    friend ReplayFileReadError ReadChallengeBytes(
+            const std::uint8_t *bytes,
+            std::size_t byteCount,
+            ReplayFile *out);
     friend ReplayFileReadError ParseReplayStorage(
             const std::vector<std::uint8_t> &fileStorage,
             ReplayFile *out);
@@ -145,6 +149,10 @@ private:
 };
 
 ReplayFileReadError ReadReplayBytes(
+        const std::uint8_t *bytes,
+        std::size_t byteCount,
+        ReplayFile *out);
+ReplayFileReadError ReadChallengeBytes(
         const std::uint8_t *bytes,
         std::size_t byteCount,
         ReplayFile *out);

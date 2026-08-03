@@ -26,6 +26,7 @@ constexpr Byte GbxBinary = 0x42u;
 constexpr Byte GbxUncompressed = 0x55u;
 constexpr Byte GbxCompressed = 0x43u;
 constexpr Byte GbxReference = 0x52u;
+constexpr Byte GbxExternalReference = 0x45u;
 constexpr Nat32 GbxHeaderLengthMask = 0x7fffffffu;
 constexpr Nat32 GbxMaximumHeaderChunks = 0x1000u;
 constexpr Nat32 ArchiveFacade = 0xfacade01u;
@@ -985,17 +986,13 @@ ReplayFileReadError ParseChallengeBody(
     return ReplayFileReadError::Success;
 }
 
-ReplayFileReadError ReadEmbeddedChallenge(
-        const ReplayRecordSections &sections,
+ReplayFileReadError ReadChallengeContainer(
+        Bytes nested,
         CGameCtnReplayMapInput *outMap,
         ReplayChallengeMetadata *outMetadata) {
     if (outMap == nullptr || outMetadata == nullptr) {
         return ReplayFileReadError::InvalidRequest;
     }
-    if (!sections.embeddedChallenge.has_value()) {
-        return ReplayFileReadError::MissingEmbeddedChallenge;
-    }
-    const Bytes nested = *sections.embeddedChallenge;
     if (nested.size < 29u || nested.data[0] != 'G' ||
         nested.data[1] != 'B' || nested.data[2] != 'X') {
         return ReplayFileReadError::InvalidEmbeddedChallenge;
@@ -1016,7 +1013,8 @@ ReplayFileReadError ReadEmbeddedChallenge(
         nested.data[5] != GbxBinary ||
         nested.data[6] != GbxUncompressed ||
         nested.data[7] != GbxCompressed ||
-        nested.data[8] != GbxReference ||
+        (nested.data[8] != GbxReference &&
+         nested.data[8] != GbxExternalReference) ||
         headerChunkCount > GbxMaximumHeaderChunks ||
         headerSize < 4u || headerSize > nested.size ||
         17u > nested.size - headerSize) {
@@ -1093,6 +1091,17 @@ ReplayFileReadError ReadEmbeddedChallenge(
     }
     return ParseChallengeBody(
             challengeBody, referenceTable, outMap, outMetadata);
+}
+
+ReplayFileReadError ReadEmbeddedChallenge(
+        const ReplayRecordSections &sections,
+        CGameCtnReplayMapInput *outMap,
+        ReplayChallengeMetadata *outMetadata) {
+    if (!sections.embeddedChallenge.has_value()) {
+        return ReplayFileReadError::MissingEmbeddedChallenge;
+    }
+    return ReadChallengeContainer(
+            *sections.embeddedChallenge, outMap, outMetadata);
 }
 
 bool IsGhostWrappedChunk(Nat32 chunkId) {
@@ -2163,6 +2172,47 @@ ReplayFileReadError ReadReplayBytes(
     try {
         const std::vector<Byte> fileStorage(bytes, bytes + byteCount);
         return ParseReplayStorage(fileStorage, out);
+    } catch (const std::bad_alloc &) {
+        return ReplayFileReadError::AllocationFailed;
+    }
+}
+
+ReplayFileReadError ReadChallengeBytes(
+        const std::uint8_t *bytes,
+        std::size_t byteCount,
+        ReplayFile *out) {
+    if (out == nullptr || bytes == nullptr || byteCount == 0u) {
+        return ReplayFileReadError::InvalidRequest;
+    }
+    try {
+        CGameCtnReplayMapInput mapInput;
+        ReplayChallengeMetadata challengeMetadata;
+        const ReplayFileReadError error = ReadChallengeContainer(
+                {bytes, byteCount}, &mapInput, &challengeMetadata);
+        if (error != ReplayFileReadError::Success) {
+            return error;
+        }
+        ReplayArchiveIdentifier vehicleIdentifier =
+                challengeMetadata.challengeVehicle;
+        if (DecodeReplayVehicleModel(vehicleIdentifier.id) ==
+            ReplayVehicleModel::Unknown) {
+            const ReplayVehicleModel vehicle =
+                    DefaultReplayVehicleModel(DecodeReplayMapEnvironment(
+                            mapInput.DefaultCollectionName()));
+            if (vehicle != ReplayVehicleModel::Unknown) {
+                vehicleIdentifier.id = ReplayVehicleModelName(vehicle);
+            }
+        }
+        *out = ReplayFile(
+                {},
+                {},
+                {},
+                {},
+                std::move(mapInput),
+                std::move(challengeMetadata),
+                std::move(vehicleIdentifier),
+                false);
+        return ReplayFileReadError::Success;
     } catch (const std::bad_alloc &) {
         return ReplayFileReadError::AllocationFailed;
     }

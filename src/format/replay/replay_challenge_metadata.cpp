@@ -32,6 +32,22 @@ ReplayVehicleModel DecodeReplayVehicleModel(std::string_view identifier) {
     return ReplayVehicleModel::Unknown;
 }
 
+ReplayVehicleModel DefaultReplayVehicleModel(
+        ReplayMapEnvironment environment) {
+    switch (environment) {
+    case ReplayMapEnvironment::Alpine: return ReplayVehicleModel::SnowCar;
+    case ReplayMapEnvironment::Speed: return ReplayVehicleModel::DesertCar;
+    case ReplayMapEnvironment::Rally: return ReplayVehicleModel::RallyCar;
+    case ReplayMapEnvironment::Island: return ReplayVehicleModel::IslandCar;
+    case ReplayMapEnvironment::Coast: return ReplayVehicleModel::CoastCar;
+    case ReplayMapEnvironment::Bay: return ReplayVehicleModel::BayCar;
+    case ReplayMapEnvironment::Stadium:
+        return ReplayVehicleModel::StadiumCar;
+    case ReplayMapEnvironment::Unknown: return ReplayVehicleModel::Unknown;
+    }
+    return ReplayVehicleModel::Unknown;
+}
+
 const char *ReplayMapEnvironmentName(ReplayMapEnvironment environment) {
     switch (environment) {
     case ReplayMapEnvironment::Alpine: return "Alpine";

@@ -58,6 +58,8 @@ struct ReplayChallengeMetadata {
 
 ReplayMapEnvironment DecodeReplayMapEnvironment(std::string_view collection);
 ReplayVehicleModel DecodeReplayVehicleModel(std::string_view identifier);
+ReplayVehicleModel DefaultReplayVehicleModel(
+        ReplayMapEnvironment environment);
 const char *ReplayMapEnvironmentName(ReplayMapEnvironment environment);
 const char *ReplayVehicleModelName(ReplayVehicleModel vehicle);
 const char *EChallengePlayModeName(EChallengePlayMode playMode);
