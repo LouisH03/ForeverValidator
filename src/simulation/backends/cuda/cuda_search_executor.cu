@@ -1757,23 +1757,36 @@ __device__ bool SegmentEntry(
         const GmVec3 &from,
         const GmVec3 &to,
         double *fraction) {
+    const double fromValues[3]{from.x, from.y, from.z};
+    const double toValues[3]{to.x, to.y, to.z};
+    for (std::uint32_t axis = 0u; axis < 3u; ++axis) {
+        const double sweptMinimum =
+                fromValues[axis] < toValues[axis]
+                ? fromValues[axis] : toValues[axis];
+        const double sweptMaximum =
+                fromValues[axis] > toValues[axis]
+                ? fromValues[axis] : toValues[axis];
+        if (sweptMaximum < evaluator.values[axis] ||
+            sweptMinimum > evaluator.values[axis + 3u]) {
+            return false;
+        }
+    }
+
     double enter = 0.0;
     double leave = 1.0;
-    const double a[3]{from.x, from.y, from.z};
-    const double b[3]{to.x, to.y, to.z};
     for (std::uint32_t axis = 0u; axis < 3u; ++axis) {
-        const double delta = b[axis] - a[axis];
+        const double delta = toValues[axis] - fromValues[axis];
         if (fabs(delta) <= 1e-12) {
-            if (a[axis] < evaluator.values[axis] ||
-                a[axis] > evaluator.values[axis + 3u]) {
+            if (fromValues[axis] < evaluator.values[axis] ||
+                fromValues[axis] > evaluator.values[axis + 3u]) {
                 return false;
             }
             continue;
         }
         double near =
-                (evaluator.values[axis] - a[axis]) / delta;
+                (evaluator.values[axis] - fromValues[axis]) / delta;
         double far =
-                (evaluator.values[axis + 3u] - a[axis]) / delta;
+                (evaluator.values[axis + 3u] - fromValues[axis]) / delta;
         if (near > far) {
             const double swap = near;
             near = far;
